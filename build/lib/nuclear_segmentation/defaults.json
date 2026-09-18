@@ -1,0 +1,101 @@
+{
+  "RUN_MODE": "resume",
+  "AXES_OVERRIDE": null,
+  "TIME_INDEX": 0,
+  "VOXEL_SPACING_OVERRIDE_UM": null,
+  "NOMINAL_SECTION_THICKNESS_UM": 60.0,
+  "USE_OME_ZARR_CACHE": false,
+  "OME_ZARR_CACHE_DIRECTORY": null,
+  "OME_ZARR_CHUNKS_CZYX": [
+    1,
+    8,
+    256,
+    256
+  ],
+  "CHANNELS": [
+    {
+      "name": "DAPI",
+      "index": 0,
+      "role": "segmentation",
+      "measure": true,
+      "filter_enabled": true,
+      "filter_min": null,
+      "filter_max": null,
+      "colormap": "cyan"
+    },
+    {
+      "name": "CC3",
+      "index": 1,
+      "role": "measurement",
+      "measure": true,
+      "filter_enabled": true,
+      "filter_min": null,
+      "filter_max": null,
+      "colormap": "green"
+    },
+    {
+      "name": "VGLUT",
+      "index": 2,
+      "role": "measurement",
+      "measure": true,
+      "filter_enabled": true,
+      "filter_min": null,
+      "filter_max": null,
+      "colormap": "red"
+    },
+    {
+      "name": "MAP2",
+      "index": 3,
+      "role": "measurement",
+      "measure": true,
+      "filter_enabled": true,
+      "filter_min": null,
+      "filter_max": null,
+      "colormap": "magenta"
+    }
+  ],
+  "SEGMENTATION_CHANNEL": "DAPI",
+  "PERINUCLEAR_MARKERS": [
+    {
+      "name": "MAP2",
+      "enabled": true,
+      "ring_inner_um": 0.0,
+      "ring_outer_um": 1.0,
+      "pixel_threshold": null,
+      "initial_min_positive_fraction": 0.1
+    },
+    {
+      "name": "VGLUT",
+      "enabled": true,
+      "ring_inner_um": 0.0,
+      "ring_outer_um": 2.0,
+      "pixel_threshold": null,
+      "initial_min_positive_fraction": 0.1
+    }
+  ],
+  "PERINUCLEAR_COMBINATION": "all",
+  "MODEL_NAME": "cpsam_v2",
+  "CELLPROB_THRESHOLD": -1.0,
+  "CELLPOSE_MIN_SIZE_VOXELS": 100,
+  "BATCH_SIZE": 32,
+  "FLOW3D_SMOOTH": [
+    1,
+    0,
+    0
+  ],
+  "DIAMETER_PIXELS": null,
+  "INITIAL_MIN_VOLUME_UM3": null,
+  "INITIAL_MIN_SPHERICITY": 0.45,
+  "INITIAL_FIRST_TISSUE_Z": 0,
+  "INITIAL_LAST_TISSUE_Z": null,
+  "INITIAL_Z_GUARD_UM": 0.0,
+  "INITIAL_Z_GUARD_MODE": "first",
+  "FILTER_COMBINATION": "all",
+  "INTENSITY_MODE": "raw",
+  "GLOBAL_BACKGROUND_PERCENTILE": 50.0,
+  "CUSTOM_SAMPLE_NAME": null,
+  "COMPUTE_INPUT_SHA256": true,
+  "PDF_AUTHOR": "Nikollas",
+  "MNTB_ROI_MODE": "per_slice",
+  "MNTB_ROI_MASK_PATH": null
+}

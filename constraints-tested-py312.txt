@@ -1,0 +1,11 @@
+# Exact primary versions validated on Linux / Python 3.12.14, 2026-09-18.
+napari==0.9.1
+numpy==2.5.3
+scipy==1.18.1
+pandas==3.0.6
+scikit-image==0.26.0
+tifffile==2026.9.15
+matplotlib==3.11.2
+magicgui==0.10.2
+qtpy==2.4.3
+PyQt6==6.11.0

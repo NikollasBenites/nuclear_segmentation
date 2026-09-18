@@ -1,0 +1,8 @@
+{
+  "scientific_reference": "general_nuclei_segmentation_m3_v5_5_live_perinuclear_shells.ipynb",
+  "sha256_original_m3": "635a3b5c2c16d4630e5184a904728fda4b02c55375f9454684a22ceec19cf0ec",
+  "windows_reference": "general_nuclei_segmentation_v5_5_live_perinuclear_shells.ipynb",
+  "synchronization": "M3 settings, core, density text and QC carried to Windows; Qt event-loop cell shared; cleared historical outputs",
+  "app_version": "0.2.0",
+  "dependency_validation_date": "2026-09-18"
+}
