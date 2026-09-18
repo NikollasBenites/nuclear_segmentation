@@ -20,14 +20,14 @@ first_z_widget = Slider(
     min=0,
     max=max_z_index,
     step=1,
-    label="first tissue Z",
+    label="First Z plane",
 )
 last_z_widget = Slider(
     value=int(np.clip(default_last_z, 0, max_z_index)),
     min=0,
     max=max_z_index,
     step=1,
-    label="last tissue Z",
+    label="Last z plane",
 )
 max_guard_um = max(1.0, float(np.ceil(max_z_index * z_spacing_um / 2)))
 guard_widget = FloatSlider(
@@ -40,7 +40,7 @@ guard_widget = FloatSlider(
 guard_mode_widget = ComboBox(
     value=INITIAL_Z_GUARD_MODE,
     choices=["none", "first", "last", "both"],
-    label="Z guard mode",
+    label="Stereology mode",
 )
 
 maximum_volume = float(np.ceil(filter_properties["volume_um3"].max()))
@@ -49,20 +49,20 @@ volume_widget = FloatSlider(
     min=0.0,
     max=maximum_volume,
     step=max(0.1, maximum_volume / 1000),
-    label="minimum volume (µm³)",
+    label="Minimum volume (µm³)",
 )
 sphericity_widget = FloatSlider(
     value=float(INITIAL_MIN_SPHERICITY),
     min=0.0,
     max=1.0,
     step=0.01,
-    label="minimum sphericity",
+    label="Minimum sphericity",
 )
 
 perinuclear_combination_widget = ComboBox(
     value=PERINUCLEAR_COMBINATION,
     choices=["any", "all"],
-    label="combine perinuclear markers",
+    label="Combine perinuclear markers",
 )
 perinuclear_widgets = {}
 perinuclear_widget_list = []
@@ -72,7 +72,7 @@ for marker_name, marker_info in PERINUCLEAR_MARKER_RESULTS.items():
         min=0.0,
         max=1.0,
         step=0.01,
-        label=f"minimum {marker_name}-positive ring fraction",
+        label=f"Minimum {marker_name}-positive fraction",
     )
     perinuclear_widgets[marker_name] = {
         "column": marker_info["fraction_column"],
@@ -83,7 +83,7 @@ for marker_name, marker_info in PERINUCLEAR_MARKER_RESULTS.items():
 combination_widget = ComboBox(
     value=FILTER_COMBINATION,
     choices=["all", "any"],
-    label="combine nuclear intensity filters",
+    label="Combine intensity filters",
 )
 intensity_widgets = {}
 intensity_widget_list = []
@@ -111,14 +111,14 @@ for item in CHANNELS:
         min=observed_min,
         max=observed_max,
         step=step,
-        label=f"{name} minimum",
+        label=f"{name} Minimum",
     )
     maximum_widget = FloatSlider(
         value=float(np.clip(start_max, observed_min, observed_max)),
         min=observed_min,
         max=observed_max,
         step=step,
-        label=f"{name} maximum",
+        label=f"{name} Maximum",
     )
     intensity_widgets[name] = {
         "column": column,
@@ -128,7 +128,7 @@ for item in CHANNELS:
     intensity_widget_list.extend([minimum_widget, maximum_widget])
 
 count_label = Label(value="Masks kept: --")
-guard_count_label = Label(value="Z guard excluded: --")
+guard_count_label = Label(value="Guard excluded: --")
 status_label = Label(value="Ready")
 refresh_button = PushButton(text="Refresh filters")
 
@@ -152,8 +152,8 @@ filter_panel = Container(
     layout="vertical",
 )
 
-live_layer_name = "live filtered masks"
-guard_layer_name = "excluded by Z guard"
+live_layer_name = "Live filtered masks"
+guard_layer_name = "Excluded by guard"
 current_keep = None
 filtered_masks = None
 
@@ -317,7 +317,7 @@ def refresh_live_filter(*_):
             f"Masks kept: {int(current_keep.sum())} / {len(current_keep)}"
         )
         guard_count_label.value = (
-            f"Z guard excluded: {int(guard_excluded.sum())}"
+            f"Guard excluded: {int(guard_excluded.sum())}"
         )
         density_result = calculate_density_summary(roi_plane_counts, settings, VOXEL_SPACING_UM, int(current_keep.sum()), roi_reviewed)
         roi_volume_label.value = format_density_panel(density_result)
@@ -329,9 +329,9 @@ def refresh_live_filter(*_):
         status_label.value = "Valid filter settings"
         viewer.status = (
             f"Kept {int(current_keep.sum())}/{len(current_keep)} | "
-            f"perinuclear markers: {settings['perinuclear_combination']} | "
-            f"volume ≥ {settings['minimum_volume_um3']:.1f} µm³ | "
-            f"sphericity ≥ {settings['minimum_sphericity']:.2f}"
+            f"Perinuclear markers: {settings['perinuclear_combination']} | "
+            f"Volume ≥ {settings['minimum_volume_um3']:.1f} µm³ | "
+            f"Sphericity ≥ {settings['minimum_sphericity']:.2f}"
         )
     except ValueError as error:
         current_keep = None
