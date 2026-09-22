@@ -1,5 +1,4 @@
-# Nuclear Segmentation 0.2.0
-
+# Nuclear Segmentation
 Aplicativo desktop em Python + Napari baseado no notebook M3 v5.5 de Nikollas.
 Mesmas configurações e regras científicas em macOS Apple Silicon e Windows.
 Não exige Jupyter nem execução de células. Esta primeira versão é um pacote
