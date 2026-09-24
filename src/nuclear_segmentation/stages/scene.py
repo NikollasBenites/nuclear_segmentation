@@ -1,7 +1,7 @@
 # Derived from the synchronized M3 v5.5 workflow. Executed in a session namespace.
 for item in CHANNELS:
     viewer.add_image(
-        channel_volumes[item["name"]],
+        globals().get('original_channel_volumes', channel_volumes)[item["name"]],
         name=f"channel {item['index']}: {item['name']}",
         scale=VOXEL_SPACING_UM,
         colormap=item.get("colormap", "gray"),

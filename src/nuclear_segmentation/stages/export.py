@@ -3,8 +3,6 @@ if not roi_reviewed:
     raise RuntimeError("Review the MNTB ROI across Z and click Accept reviewed MNTB ROI before export.")
 if current_keep is None or filtered_masks is None:
     raise RuntimeError("Run the live filtering cell before exporting.")
-if int(current_keep.sum()) == 0:
-    raise ValueError("The current filters retain zero masks; adjust them before export.")
 
 parent_window = getattr(viewer.window, "_qt_window", None)
 selected_output_folder = QFileDialog.getExistingDirectory(
@@ -119,6 +117,7 @@ mask_results["fails_perinuclear_combination"] = (
 ).astype(bool)
 
 reason_columns = {
+    "excluded_manually": "manual exclusion",
     "excluded_by_sampling_roi": "outside sampling ROI or Z range",
     "fails_volume_filter": "physical volume",
     "fails_sphericity_filter": "sphericity",
@@ -231,11 +230,16 @@ for marker_name, marker_info in PERINUCLEAR_MARKER_RESULTS.items():
     )
 
 configuration = {
-    "schema_version": 5,
+    "schema_version": 7,
+    "manual_review": manual_review.to_record(),
     "nominal_section_thickness_um": float(NOMINAL_SECTION_THICKNESS_UM),
     "mntb_roi": {"source": roi_source, "mask_file": "mntb_roi.tif", "reviewed": True},
     "analysis_date": datetime.now().isoformat(timespec="seconds"),
-    "future_direction": "Convert this notebook into a standalone application.",
+    "export_corrected_images": EXPORT_CORRECTED_IMAGES,
+    "z_corrections": Z_CORRECTIONS,
+    "z_correction_source": Z_CORRECTION_SOURCE,
+    "z_correction_reports": globals().get('z_correction_reports', {}),
+    "object_interpretation": "Validate whether masks represent nuclei or somas; legacy nuclei column names are retained.",
     "input": {
         "path_at_analysis": str(DEFAULT_INPUT),
         "filename": DEFAULT_INPUT.name,
@@ -259,6 +263,10 @@ configuration = {
         "batch_size": BATCH_SIZE,
         "flow3d_smooth": FLOW3D_SMOOTH,
         "diameter_pixels": DIAMETER_PIXELS,
+        "resample": CELLPOSE_RESAMPLE,
+        "rescale": CELLPOSE_RESCALE,
+        "normalize": CELLPOSE_NORMALIZE,
+        "roi_normalization": CELLPOSE_ROI_NORMALIZATION,
         "used_gpu": (previous_config.get("cellpose", {}).get("used_gpu") if RUN_MODE == "resume" else bool(DEVICE.type != "cpu")),
         "device": (previous_config.get("cellpose", {}).get("device", "not recorded") if RUN_MODE == "resume" else str(DEVICE)),
         "model_load_seconds": CELLPOSE_MODEL_LOAD_SECONDS,
@@ -274,6 +282,12 @@ configuration = {
 config_json_path.write_text(json.dumps(configuration, indent=2), encoding="utf-8")
 
 mask_results.reset_index().to_csv(all_masks_csv_path, index=False)
+manual_table = filter_properties[['manual_decision', 'manual_reason', 'automatic_keep',
+                                  'automatic_failure_reasons', 'excluded_by_z_guard',
+                                  'excluded_by_sampling_roi']].copy()
+manual_table['retained'] = final_keep
+manual_table.index.name = 'mask_id'
+manual_table.reset_index().to_csv(sample_export_directory / 'manual_mask_review.csv', index=False)
 retained_results.reset_index().to_csv(retained_csv_path, index=False)
 excluded_results.reset_index().to_csv(excluded_csv_path, index=False)
 guard_results.reset_index().to_csv(guard_csv_path, index=False)
@@ -535,3 +549,27 @@ print(f"Analysis package saved to:\n{sample_export_directory}")
 print("\nCreated files:")
 for created_file in created_files:
     print(f"  {created_file.name}")
+
+# Explicit per-plane provenance for corrected intensities.
+z_rows = []
+for name, report in globals().get('z_correction_reports', {}).items():
+    for z, gain in enumerate(report['gain']):
+        z_rows.append(dict(channel=name, z_index=z, gain=gain,
+                           reference_intensity=report['observed_profile'][z],
+                           smoothed_reference=report['smoothed_profile'][z],
+                           measurement_corrected=report['options']['measurement'],
+                           segmentation_corrected=report['options']['segmentation']))
+if z_rows:
+    pd.DataFrame(z_rows).to_csv(sample_export_directory / 'z_correction_profiles.csv', index=False)
+
+if EXPORT_CORRECTED_IMAGES and globals().get('z_corrected_volumes'):
+    from nuclear_segmentation.image_export import export_images
+    corrected_names = list(z_corrected_volumes)
+    corrected_image_path = export_images(
+        sample_export_directory / 'corrected_channels.ome.tif',
+        [z_corrected_volumes[name] for name in corrected_names],
+        [name + ' — Z corrected' for name in corrected_names], VOXEL_SPACING_UM,
+        [dict(channel=name, source_path=str(DEFAULT_INPUT), corrected=True,
+              correction=z_correction_reports[name]) for name in corrected_names],
+        [DEFAULT_INPUT])
+    print('Corrected image data saved:', corrected_image_path)

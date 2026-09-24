@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nuclear-segmentation-app"
-version = "0.2.0"
+version = "0.6.0"
 description = "Desktop Napari workflow for 3D nuclear segmentation, perinuclear markers and calibrated density"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "numpy>=2.5.3", "scipy>=1.18.1", "pandas>=3.0.6",
   "scikit-image>=0.26.0", "tifffile>=2026.9.15",
-  "matplotlib>=3.11.2", "napari>=0.9.1", "magicgui>=0.10.2", "qtpy>=2.4.3"
+  "matplotlib>=3.11.2", "numba>=0.61", "napari>=0.9.1", "magicgui>=0.10.2", "qtpy>=2.4.3"
 ]
 
 [project.optional-dependencies]

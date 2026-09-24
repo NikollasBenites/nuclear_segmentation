@@ -177,6 +177,9 @@ else:
         "cellprob_threshold": CELLPROB_THRESHOLD,
         "min_size": CELLPOSE_MIN_SIZE_VOXELS,
         "progress": True,
+        "resample": CELLPOSE_RESAMPLE,
+        "rescale": CELLPOSE_RESCALE,
+        "normalize": CELLPOSE_NORMALIZE,
     }
 
 
@@ -225,7 +228,7 @@ else:
     evaluation_start = perf_counter()
 
     masks, flows, styles = model.eval(
-        segmentation_volume,
+        globals().get('model_input_volume', segmentation_volume).copy(),
         **eval_parameters,
     )
 

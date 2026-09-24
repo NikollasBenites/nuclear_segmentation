@@ -32,6 +32,27 @@ def validate_config(data):
         raise ValueError('ROI mode must be per_slice or constant_xy.')
     if int(result['BATCH_SIZE']) < 1 or int(result['CELLPOSE_MIN_SIZE_VOXELS']) < 0:
         raise ValueError('Invalid batch size or minimum mask size.')
+    if type(result['CELLPOSE_RESAMPLE']) is not bool:
+        raise ValueError('CELLPOSE_RESAMPLE must be true or false.')
+    rescale = result['CELLPOSE_RESCALE']
+    if rescale is not None and (type(rescale) not in (int, float) or not math.isfinite(rescale) or rescale <= 0):
+        raise ValueError('CELLPOSE_RESCALE must be null or a positive finite number.')
+    if type(result['CELLPOSE_NORMALIZE']) not in (bool, dict):
+        raise ValueError('CELLPOSE_NORMALIZE must be true, false, or a JSON object of Cellpose normalization options.')
+    if result['CELLPOSE_ROI_NORMALIZATION'] is not None and not isinstance(result['CELLPOSE_ROI_NORMALIZATION'], dict):
+        raise ValueError('CELLPOSE_ROI_NORMALIZATION must be null or an object.')
+    from .z_correction import validate_options
+    if not isinstance(result['Z_CORRECTIONS'], dict):
+        raise ValueError('Z_CORRECTIONS must be a channel-to-options object.')
+    names = {c['name'] for c in result['CHANNELS']}
+    for name, options in result['Z_CORRECTIONS'].items():
+        if name not in names:
+            raise ValueError('Unknown correction channel: ' + name)
+        result['Z_CORRECTIONS'][name] = validate_options(options)
+    if result['Z_CORRECTIONS'] and result['CELLPOSE_ROI_NORMALIZATION'] is not None:
+        raise ValueError('Reset the old ROI normalization limits before applying Z correction. They were calculated on the original image.')
+    if type(result['EXPORT_CORRECTED_IMAGES']) is not bool:
+        raise ValueError('EXPORT_CORRECTED_IMAGES must be true or false.')
     return result
 
 

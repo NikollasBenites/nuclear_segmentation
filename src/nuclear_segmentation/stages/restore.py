@@ -32,6 +32,8 @@ if RUN_MODE in {"resume", "density_only"}:
     NOMINAL_SECTION_THICKNESS_UM = float(previous_config.get("nominal_section_thickness_um", NOMINAL_SECTION_THICKNESS_UM))
     CHANNELS = previous_config["channels"]
     SEGMENTATION_CHANNEL = previous_config["segmentation_channel"]
+    Z_CORRECTIONS = previous_config.get("z_corrections", {})
+    Z_CORRECTION_SOURCE = previous_config.get("z_correction_source")
     FILTER_COMBINATION = previous_config["filters"]["intensity_combination"]
     INTENSITY_MODE = previous_config["intensity_measurements"]["mode"]
     GLOBAL_BACKGROUND_PERCENTILE = previous_config[
@@ -51,6 +53,11 @@ if RUN_MODE in {"resume", "density_only"}:
     BATCH_SIZE = previous_config["cellpose"]["batch_size"]
     FLOW3D_SMOOTH = previous_config["cellpose"].get("flow3d_smooth")
     DIAMETER_PIXELS = previous_config["cellpose"].get("diameter_pixels")
+    # Older exports used Cellpose defaults. Do not inherit new-session choices.
+    CELLPOSE_RESAMPLE = previous_config["cellpose"].get("resample", True)
+    CELLPOSE_RESCALE = previous_config["cellpose"].get("rescale", None)
+    CELLPOSE_NORMALIZE = previous_config["cellpose"].get("normalize", True)
+    CELLPOSE_ROI_NORMALIZATION = previous_config["cellpose"].get("roi_normalization")
 
     if "perinuclear_markers" in previous_config:
         PERINUCLEAR_MARKERS = []

@@ -1,16 +1,33 @@
 # Derived from the synchronized M3 v5.5 workflow. Executed in a session namespace.
-if SEGMENTATION_CHANNEL != "DAPI":
-    raise ValueError(
-        "This perinuclear-marker workflow requires DAPI as the segmentation channel."
-    )
 if PERINUCLEAR_COMBINATION not in {"any", "all"}:
     raise ValueError('PERINUCLEAR_COMBINATION must be "any" or "all".')
 
 enabled_perinuclear_markers = [
-    dict(item) for item in PERINUCLEAR_MARKERS if item.get("enabled", True)
+    dict(item)
+    for item in PERINUCLEAR_MARKERS
+    if item.get("enabled", True)
 ]
+
+PERINUCLEAR_MARKER_RESULTS = {}
+perinuclear_metric_tables = []
+
 if not enabled_perinuclear_markers:
-    raise ValueError("Enable at least one item in PERINUCLEAR_MARKERS.")
+
+    print(
+        "No perinuclear markers are enabled. "
+        "Skipping perinuclear-marker analysis."
+    )
+
+    perinuclear_metrics = pd.DataFrame(
+        index=mask_properties.index
+    )
+
+else:
+
+    marker_names = [
+        str(item["name"])
+        for item in enabled_perinuclear_markers
+    ]
 
 marker_names = [str(item["name"]) for item in enabled_perinuclear_markers]
 marker_keys = [safe_key(name).lower() for name in marker_names]
@@ -110,5 +127,19 @@ for marker_configuration in enabled_perinuclear_markers:
         f"initially associated {int(initial_keep.sum())}/{len(initial_keep)} nuclei."
     )
 
-perinuclear_metrics = pd.concat(perinuclear_metric_tables, axis=1)
-display(perinuclear_metrics.describe().T)
+if perinuclear_metric_tables:
+
+    perinuclear_metrics = pd.concat(
+        perinuclear_metric_tables,
+        axis=1
+    )
+
+    display(
+        perinuclear_metrics.describe().T
+    )
+
+else:
+
+    perinuclear_metrics = pd.DataFrame(
+        index=mask_properties.index
+    )

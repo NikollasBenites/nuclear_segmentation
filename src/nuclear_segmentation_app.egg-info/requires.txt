@@ -4,6 +4,7 @@ pandas>=3.0.6
 scikit-image>=0.26.0
 tifffile>=2026.9.15
 matplotlib>=3.11.2
+numba>=0.61
 napari>=0.9.1
 magicgui>=0.10.2
 qtpy>=2.4.3

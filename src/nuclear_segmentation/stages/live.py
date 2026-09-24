@@ -250,7 +250,25 @@ def apply_filter_settings(settings):
     filter_properties["centroid_in_mntb_roi"] = roi_inside
     filter_properties["centroid_in_sampling_z"] = centroid_in_z
     filter_properties["excluded_by_sampling_roi"] = ~(roi_inside & centroid_in_z)
-    return morphology_keep & perinuclear_keep & intensity_keep & roi_inside & centroid_in_z
+    eligible = (~filter_properties['excluded_by_z_guard']) & roi_inside & centroid_in_z
+    automatic = morphology_keep & perinuclear_keep & intensity_keep & eligible
+    filter_properties['automatic_keep'] = automatic
+    reasons = []
+    for label, row in filter_properties.iterrows():
+        failed = []
+        if not row['volume_um3'] >= settings['minimum_volume_um3']: failed.append('volume')
+        if not row['sphericity'] >= settings['minimum_sphericity']: failed.append('sphericity')
+        if not perinuclear_keep.loc[label]: failed.append('shell association')
+        if not intensity_keep.loc[label]: failed.append('intensity')
+        if row['excluded_by_z_guard']: failed.append('Z guard')
+        if row['excluded_by_sampling_roi']: failed.append('ROI / counting Z')
+        reasons.append('; '.join(failed))
+    filter_properties['automatic_failure_reasons'] = reasons
+    review = manual_review.decisions
+    filter_properties['manual_decision'] = [review.get(int(i), {}).get('decision', 'automatic') for i in filter_properties.index]
+    filter_properties['manual_reason'] = [review.get(int(i), {}).get('reason', '') for i in filter_properties.index]
+    filter_properties['excluded_manually'] = filter_properties['manual_decision'] == 'exclude'
+    return manual_review.apply(automatic, eligible)
 
 
 def refresh_live_filter(*_):
@@ -341,6 +359,9 @@ def refresh_live_filter(*_):
         status_label.value = f"Invalid settings: {error}"
         viewer.status = str(error)
 
+    if 'manual_review_panel' in globals():
+        manual_review_panel.refresh()
+
 
 for widget in [
     first_z_widget,
@@ -401,6 +422,7 @@ def invalidate_mntb_roi(*_):
     roi_reviewed = False
     density_label.value = "ROI changed: accept reviewed ROI to recalculate"
     roi_volume_label.value = "ROI volume: pending review"
+    if 'manual_review_panel' in globals(): manual_review_panel.refresh()
 
 roi_review_button.changed.connect(accept_mntb_roi)
 # Disconnect callbacks when this cell is rerun in an existing viewer.

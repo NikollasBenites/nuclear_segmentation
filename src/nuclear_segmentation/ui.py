@@ -19,15 +19,16 @@ class Worker(QObject):
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, config, image, previous):
+    def __init__(self, config, image, previous, preview=False):
         super().__init__()
         self.arguments = (config, image, previous)
+        self.preview = preview
 
     @Slot()
     def run(self):
         try:
             session = AnalysisSession(*self.arguments, log=self.progress.emit)
-            self.completed.emit(session.prepare())
+            self.completed.emit(session.prepare(preview_only=True) if self.preview else session.prepare())
         except Exception:
             self.failed.emit(traceback.format_exc())
         finally:
@@ -96,6 +97,8 @@ class Launcher(QWidget):
         super().__init__()
         self.viewer = viewer
         self.session = None
+        self.matching_workspaces = []
+        self.normalization_preview = None
         self.running = False
         self.config = defaults()
         layout = QVBoxLayout(self)
@@ -121,6 +124,7 @@ class Launcher(QWidget):
         self.roi_mode = QComboBox();self.roi_mode.addItems(['per_slice', 'constant_xy']);params.addRow('ROI reconstruction',self.roi_mode)
         self.axes = QLineEdit();self.axes.setPlaceholderText('Auto from TIFF metadata');params.addRow('Axes override',self.axes)
         self.spacing = QLineEdit();self.spacing.setPlaceholderText('Auto, or Z,Y,X in µm');params.addRow('Voxel spacing override', self.spacing)
+        self.segmentation_channel = QLineEdit(); params.addRow('Segmentation channel', self.segmentation_channel)
         self.model = QLineEdit();params.addRow('Cellpose model / local path',self.model)
         self.prob = double(-1, -100, 100);params.addRow('cellprob_threshold', self.prob)
         self.min_size = QSpinBox();self.min_size.setRange(0,100000000);params.addRow('Cellpose min_size (voxels)',self.min_size)
@@ -128,6 +132,7 @@ class Launcher(QWidget):
         self.smooth = QLineEdit();params.addRow('flow3D_smooth (number or [Z,Y,X])',self.smooth)
         self.device = QComboBox();self.device.addItems(['auto','cpu']);params.addRow('Processing device',self.device)
         self.cache = QCheckBox('Use optional OME-Zarr cache');params.addRow(self.cache)
+        self.export_corrected = QCheckBox('Include corrected images in analysis export'); params.addRow(self.export_corrected)
         self.sample = QLineEdit();self.sample.setPlaceholderText('Use TIFF filename');params.addRow('Export sample name',self.sample)
         explanation = QLabel('3D segmentation uses calibrated anisotropy.\nAuto device: NVIDIA CUDA → Apple MPS → CPU.\nThickness correction uses the live first/last tissue Z, before guards.')
         explanation.setWordWrap(True);params.addRow(explanation)
@@ -148,6 +153,12 @@ class Launcher(QWidget):
         for label, callback in [('Load preset',self.load_preset),('Save preset',self.save_preset),('Advanced settings',self.advanced)]:
             b=QPushButton(label);b.clicked.connect(lambda checked=False, fn=callback:self.safe(fn));presetbar.addWidget(b)
         layout.addLayout(presetbar)
+        self.preview_button = QPushButton('Load layers / Z correction / normalization')
+        self.preview_button.clicked.connect(lambda:self.safe(lambda:self.start_analysis(preview=True)))
+        layout.addWidget(self.preview_button)
+        matching = QPushButton('Open DAPI matching')
+        matching.clicked.connect(lambda:self.safe(self.open_matching))
+        layout.addWidget(matching)
         self.start = QPushButton('Start analysis');self.start.clicked.connect(lambda:self.safe(self.start_analysis));layout.addWidget(self.start)
         self.progress = QProgressBar();self.progress.setRange(0,1);self.progress.setValue(0);layout.addWidget(self.progress)
         bar=QHBoxLayout()
@@ -157,6 +168,17 @@ class Launcher(QWidget):
         layout.addLayout(bar)
         self.apply_config(self.config)
         self.setMinimumWidth(470)
+
+    def open_matching(self):
+        from .matching_ui import open_matching_workspace
+        if self.matching_workspaces:
+            try:
+                window = self.matching_workspaces[0][0].window._qt_window
+                if window.isVisible():
+                    window.raise_(); window.activateWindow(); return
+            except RuntimeError:
+                pass
+        self.matching_workspaces = [open_matching_workspace()]
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.Close and self.running:
@@ -190,6 +212,8 @@ class Launcher(QWidget):
         self.roi_path.setText(str(c['MNTB_ROI_MASK_PATH'] or ''))
         self.axes.setText(c['AXES_OVERRIDE'] or '')
         self.spacing.setText(','.join(map(str,c['VOXEL_SPACING_OVERRIDE_UM'])) if c['VOXEL_SPACING_OVERRIDE_UM'] else '')
+        self.segmentation_channel.setText(c['SEGMENTATION_CHANNEL'])
+        self.export_corrected.setChecked(c['EXPORT_CORRECTED_IMAGES'])
         self.model.setText(c['MODEL_NAME']);self.prob.setValue(c['CELLPROB_THRESHOLD'])
         self.min_size.setValue(c['CELLPOSE_MIN_SIZE_VOXELS']);self.batch.setValue(c['BATCH_SIZE'])
         self.smooth.setText(json.dumps(c['FLOW3D_SMOOTH']));self.device.setCurrentText(c['PROCESSING_DEVICE'])
@@ -202,13 +226,15 @@ class Launcher(QWidget):
                  MNTB_ROI_MODE=self.roi_mode.currentText(),MNTB_ROI_MASK_PATH=self.roi_path.text().strip() or None,
                  AXES_OVERRIDE=self.axes.text().strip() or None,
                  VOXEL_SPACING_OVERRIDE_UM=[float(x) for x in self.spacing.text().split(',')] if self.spacing.text().strip() else None,
+                 SEGMENTATION_CHANNEL=self.segmentation_channel.text().strip(),
                  MODEL_NAME=self.model.text().strip(),CELLPROB_THRESHOLD=self.prob.value(),
                  CELLPOSE_MIN_SIZE_VOXELS=self.min_size.value(),BATCH_SIZE=self.batch.value(),
                  FLOW3D_SMOOTH=json.loads(self.smooth.text()),PROCESSING_DEVICE=self.device.currentText(),
+                 EXPORT_CORRECTED_IMAGES=self.export_corrected.isChecked(),
                  USE_OME_ZARR_CACHE=self.cache.isChecked(),CUSTOM_SAMPLE_NAME=self.sample.text().strip() or None,
                  CHANNELS=self.channels.get_records(),PERINUCLEAR_MARKERS=self.markers.get_records())
         for channel in c['CHANNELS']:
-            channel['role'] = ('segmentation' if channel['name'] == c['SEGMENTATION_CHANNEL'] else channel.get('role', 'measurement'))
+            channel['role'] = ('segmentation' if channel['name'] == c['SEGMENTATION_CHANNEL'] else 'measurement')
             channel['colormap'] = channel.get('colormap') or 'gray'
         return validate_config(c)
 
@@ -229,29 +255,44 @@ class Launcher(QWidget):
         buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject);layout.addWidget(buttons)
         if dialog.exec():self.apply_config(json.loads(editor.toPlainText()))
 
-    def start_analysis(self):
+    def start_analysis(self, preview=False):
         if self.running:return
         config=self.get_config();image=Path(self.image_path.text().strip())
         previous=self.previous_path.text().strip() or None
         if not image.is_file():raise ValueError('Choose the original cropped TIFF.')
+        if preview and config['RUN_MODE'] != 'segment':
+            raise ValueError('Select New segmentation to preview normalization before running Cellpose.')
         if config['RUN_MODE']!='segment' and (not previous or not (Path(previous)/'analysis_config.json').is_file()):
             raise ValueError('Choose the original exported analysis folder containing analysis_config.json.')
         if self.session:
-            if QMessageBox.question(self,'Replace current view?','Save any ROI edits first. Replace the current analysis view?') != QMessageBox.StandardButton.Yes:return
+            if QMessageBox.question(self,'Replace current view?','Export results to save manual review and ROI edits first. Replace the current analysis view?') != QMessageBox.StandardButton.Yes:return
             ns=self.session.ns
+            if 'manual_review_panel' in ns: ns['manual_review_panel'].close()
             for key in ('filter_dock_widget','retrospective_panel'):
                 if key in ns:
                     widget=ns[key];self.viewer.window.remove_dock_widget(getattr(widget,'native',widget))
             self.viewer.layers.clear();self.session=None
-        self.running=True;self.start.setEnabled(False)
+        if self.normalization_preview is not None:
+            if not preview:self.normalization_preview.ensure_current()
+            self.normalization_preview.close_preview()
+            self.normalization_preview = None
+        self.running=True;self.start.setEnabled(False);self.preview_button.setEnabled(False)
         for b in (self.export_button,self.qc_button,self.roi_button):b.setEnabled(False)
         self.tabs.setCurrentWidget(self.log);self.progress.setRange(0,0)
-        self.thread=QThread(self);self.worker=Worker(config,image,previous);self.worker.moveToThread(self.thread)
+        self.thread=QThread(self);self.worker=Worker(config,image,previous,preview=preview);self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run);self.worker.progress.connect(self.log.appendPlainText)
-        self.worker.completed.connect(self.analysis_ready);self.worker.failed.connect(self.analysis_failed)
+        self.worker.completed.connect(self.preview_ready if preview else self.analysis_ready);self.worker.failed.connect(self.analysis_failed)
         self.worker.finished.connect(self.thread.quit);self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.processing_finished);self.thread.finished.connect(self.thread.deleteLater)
         self.thread.start()
+
+    @Slot(object)
+    def preview_ready(self, session):
+        try:
+            from .normalization_ui import NormalizationPreview
+            self.normalization_preview = NormalizationPreview(self, session)
+        except Exception:
+            self.analysis_failed(traceback.format_exc())
 
     @Slot(object)
     def analysis_ready(self, session):
@@ -271,10 +312,12 @@ class Launcher(QWidget):
 
     @Slot()
     def processing_finished(self):
-        self.running=False;self.start.setEnabled(True);self.progress.setRange(0,1);self.progress.setValue(1)
+        self.running=False;self.start.setEnabled(True);self.preview_button.setEnabled(True);self.progress.setRange(0,1);self.progress.setValue(1)
 
     def export(self):
-        if self.session:self.session.export()
+        if self.session:
+            self.session.ns['EXPORT_CORRECTED_IMAGES'] = self.export_corrected.isChecked()
+            self.session.export()
 
     def qc(self):
         if self.session:self.session.show_qc()

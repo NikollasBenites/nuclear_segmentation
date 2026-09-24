@@ -43,7 +43,7 @@ class AnalysisSession:
         source = files('nuclear_segmentation').joinpath('stages', name + '.py').read_text()
         exec(compile(source, 'nuclear_segmentation/stages/' + name + '.py', 'exec'), self.ns)
 
-    def prepare(self):
+    def prepare(self, preview_only=False):
         """Heavy operations, no GUI calls. Safe to run in a worker."""
         import pandas as pd
         import tifffile
@@ -75,10 +75,22 @@ class AnalysisSession:
         self.stage('load_image')
         self.log('Loading or reconstructing ROI…')
         self.stage('roi')
+        if preview_only:
+            self.log('Image and ROI ready for normalization review. Cellpose has not run.')
+            return self
+        if self.ns['RUN_MODE'] == 'segment':
+            from .normalization import validate_normalization_source
+            validate_normalization_source(self.config, self.input_path, self.ns['mntb_roi'])
         if self.ns['RUN_MODE'] == 'density_only':
             self.stage('density_load')
             self.log('Saved retained nuclei loaded; no measurements rerun.')
             return self
+        from .z_correction import prepare_volumes
+        if self.ns['RUN_MODE'] == 'segment' and self.ns.get('Z_CORRECTION_SOURCE'):
+            from .normalization import source_identity
+            if source_identity(self.input_path, self.config) != self.ns['Z_CORRECTION_SOURCE']:
+                raise ValueError('Z correction belongs to a different image/channel. Reopen the preview and apply again.')
+        prepare_volumes(self.ns)
         if self.ns['RUN_MODE'] == 'segment':
             self.log('Loading PyTorch and Cellpose…')
             try:
@@ -104,6 +116,9 @@ class AnalysisSession:
         # Release inference-only arrays/model before visualization where possible.
         for key in ('model', 'flows', 'styles'):
             self.ns.pop(key, None)
+        from .manual_review import ManualReview
+        saved = (self.ns.get('previous_config') or {}).get('manual_review') if self.ns['RUN_MODE'] == 'resume' else None
+        self.ns['manual_review'] = ManualReview(self.ns['masks'], self.ns['mask_properties'].index, saved)
         self.log('Analysis ready. Review the ROI and adjust filters.')
         return self
 
@@ -124,7 +139,12 @@ class AnalysisSession:
             self.stage('scene')
             for data, kwargs in self.collector.layers.values():
                 viewer.add_labels(data, **kwargs)
+            for name, data in self.ns.get('z_corrected_volumes', {}).items():
+                viewer.add_image(data, name=name + ' — Z corrected',
+                                 scale=self.ns['VOXEL_SPACING_UM'], visible=False)
             self.stage('live')
+            from .manual_review import ManualReviewPanel
+            self.ns['manual_review_panel'] = ManualReviewPanel(self.ns, viewer)
             self._watch_geometry(self.ns['mntb_roi_layer'], self.ns['invalidate_mntb_roi'])
         viewer.dims.axis_labels = ('Z', 'Y', 'X')
         # Napari 0.9 obtains scale-bar units from calibrated layers.

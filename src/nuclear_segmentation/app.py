@@ -10,7 +10,7 @@ import traceback
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Nuclear Segmentation — desktop Napari app')
     parser.add_argument('--config', type=Path, help='Load a saved JSON preset')
-    parser.add_argument('--version', action='version', version='Nuclear Segmentation 0.2.0')
+    parser.add_argument('--version', action='version', version='Nuclear Segmentation 0.6.0')
     args = parser.parse_args(argv)
     # Allow unsupported Apple GPU operations to fall back before torch is imported.
     if sys.platform == 'darwin':

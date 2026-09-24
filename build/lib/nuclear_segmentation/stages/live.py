@@ -20,14 +20,14 @@ first_z_widget = Slider(
     min=0,
     max=max_z_index,
     step=1,
-    label="First Z plane",
+    label="Upper Z plane (section #)",
 )
 last_z_widget = Slider(
     value=int(np.clip(default_last_z, 0, max_z_index)),
     min=0,
     max=max_z_index,
     step=1,
-    label="Last z plane",
+    label="Down Z plane (section #)",
 )
 max_guard_um = max(1.0, float(np.ceil(max_z_index * z_spacing_um / 2)))
 guard_widget = FloatSlider(

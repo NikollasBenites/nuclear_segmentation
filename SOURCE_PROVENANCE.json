@@ -1,8 +1,18 @@
 {
-  "scientific_reference": "general_nuclei_segmentation_m3_v5_5_live_perinuclear_shells.ipynb",
-  "sha256_original_m3": "635a3b5c2c16d4630e5184a904728fda4b02c55375f9454684a22ceec19cf0ec",
-  "windows_reference": "general_nuclei_segmentation_v5_5_live_perinuclear_shells.ipynb",
-  "synchronization": "M3 settings, core, density text and QC carried to Windows; Qt event-loop cell shared; cleared historical outputs",
-  "app_version": "0.2.0",
-  "dependency_validation_date": "2026-09-18"
+  "release": "0.6.0",
+  "base": "user-supplied nuclear_segmentation_app_v0_3_0.zip",
+  "base_sha256": "e0425c495c2bc41a5482db666b3b4ae1994d56917d7c95701007b5ad8fa287ee",
+  "changes": [
+    "Multiplicative positive-pixel percentile Z correction",
+    "Selected layer correction and original/corrected measurement routing",
+    "Preserved user no-shell implementation; removed DAPI-only restriction",
+    "Correction metadata export and resume",
+    "English documentation; notebooks excluded",
+    "Calibrated float32 OME-TIFF export: selected corrected layer, ordered multichannel selection, optional automatic corrected-channel export with JSON provenance",
+    "Whole-object manual review with boundary-safe overrides, live updates, undo, provenance and resume",
+    "Independent DAPI matching workspace, manual object associations, sample-level DAPI volume distributions, persistence and mask identity checks",
+    "Automatic voxel-overlap DAPI matching (50% best / 20% runner-up defaults), original-ID QC colors and group selection, proportions and calibrated volume plots, manual override preservation, saved automatic provenance",
+    "Live Show multiple associations view with original-ID selection, automatic refresh after manual decisions, reclassification and undo, and reconstruction from saved matching",
+    "Console-compatible marker-controlled MAP2 watershed using DAPI overlap seeds (default 50%), constrained editable preview, acceptance, geometry/link undo, recalculated metrics and portable corrected-mask export with original backup and provenance"
+  ]
 }

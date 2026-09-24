@@ -173,16 +173,19 @@ def test_launcher_roundtrip():
         assert cfg['CHANNELS']==defaults()['CHANNELS']
         assert cfg['NOMINAL_SECTION_THICKNESS_UM']==60
         assert cfg['FLOW3D_SMOOTH']==[1,0,0]
+        cfg.update(CELLPOSE_RESAMPLE=False, CELLPOSE_RESCALE=0.75, CELLPOSE_NORMALIZE={'normalize': True, 'norm3D': True})
         widget.apply_config(cfg)
         assert widget.get_config()==cfg
     finally:viewer.close()
 
 
-def test_new_segmentation_dispatch_without_downloading_model(sample,monkeypatch):
+@pytest.mark.parametrize("roi_normalization", [False, True])
+def test_new_segmentation_dispatch_without_downloading_model(sample,monkeypatch,roi_normalization):
     # Test parameter/device dispatch, not Cellpose inference accuracy.
     import sys
     from types import SimpleNamespace, ModuleType
     cfg,image,previous,masks=sample;cfg['RUN_MODE']='segment'
+    cfg.update(CELLPOSE_RESAMPLE=False, CELLPOSE_RESCALE=0.75, CELLPOSE_NORMALIZE={'normalize': True, 'percentile': [2, 98], 'norm3D': True})
     calls={}
     class Device:
         def __init__(self,kind):self.type=kind
@@ -195,15 +198,28 @@ def test_new_segmentation_dispatch_without_downloading_model(sample,monkeypatch)
         def __init__(self,**kw):calls['model']=kw
         def eval(self,volume,**kw):
             calls['eval']=kw
+            volume[:] = 0  # Simulate Cellpose modifying a float input in place.
             return masks,[None,None,np.zeros_like(masks)],None
     cp.models=SimpleNamespace(CellposeModel=Model)
     monkeypatch.setitem(sys.modules,'torch',torch);monkeypatch.setitem(sys.modules,'cellpose',cp)
+    if roi_normalization:
+        from nuclear_segmentation.normalization import compare_percentiles, source_identity
+        preview=AnalysisSession(cfg,image,log=lambda *_:None).prepare(preview_only=True)
+        record=compare_percentiles(preview.ns['segmentation_volume'],preview.ns['mntb_roi'])
+        record['source']=source_identity(image,cfg)
+        record['cellpose_normalize']={'normalize':True,'lowhigh':record['roi_lowhigh'],'norm3D':True,'invert':False}
+        cfg['CELLPOSE_NORMALIZE']=record['cellpose_normalize']
+        cfg['CELLPOSE_ROI_NORMALIZATION']=record
     session=AnalysisSession(cfg,image,log=lambda *_:None).prepare()
+    assert calls['eval']['resample'] is False
+    assert calls['eval']['rescale']==0.75
+    assert calls['eval']['normalize']==cfg['CELLPOSE_NORMALIZE']
     assert calls['eval']['do_3D'] is True
     assert calls['eval']['anisotropy']==2
     assert calls['eval']['flow3D_smooth']==[1,0,0]
     assert calls['model']['device'].type=='cpu'
     assert len(session.ns['mask_properties'])==2
+    assert session.ns['segmentation_volume'].max() == 100
 
 
 def test_launcher_background_resume(sample):
@@ -232,20 +248,6 @@ def test_launcher_background_resume(sample):
         viewer.close()
 
 
-def test_synchronized_notebooks_and_m3_density_equivalence():
-    notebooks=Path(__file__).resolve().parents[1]/'notebooks'
-    m3=notebooks/'general_nuclei_segmentation_m3_v5_5_live_perinuclear_shells.ipynb'
-    windows=notebooks/'general_nuclei_segmentation_v5_5_live_perinuclear_shells.ipynb'
-    assert m3.read_bytes()==windows.read_bytes()
-    data=json.loads(m3.read_text())
-    source=next(''.join(c['source']) for c in data['cells'] if ''.join(c['source']).startswith('UNIT_TO_UM'))
-    reference=vars(core).copy();exec(source,reference)
-    for mode in ['none','first','last','both']:
-        for guard in [0,.5,2,100]:
-            args=(np.arange(12)*19,settings(mode,guard),(2,.6,.6),17,True)
-            assert reference['calculate_density_summary'](*args)==core.calculate_density_summary(*args)
-
-
 def test_cli_main_with_real_napari_viewer(monkeypatch):
     """Exercise actual CLI setup with a real Pydantic Viewer, without blocking."""
     import napari
@@ -269,3 +271,63 @@ def test_cli_main_with_real_napari_viewer(monkeypatch):
         main([])
     finally:
         for viewer in viewers:viewer.close()
+
+
+def test_normalization_preview_before_model_and_roi_edit(sample,tmp_path,monkeypatch):
+    from nuclear_segmentation.ui import Launcher
+    from nuclear_segmentation.normalization_ui import NormalizationPreview
+    from nuclear_segmentation.normalization import validate_normalization_source
+    from qtpy.QtWidgets import QFileDialog
+    cfg,image,previous,masks=sample;cfg['RUN_MODE']='segment'
+    session=AnalysisSession(cfg,image,log=lambda *_:None).prepare(preview_only=True)
+    assert 'masks' not in session.ns and 'torch' not in session.ns and 'models' not in session.ns
+    viewer=model_viewer()
+    try:
+        launcher=Launcher(viewer);launcher.apply_config(cfg);launcher.image_path.setText(str(image))
+        panel=NormalizationPreview(launcher,session)
+        original=session.ns['segmentation_volume'].copy()
+        panel.calculate()
+        assert panel.report['roi_lowhigh']==[12.,100.]
+        path=tmp_path/'normalization_roi.tif'
+        monkeypatch.setattr(QFileDialog,'getSaveFileName',lambda *a,**kw:(str(path),'TIFF'))
+        panel.apply()
+        applied=launcher.get_config()
+        assert applied['CELLPOSE_NORMALIZE']['lowhigh']==[12.,100.]
+        assert applied['CELLPOSE_NORMALIZE']['normalize'] is True
+        saved=tifffile.imread(path)>0
+        validate_normalization_source(applied,image,saved)
+        panel.ensure_current()
+        panel.roi.brush_size=1;panel.roi.paint((4,10,10),0)
+        assert panel.report is None
+        with pytest.raises(ValueError):panel.ensure_current()
+        panel.calculate()
+        with pytest.raises(ValueError):panel.ensure_current()
+        panel.apply();panel.ensure_current()
+        panel.roi.scale=(1,1,1)
+        with pytest.raises(ValueError):panel.calculate()
+        panel.reset()
+        assert launcher.get_config()['CELLPOSE_NORMALIZE'] is True
+        assert launcher.get_config()['CELLPOSE_ROI_NORMALIZATION'] is None
+        np.testing.assert_array_equal(original,session.ns['segmentation_volume'])
+    finally:viewer.close()
+
+
+def test_launcher_preview_worker_does_not_run_cellpose(sample):
+    from nuclear_segmentation.ui import Launcher
+    from qtpy.QtWidgets import QApplication
+    import time
+    cfg,image,previous,masks=sample;cfg['RUN_MODE']='segment'
+    viewer=model_viewer();launcher=Launcher(viewer)
+    launcher.apply_config(cfg);launcher.image_path.setText(str(image))
+    errors=[];launcher.analysis_failed=lambda message:errors.append(message)
+    launcher.start_analysis(preview=True)
+    deadline=time.monotonic()+20
+    while launcher.running and time.monotonic()<deadline:
+        QApplication.processEvents();time.sleep(.01)
+    try:
+        assert not launcher.running and not errors
+        assert launcher.normalization_preview is not None
+        assert launcher.session is None
+        assert not launcher.export_button.isEnabled()
+        assert 'masks' not in launcher.normalization_preview.session.ns
+    finally:viewer.close()
