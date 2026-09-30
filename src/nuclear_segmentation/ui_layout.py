@@ -103,7 +103,8 @@ def setup_launcher(launcher):
             continue
         title = launcher.tabs.tabText(i)
         launcher.tabs.removeTab(i)
-        launcher.tabs.insertTab(i, scroll(widget), title)
+        wrapped = scroll(widget)
+        launcher.tabs.insertTab(i, wrapped, title)
     launcher.tabs.setCurrentIndex(0)
     short_button(launcher.preview_button, 'Load / preview',
                  'Load original layers and the ROI. Open Z correction and ROI normalization before segmentation.',

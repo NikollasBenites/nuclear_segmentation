@@ -5,7 +5,7 @@ import traceback
 from qtpy.QtCore import QObject, QThread, Signal, Slot, QEvent
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QTabWidget, QLineEdit,
-    QPushButton, QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QLabel,
+    QPushButton, QComboBox, QListView, QDoubleSpinBox, QSpinBox, QCheckBox, QLabel,
     QPlainTextEdit, QFileDialog, QMessageBox, QTableWidget, QTableWidgetItem,
     QScrollArea, QProgressBar,
 )
@@ -110,8 +110,14 @@ class Launcher(QWidget):
         self.tabs = QTabWidget(); layout.addWidget(self.tabs)
         files = QWidget(); form = QFormLayout(files)
         self.mode = QComboBox()
-        for title, mode in [('New segmentation', 'segment'), ('Resume analysis / adjust filters', 'resume'), ('Previous analysis: density only', 'density_only')]:
-            self.mode.addItem(title, mode)
+        for label, mode in [('New segmentation', 'segment'), ('Resume analysis / adjust filters', 'resume'), ('Previous analysis: density only', 'density_only')]:
+            self.mode.addItem(label, mode)
+        mode_view = QListView(self.mode)
+        self.mode.setView(mode_view)
+        self.mode.setMaxVisibleItems(3)
+        row_height = mode_view.sizeHintForRow(0)
+        if row_height > 0:
+            mode_view.setMinimumHeight(row_height * 3 + 4)
         form.addRow('Workflow', self.mode)
         self.image_path = self.path_row(form, 'Original cropped TIFF', False)
         self.previous_path = self.path_row(form, 'Previous analysis folder', True)
