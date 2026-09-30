@@ -86,7 +86,9 @@ class ManualReviewPanel:
         self.label.valueChanged.connect(self.on_id)
         self.only.toggled.connect(self.isolate)
         self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setWidget(self.widget)
-        self.scroll.setMinimumWidth(340)
+        from .ui_layout import compact
+        compact(self.scroll.widget())
+        self.scroll.setMinimumWidth(220)
         self.dock = viewer.window.add_dock_widget(self.scroll, name='Manual mask review', area='right')
         self.refresh()
 

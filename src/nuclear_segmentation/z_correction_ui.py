@@ -6,6 +6,32 @@ from .z_correction import correct_z, DEFAULTS
 from .normalization import source_identity
 
 
+def intensity_profiles(original, corrected=None, include_zeros=True):
+    """P99 and mean per Z; positive-only comparisons use original-positive pixels."""
+    original = np.asarray(original)
+    corrected = None if corrected is None else np.asarray(corrected)
+    if original.ndim != 3 or (corrected is not None and corrected.shape != original.shape):
+        raise ValueError('Profile images must share the same 3D ZYX grid.')
+    profiles = {}
+    for title, volume in [('Original', original), ('Z corrected', corrected)]:
+        if volume is None:
+            continue
+        p99 = np.full(original.shape[0], np.nan)
+        mean = np.full(original.shape[0], np.nan)
+        for z, plane in enumerate(volume):
+            valid = np.isfinite(original[z])
+            if corrected is not None:
+                valid &= np.isfinite(corrected[z])
+            if not include_zeros:
+                valid &= original[z] > 0
+            values = plane[valid]
+            if values.size:
+                p99[z] = np.percentile(values, 99)
+                mean[z] = np.mean(values, dtype=np.float64)
+        profiles[title] = {'p99': p99, 'mean': mean}
+    return profiles
+
+
 class ZCorrectionPanel(QWidget):
     def __init__(self, preview):
         super().__init__()
@@ -14,6 +40,7 @@ class ZCorrectionPanel(QWidget):
         self.viewer = preview.viewer
         self.outputs = {}
         self.records = {}
+        self.profile_dialogs = []
         layout = QVBoxLayout(self)
         note = QLabel('Select an original image layer, then correct Z.\nPositive pixels define the reference; zeros remain zero.\nMasks keep the original voxel grid. Cellpose normalization is separate.')
         note.setWordWrap(True); layout.addWidget(note)
@@ -35,6 +62,13 @@ class ZCorrectionPanel(QWidget):
                           ('Save reviewed ROI for analysis…', self.save_roi),
                           ('Reset all Z correction settings', self.reset)]:
             button = QPushButton(title); button.clicked.connect(lambda checked=False, f=fn: self.launcher.safe(f)); layout.addWidget(button)
+        self.profile_include_zeros = QCheckBox('Intensity profiles: include zero pixels')
+        self.profile_include_zeros.setChecked(True)
+        self.profile_include_zeros.setToolTip('Checked: all finite pixels. Unchecked: original-positive pixels, at identical locations before and after correction. Applies to both P99 and mean; does not change correction settings.')
+        layout.addWidget(self.profile_include_zeros)
+        button = QPushButton('Compare P99 and mean across Z')
+        button.clicked.connect(lambda checked=False: self.launcher.safe(self.plot_intensity_profiles))
+        layout.addWidget(button)
         self.include_export = QCheckBox('Include corrected images in analysis export')
         self.include_export.setChecked(self.launcher.get_config()['EXPORT_CORRECTED_IMAGES'])
         self.include_export.toggled.connect(self.set_export_option)
@@ -161,6 +195,49 @@ class ZCorrectionPanel(QWidget):
         axes[0].set_ylabel('Intensity'); axes[0].legend()
         axes[1].plot(r['gain']); axes[1].set_ylabel('Gain'); axes[1].set_xlabel('Z plane (zero-based)')
         fig.suptitle(name + ' — Z correction'); fig.tight_layout(); plt.show(block=False)
+
+    def plot_intensity_profiles(self):
+        name, original = self.selected()
+        output = self.outputs.get(name)
+        if output is not None and output not in self.viewer.layers:
+            output = None
+        if output is not None:
+            same_grid = (np.allclose(original.scale, output.scale)
+                         and np.allclose(original.affine.affine_matrix, output.affine.affine_matrix)
+                         and np.allclose(original.translate, output.translate)
+                         and np.allclose(original.rotate, output.rotate)
+                         and np.allclose(original.shear, output.shear))
+            if not same_grid:
+                raise ValueError('Original and corrected layers have different transforms. Recreate the Z correction before comparing.')
+        include = self.profile_include_zeros.isChecked()
+        profiles = intensity_profiles(original.data, None if output is None else output.data, include)
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+        fig = Figure(figsize=(9, 6)); axes = fig.subplots(2, 1, sharex=True)
+        for title, values in profiles.items():
+            color = '#0072B2' if title == 'Original' else '#D55E00'
+            for ax, metric in zip(axes, ['p99', 'mean']):
+                ax.plot(np.arange(len(values[metric])), values[metric], label=title, color=color)
+        for ax, label in zip(axes, ['P99 intensity', 'Mean intensity']):
+            ax.set_ylabel(label); ax.legend(); ax.grid(alpha=.25)
+        axes[1].set_xlabel('Z plane (zero-based)')
+        scope = 'All pixels, including zeros' if include else 'Original-positive pixels only'
+        fig.suptitle(name + ' — intensity profiles\n' + scope); fig.tight_layout()
+        dialog = QDialog(self); dialog.setWindowTitle(name + ' — P99 and mean across Z')
+        box = QVBoxLayout(dialog); canvas = FigureCanvasQTAgg(fig)
+        box.addWidget(NavigationToolbar2QT(canvas, dialog)); box.addWidget(canvas)
+        note = ('Per-plane statistics of actual image values; nonfinite pixels excluded. '
+                'No ROI mask or display brightness adjustment is used. '
+                'P99 is always percentile 99, independent of the correction reference percentile. '
+                'This plot is a snapshot; reopen after changing a layer or the zero-pixel option.')
+        if output is None:
+            note += ' Only the original is shown. Correct Z first to compare both curves.'
+        elif name in self.records and self.records[name]['options'] != self.options():
+            note += ' Controls changed: the corrected curve is the existing layer. Correct Z again to apply new settings.'
+        label = QLabel(note); label.setWordWrap(True); box.addWidget(label)
+        dialog.resize(900, 720); self.profile_dialogs.append(dialog)
+        dialog.finished.connect(lambda *_: self.profile_dialogs.remove(dialog) if dialog in self.profile_dialogs else None)
+        dialog.show()
 
     def save_roi(self):
         from pathlib import Path

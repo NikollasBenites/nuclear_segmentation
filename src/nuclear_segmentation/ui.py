@@ -167,7 +167,8 @@ class Launcher(QWidget):
             button.setEnabled(False);button.clicked.connect(lambda checked=False,f=fn:self.safe(f));bar.addWidget(button)
         layout.addLayout(bar)
         self.apply_config(self.config)
-        self.setMinimumWidth(470)
+        from .ui_layout import setup_launcher
+        setup_launcher(self)
 
     def open_matching(self):
         from .matching_ui import open_matching_workspace
@@ -278,7 +279,7 @@ class Launcher(QWidget):
             self.normalization_preview = None
         self.running=True;self.start.setEnabled(False);self.preview_button.setEnabled(False)
         for b in (self.export_button,self.qc_button,self.roi_button):b.setEnabled(False)
-        self.tabs.setCurrentWidget(self.log);self.progress.setRange(0,0)
+        self.tabs.setCurrentIndex(4);self.progress.setRange(0,0)
         self.thread=QThread(self);self.worker=Worker(config,image,previous,preview=preview);self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run);self.worker.progress.connect(self.log.appendPlainText)
         self.worker.completed.connect(self.preview_ready if preview else self.analysis_ready);self.worker.failed.connect(self.analysis_failed)
@@ -302,6 +303,10 @@ class Launcher(QWidget):
             self.export_button.setEnabled(True);self.roi_button.setEnabled(True)
             self.qc_button.setEnabled(session.ns['RUN_MODE']!='density_only')
             self.log.appendPlainText('Ready. Review ROI across Z, accept it, then export.')
+            if hasattr(self, 'setup_dock'):
+                self.setup_dock.hide()
+            if 'manual_review_panel' in session.ns:
+                session.ns['manual_review_panel'].dock.hide()
         except Exception:
             self.analysis_failed(traceback.format_exc())
 

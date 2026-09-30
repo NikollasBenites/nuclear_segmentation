@@ -437,3 +437,6 @@ if hasattr(mntb_roi_layer.events, "paint"):
 mntb_roi_layer.metadata["density_callback"] = invalidate_mntb_roi
 
 refresh_live_filter()
+
+from nuclear_segmentation.ui_layout import pin_live_summary
+pin_live_summary(viewer, globals())

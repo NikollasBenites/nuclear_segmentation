@@ -48,17 +48,24 @@ class SplitMixin:
             if not overlap.any():raise ValueError(f'DAPI {d} does not overlap this MAP2. Correct the association before splitting.')
             seeds[overlap]=child
         components,n=ndi.label(local)
+        unseeded_components=[]
         for c in range(1,n+1):
             if not ((components==c)&(seeds>0)).any():
-                raise ValueError('A disconnected MAP2 component has no valid DAPI seed. Review the mask before splitting.')
+                unseeded_components.append(c)
         from skimage.segmentation import watershed
         distance=ndi.distance_transform_edt(local,sampling=self.spacing)
         proposal=watershed(-distance,markers=seeds,mask=local)
+        # A one-seed component remains whole under that seed's child ID.
+        # Seedless components keep the parent ID; no material is discarded.
+        residual=np.isin(components,unseeded_components) & local
+        proposal[residual]=parent
         data=np.zeros(self.map2.shape,np.uint32);data[box]=proposal
         return dict(parent=parent,children=children,data=data,
                     proposal_signature=mask_signature(data),
                     source_signature=mask_signature(self.map2),
                     partners=partners,seed_min_fraction=float(seed_min_fraction),overlaps=overlaps,
+                    residual_voxels=int(residual.sum()),
+                    residual_components=len(unseeded_components),
                     records_snapshot=copy.deepcopy(self.records))
 
     def accept_split(self, preview, edited_data):
@@ -67,10 +74,14 @@ class SplitMixin:
             raise ValueError('Masks or associations changed. Generate a new split preview.')
         data=np.asarray(edited_data);target=self.map2==parent
         children=preview['children'];allowed=set(children.values())
+        preserved=preview['data']==parent
+        if preserved.any():allowed.add(parent)
         if data.shape!=self.map2.shape or data.dtype.kind not in 'ui' or (data<0).any():
             raise ValueError('Split preview must be an integer label volume on the original grid.')
         if not np.array_equal(data>0,target) or set(np.unique(data[target]))!=allowed:
             raise ValueError('Keep the full original MAP2 volume, no voxels outside it, and all proposed child IDs. Paint between child labels; do not erase.')
+        if not np.array_equal(data==parent,preserved):
+            raise ValueError('Keep seedless components unchanged under the original MAP2 ID. Edit only the proposed child regions.')
         for d,child in children.items():
             if not np.all(data[target & (self.dapi==d)]==child):
                 raise ValueError(f'Keep DAPI {d} seed voxels assigned to child MAP2 {child}.')
@@ -107,6 +118,11 @@ class SplitMixin:
             parent_map2_id=parent,dapi_to_child_map2={str(d):c for d,c in children.items()},
             method='marker_controlled_watershed_negative_MAP2_distance_local_bbox',
             seed_min_fraction=preview['seed_min_fraction'],seed_overlaps=preview['overlaps'],
+            residual_parent_id=parent if preserved.any() else None,
+            residual_voxels=int(preserved.sum()),
+            residual_volume_um3=float(preserved.sum()*np.prod(self.spacing)),
+            residual_components=preview.get('residual_components',0),
+            residual_requires_review=bool(preserved.any()),
             manually_edited=mask_signature(data)!=preview['proposal_signature'],
             previous_parent_links={str(d):r for d,r in preview['records_snapshot'].items() if r.get('map2_id')==parent},
             source_sha256=preview['source_signature'],result_sha256=self.signatures[1],
@@ -125,8 +141,17 @@ class SplitMixin:
         write_mask(folder/names[1],self.map2,self.spacing)
         import pandas as pd
         pd.DataFrame([r for event in self.split_log for r in event['seed_overlaps']]).to_csv(folder/'split_overlaps.csv',index=False)
-        pd.DataFrame([dict(original_map2_id=e['parent_map2_id'],output_map2_id=c,dapi_id=int(d))
-                      for e in self.split_log for d,c in e['dapi_to_child_map2'].items()]).to_csv(folder/'map2_splits.csv',index=False)
+        split_rows=[]
+        for e in self.split_log:
+            split_rows.extend(dict(original_map2_id=e['parent_map2_id'],output_map2_id=c,
+                                   dapi_id=int(d),requires_review=False,kind='seeded_child')
+                              for d,c in e['dapi_to_child_map2'].items())
+            if e.get('residual_voxels',0):
+                split_rows.append(dict(original_map2_id=e['parent_map2_id'],
+                    output_map2_id=e['parent_map2_id'],dapi_id=None,requires_review=True,
+                    kind='preserved_seedless_components',residual_voxels=e['residual_voxels'],
+                    residual_volume_um3=e['residual_volume_um3']))
+        pd.DataFrame(split_rows).to_csv(folder/'map2_splits.csv',index=False)
         backup='map2_before_splits.ome.tif'
         write_mask(folder/backup,self.split_original,self.spacing)
         return dict(paths=[str(folder/n) for n in names],relative_mask_paths=names,

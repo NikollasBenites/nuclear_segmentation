@@ -77,7 +77,12 @@ def test_split_rejects_invalid_preview_and_stale_links(split_model):
 
 def test_split_unseeded_component(split_model):
     model=split_model;model.map2[0,6,12]=65535
-    with pytest.raises(ValueError,match='disconnected'):model.preview_split(65535)
+    proposal=model.preview_split(65535)
+    assert proposal['data'][0,6,12]==65535
+    assert proposal['residual_voxels']>=1
+    model.accept_split(proposal,proposal['data'])
+    assert model.map2[0,6,12]==65535
+    assert model.split_log[-1]['residual_requires_review']
 
 
 def test_split_matches_console_watershed_and_fraction(split_model):

@@ -16,6 +16,7 @@ src/nuclear_segmentation/normalization.py
 src/nuclear_segmentation/normalization_ui.py
 src/nuclear_segmentation/runtime.py
 src/nuclear_segmentation/ui.py
+src/nuclear_segmentation/ui_layout.py
 src/nuclear_segmentation/z_correction.py
 src/nuclear_segmentation/z_correction_ui.py
 src/nuclear_segmentation/stages/density_load.py
@@ -43,5 +44,6 @@ tests/test_manual_review.py
 tests/test_map2_split.py
 tests/test_matching.py
 tests/test_normalization.py
+tests/test_ui_layout.py
 tests/test_workflow.py
 tests/test_z_correction.py

@@ -22,6 +22,7 @@ class NormalizationPreview(QWidget):
         self.source = source_identity(session.input_path, session.config)
         outer = QVBoxLayout(self)
         roi_widget = QWidget()
+        self.roi_widget = roi_widget
         layout = QVBoxLayout(roi_widget)
         note = QLabel('Review the MNTB ROI across Z before calculating.\nAll ROI voxels count, including zeros; guards are not applied.\nComparison: global linear normalization, before model resizing.\nApplying ROI limits replaces custom normalization options.\nOutside voxels are transformed too; no clipping or masking.')
         note.setWordWrap(True); layout.addWidget(note)
@@ -61,10 +62,13 @@ class NormalizationPreview(QWidget):
         from .z_correction_ui import ZCorrectionPanel
         self.z_panel = ZCorrectionPanel(self)
         tabs = QTabWidget()
+        self.tabs = tabs
         tabs.addTab(self.z_panel, 'Z correction')
         tabs.addTab(roi_widget, 'ROI percentile normalization')
         outer.addWidget(tabs)
-        self.viewer.window.add_dock_widget(self, name='Image correction before segmentation', area='right')
+        from .ui_layout import setup_preview
+        setup_preview(self)
+        self.dock = self.viewer.window.add_dock_widget(self, name='Image processing', area='right')
 
     def invalidate(self, *args):
         self.report = None
@@ -151,7 +155,9 @@ class NormalizationPreview(QWidget):
     def close_preview(self):
         self.z_panel.cleanup()
         for emitter in self.connections:emitter.disconnect(self.invalidate)
-        self.viewer.window.remove_dock_widget(self)
+        self.viewer.window._qt_window.menuBar().removeAction(self.processing_menu.menuAction())
+        self.processing_menu.deleteLater()
+        self.viewer.window.remove_dock_widget(self.dock)
         for layer in self.layers+self.comparisons:
             if layer in self.viewer.layers:self.viewer.layers.remove(layer)
         self.deleteLater()

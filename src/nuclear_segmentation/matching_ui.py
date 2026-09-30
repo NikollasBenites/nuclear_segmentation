@@ -73,6 +73,8 @@ class MatchingPanel(QWidget):
         for w in [self.sample,self.animal]:w.textChanged.connect(self.mark_dirty)
         for w in [self.one,self.proportions]:w.toggled.connect(self.mark_dirty)
         for l in self.layers:l.editable=False
+        from .ui_layout import setup_matching
+        setup_matching(self)
 
     def preview_map2_split(self):
         model=self.checked()
@@ -388,7 +390,9 @@ class MatchingPanel(QWidget):
 def open_matching_workspace():
     import napari
     viewer=napari.Viewer(title='DAPI matching')
-    panel=MatchingPanel(viewer);scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(panel);scroll.setMinimumWidth(400)
-    viewer.window.add_dock_widget(scroll,name='DAPI matching',area='right')
+    from .ui_layout import fit_window
+    panel=MatchingPanel(viewer)
+    viewer.window.add_dock_widget(panel,name='DAPI matching',area='right')
+    fit_window(viewer)
     viewer.window._qt_window.installEventFilter(panel)
     return viewer,panel
