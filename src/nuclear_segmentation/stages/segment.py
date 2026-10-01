@@ -171,7 +171,8 @@ else:
     eval_parameters = {
         "z_axis": 0,
         "channel_axis": None,
-        "do_3D": True,
+        "do_3D": CELLPOSE_DO_3D,
+        "stitch_threshold": 0.0 if CELLPOSE_DO_3D else CELLPOSE_STITCH_THRESHOLD,
         "anisotropy": ANISOTROPY,
         "batch_size": BATCH_SIZE,
         "cellprob_threshold": CELLPROB_THRESHOLD,
@@ -183,7 +184,7 @@ else:
     }
 
 
-    if FLOW3D_SMOOTH is not None:
+    if CELLPOSE_DO_3D and FLOW3D_SMOOTH is not None:
 
         eval_parameters[
             "flow3D_smooth"
@@ -202,7 +203,7 @@ else:
     # ----------------------------------------------------
 
     print(
-        "Starting full-resolution 3D "
+        f"Starting {'3D' if CELLPOSE_DO_3D else '2D + stitching'} "
         f"segmentation of "
         f"{segmentation_volume.shape}...",
         flush=True,
@@ -222,6 +223,10 @@ else:
         f"Anisotropy: {ANISOTROPY:.4f}",
         flush=True,
     )
+
+    print(f"do_3D: {CELLPOSE_DO_3D}; effective stitch_threshold: {eval_parameters['stitch_threshold']}", flush=True)
+    if not CELLPOSE_DO_3D:
+        print('2D + stitching: Cellpose min_size applies per XY slice; flow3D_smooth is inactive. Review merged/split objects across Z.', flush=True)
 
     synchronize_selected_device()
 

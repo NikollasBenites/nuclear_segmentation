@@ -16,6 +16,48 @@ def write_mask(path, data, spacing):
 
 
 class SplitMixin:
+    def merge_map2(self, ids, target):
+        """Union complete labels without adding background voxels; keep target ID."""
+        ids=sorted(set(int(i) for i in ids));target=int(target)
+        if len(ids)<2 or target not in ids:
+            raise ValueError('Choose at least two MAP2 IDs, including the ID to keep.')
+        if any(i <= 0 or i not in self.volumes[1] for i in ids):
+            raise ValueError('Every merge ID must be an existing nonzero MAP2 object.')
+        corrected=self.map2.copy()
+        corrected[np.isin(corrected,ids)]=target
+        volumes=self.volumes[1].copy()
+        total=sum(volumes.pop(i) for i in ids);volumes[target]=total
+        records=copy.deepcopy(self.records)
+        previous={str(d):copy.deepcopy(r) for d,r in records.items() if r.get('map2_id') in ids}
+        for r in records.values():
+            if r['status']=='Matched' and r.get('map2_id') in ids:
+                r.update(map2_id=target,source='manual')
+        auto_rows=[]
+        if self.auto_settings:
+            from .automatic_matching import overlap_pairs,classify
+            auto_rows,_=classify(self.volumes[0],volumes,float(np.prod(self.spacing)),
+                overlap_pairs(self.dapi,corrected),self.auto_settings['match_min'],
+                self.auto_settings['second_match_max'])
+            for row in auto_rows:
+                old=records.get(row['dapi_id'])
+                if old and old.get('source')=='automatic':
+                    status={'MATCH':'Matched','AMBIGUOUS':'Uncertain','NO_MATCH':'Unmatched'}[row['auto_class']]
+                    old.update(status=status,map2_id=row['best_map2_id'] if status=='Matched' else None)
+        snapshot=(self.map2,self.volumes[1],copy.deepcopy(self.records),self.auto_rows,
+                  copy.deepcopy(self.split_log),self.split_original,self.signatures[:])
+        source=self.signatures[1]
+        self.history.append(('__map2_split__',snapshot))
+        if self.split_original is None:self.split_original=self.map2.copy()
+        self.map2=corrected;self.volumes[1]=volumes;self.records=records;self.auto_rows=auto_rows
+        self.signatures[1]=mask_signature(corrected);self._overlap_pairs=None
+        # Keep the existing geometry-history container for backward-compatible restore.
+        self.split_log.append(dict(operation='merge',timestamp_utc=datetime.now(timezone.utc).isoformat(),
+            input_map2_ids=ids,output_map2_id=target,output_volume_um3=total,
+            method='manual_union_complete_labels',previous_links=previous,
+            source_sha256=source,result_sha256=self.signatures[1],volume_conserved=True,
+            seed_overlaps=[],dapi_to_child_map2={}))
+        return target
+
     def split_partners(self, parent):
         return sorted(i for i,r in self.records.items()
                       if r['status']=='Matched' and r['map2_id']==parent)
@@ -152,6 +194,10 @@ class SplitMixin:
                     kind='preserved_seedless_components',residual_voxels=e['residual_voxels'],
                     residual_volume_um3=e['residual_volume_um3']))
         pd.DataFrame(split_rows).to_csv(folder/'map2_splits.csv',index=False)
+        merge_rows=[dict(timestamp_utc=e['timestamp_utc'],input_map2_id=i,
+                         output_map2_id=e['output_map2_id'],output_volume_um3=e['output_volume_um3'])
+                    for e in self.split_log if e.get('operation')=='merge' for i in e['input_map2_ids']]
+        if merge_rows:pd.DataFrame(merge_rows).to_csv(folder/'map2_merges.csv',index=False)
         backup='map2_before_splits.ome.tif'
         write_mask(folder/backup,self.split_original,self.spacing)
         return dict(paths=[str(folder/n) for n in names],relative_mask_paths=names,

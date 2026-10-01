@@ -32,6 +32,13 @@ def validate_config(data):
         raise ValueError('ROI mode must be per_slice or constant_xy.')
     if int(result['BATCH_SIZE']) < 1 or int(result['CELLPOSE_MIN_SIZE_VOXELS']) < 0:
         raise ValueError('Invalid batch size or minimum mask size.')
+    if type(result['CELLPOSE_DO_3D']) is not bool:
+        raise ValueError('CELLPOSE_DO_3D must be true or false.')
+    stitch = result['CELLPOSE_STITCH_THRESHOLD']
+    if type(stitch) not in (int, float) or not math.isfinite(stitch) or not 0 <= stitch <= 1:
+        raise ValueError('CELLPOSE_STITCH_THRESHOLD must be a finite number between 0 and 1.')
+    if result['RUN_MODE'] == 'segment' and not result['CELLPOSE_DO_3D'] and stitch <= 0:
+        raise ValueError('2D segmentation requires CELLPOSE_STITCH_THRESHOLD > 0 to create volume labels for this app. Try 0.25, then inspect continuity across Z.')
     if type(result['CELLPOSE_RESAMPLE']) is not bool:
         raise ValueError('CELLPOSE_RESAMPLE must be true or false.')
     rescale = result['CELLPOSE_RESCALE']

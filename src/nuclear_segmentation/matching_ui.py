@@ -55,6 +55,17 @@ class MatchingPanel(QWidget):
                          ('Accept MAP2 split',self.accept_map2_split),('Cancel split preview',self.cancel_split)]:
             b=QPushButton(title);b.clicked.connect(lambda checked=False,f=fn:self.safe(f));layout.addWidget(b)
         self.split_note=QLabel('Split: select a MAP2 containing at least two qualifying DAPI seeds. Preview before accepting.');self.split_note.setWordWrap(True);layout.addWidget(self.split_note)
+        self.merge_ids=QLineEdit();self.merge_ids.setPlaceholderText('MAP2 IDs, e.g. 12, 35, 48')
+        self.merge_ids.setToolTip('Entire 3D objects will be combined. Background voxels remain unchanged.')
+        self.merge_target=QSpinBox();self.merge_target.setRange(1,2147483647)
+        self.merge_target.setToolTip('Existing ID to keep; it must be included in the merge list.')
+        self.merge_widgets=[]
+        for w in [QLabel('MAP2 IDs to merge'),self.merge_ids,QLabel('Keep MAP2 ID'),self.merge_target]:
+            layout.addWidget(w);self.merge_widgets.append(w)
+        for title,fn in [('Add selected MAP2 to merge',self.add_merge_id),
+                         ('Merge MAP2 objects',self.merge_map2),('Clear merge selection',self.clear_merge)]:
+            b=QPushButton(title);b.clicked.connect(lambda checked=False,f=fn:self.safe(f))
+            layout.addWidget(b);self.merge_widgets.append(b)
         for title,fn in [('Pick DAPI object',lambda:self.pick(0)),('Pick MAP2 object',lambda:self.pick(1)),
                          ('Link selected objects',lambda:self.decide('Matched')),
                          ('Mark DAPI as unmatched',lambda:self.decide('Unmatched')),
@@ -75,6 +86,34 @@ class MatchingPanel(QWidget):
         for l in self.layers:l.editable=False
         from .ui_layout import setup_matching
         setup_matching(self)
+
+    def clear_merge(self):
+        self.merge_ids.clear();self.merge_target.setValue(1)
+
+    def merge_selection(self):
+        import re
+        try:return sorted(set(int(x) for x in re.split(r'[,;\s]+',self.merge_ids.text().strip()) if x))
+        except ValueError:raise ValueError('Enter integer MAP2 IDs separated by commas or spaces.')
+
+    def add_merge_id(self):
+        model=self.checked();label=self.map2.value()
+        if label not in model.volumes[1]:raise ValueError('Pick an existing MAP2 object first.')
+        ids=self.merge_selection()
+        if not ids:self.merge_target.setValue(label)
+        self.merge_ids.setText(', '.join(map(str,sorted(set(ids+[label])))))
+
+    def merge_map2(self):
+        model=self.checked()
+        if self.split_preview is not None:raise ValueError('Accept or cancel the split preview before merging.')
+        ids=self.merge_selection();target=self.merge_target.value()
+        if len(ids)<2 or target not in ids or any(i not in model.volumes[1] for i in ids):
+            raise ValueError('Choose at least two existing MAP2 IDs and keep one of those IDs.')
+        question=f'Merge entire 3D MAP2 objects {ids} into ID {target}? Background stays unchanged. Linked DAPI objects will share this MAP2. You can Undo.'
+        if QMessageBox.question(self,'Merge MAP2 objects',question)!=QMessageBox.StandardButton.Yes:return
+        model.merge_map2(ids,target)
+        self.multiple.setChecked(False);self.only.setChecked(False)
+        self.dirty=True;self.sync_map2_geometry();self.map2.setValue(target);self.clear_merge()
+        self.message.setText(f'MAP2 objects merged into ID {target}. Volumes and associations updated. Review multiple associations; Save matching to export corrected masks. Undo restores the previous state.')
 
     def preview_map2_split(self):
         model=self.checked()
@@ -239,7 +278,7 @@ class MatchingPanel(QWidget):
         self.attach(model)
 
     def attach(self,model):
-        self.cancel_split()
+        self.cancel_split();self.clear_merge()
         if any(max(v)>2147483647 for v in model.volumes):raise ValueError('Mask IDs exceed the supported selector range; use label IDs below 2^31.')
         self.multiple.setChecked(False)
         for layer in self.multiple_layers:

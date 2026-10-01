@@ -84,6 +84,8 @@
     0
   ],
   "DIAMETER_PIXELS": null,
+  "CELLPOSE_DO_3D": true,
+  "CELLPOSE_STITCH_THRESHOLD": 0.0,
   "CELLPOSE_RESAMPLE": true,
   "CELLPOSE_RESCALE": null,
   "CELLPOSE_NORMALIZE": true,

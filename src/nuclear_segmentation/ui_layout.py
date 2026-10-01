@@ -212,7 +212,7 @@ def setup_matching(panel):
     while old.count(): items.append(old.takeAt(0))
     tabs=QTabWidget(); tabs.setUsesScrollButtons(True)
     pages={};layouts={}
-    for name in ['Files','Review','Automatic','Split','Compare']:
+    for name in ['Files','Review','Automatic','Split','Merge','Compare']:
         page=QWidget();pages[name]=page;layouts[name]=QVBoxLayout(page)
         tabs.addTab(scroll(page),name)
     panel.review_tabs=tabs
@@ -239,13 +239,14 @@ def setup_matching(panel):
             if w is panel.aligned or text in file_buttons:group='Files'
             elif w is panel.auto_note or text in auto_buttons:group='Automatic'
             elif w in [panel.seed_fraction,panel.split_note] or text in split_buttons or text.startswith('Minimum DAPI fraction inside'):group='Split'
+            elif w in panel.merge_widgets:group='Merge'
             elif w in [panel.one,panel.proportions] or text in compare_buttons:group='Compare'
             if w in [panel.details,panel.message,panel.multiple_note]:
                 continue # Pinned below tabs, including error and review status.
             if isinstance(w,QPushButton):
                 w.setToolTip(text)
                 if text in file_buttons:button_action(filemenu,w)
-                elif text in split_buttons:button_action(splitmenu,w)
+                elif text in split_buttons or w in panel.merge_widgets:button_action(splitmenu,w)
                 elif text in ['Automatic proportions and volumes','Compare DAPI volumes']:button_action(plots,w)
                 elif text=='Save matching and comparison…':button_action(filemenu,w,icon=QStyle.SP_DialogSaveButton)
                 mapping={'Link selected objects':'Link','Mark DAPI as unmatched':'Unmatched',

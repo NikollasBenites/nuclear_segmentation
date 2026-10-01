@@ -330,6 +330,8 @@ else:
         },
         "cellpose": {
             "model_name": MODEL_NAME,
+            "do_3D": (previous_config.get("cellpose", {}).get("do_3D", True) if RUN_MODE == "resume" else CELLPOSE_DO_3D),
+            "stitch_threshold": (previous_config.get("cellpose", {}).get("stitch_threshold", 0.0) if RUN_MODE == "resume" else (0.0 if CELLPOSE_DO_3D else CELLPOSE_STITCH_THRESHOLD)),
             "cellprob_threshold": CELLPROB_THRESHOLD,
             "minimum_size_voxels": CELLPOSE_MIN_SIZE_VOXELS,
             "batch_size": BATCH_SIZE,

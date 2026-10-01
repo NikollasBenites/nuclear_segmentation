@@ -40,7 +40,7 @@ class Matching(SplitMixin):
         for a in (self.dapi,self.map2):
             labels,counts=np.unique(a,return_counts=True)
             self.volumes.append({int(i):int(n)*float(np.prod(self.spacing)) for i,n in zip(labels,counts) if i})
-        if not all(self.volumes):raise ValueError('Each segmentation must contain at least one nonzero label.')
+        if not self.volumes[0]:raise ValueError('DAPI segmentation must contain at least one nonzero label.')
         self.source_paths=self.paths[:]
         self.split_log=[];self.split_original=None
         self.auto_rows=[]; self.auto_settings=None; self._overlap_pairs=None
