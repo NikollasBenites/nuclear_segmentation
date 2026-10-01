@@ -1,5 +1,6 @@
 """Compact desktop presentation. Scientific calculations remain in their modules."""
 from qtpy.QtCore import Qt, QTimer
+from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QScrollArea, QSizePolicy, QLabel,
     QPushButton, QAbstractButton, QTabWidget, QMenu, QStyle,
@@ -53,13 +54,16 @@ def show_dock(dock):
 def menu_for(viewer, title):
     menu = QMenu(title, viewer.window._qt_window)
     menu.setToolTipsVisible(True)
+    menu.menuAction().setMenuRole(QAction.MenuRole.NoRole)
     viewer.window._qt_window.menuBar().addMenu(menu)
     return menu
 
 
 def button_action(menu, button, title=None, icon=None):
     """Reuse the original callback and enabled state, including busy/invalid states."""
-    action = menu.addAction(title or button.text())
+    action = QAction(title or button.text(), menu)
+    action.setMenuRole(QAction.MenuRole.NoRole)
+    menu.addAction(action)
     action.setToolTip(button.toolTip() or button.text())
     if icon is not None:
         action.setIcon(button.style().standardIcon(icon))
@@ -122,14 +126,22 @@ def setup_launcher(launcher):
         action.triggered.connect(select)
     button_action(analysis, launcher.preview_button, 'Load layers / preprocessing…')
     button_action(analysis, launcher.start)
-    settings = menu.addMenu('Settings'); settings.setToolTipsVisible(True)
+    settings = QMenu('Configuration', menu)
+    settings.menuAction().setMenuRole(QAction.MenuRole.NoRole)
+    menu.addMenu(settings)
+    settings.setToolTipsVisible(True)
     tools = menu.addMenu('Measure'); tools.setToolTipsVisible(True)
     export = menu.addMenu('Export'); export.setToolTipsVisible(True)
     window = menu.addMenu('Panels')
     for b in launcher.findChildren(QPushButton):
         text = b.text()
         if text in ['Load preset','Save preset','Advanced settings']:
-            button_action(settings,b,text+'…');b.hide()
+            button_action(settings,b,text+'…')
+            if text == 'Advanced settings':
+                b.show()
+                b.setToolTip('Edit the full configuration, including CELLPOSE_DO_3D and CELLPOSE_STITCH_THRESHOLD.')
+            else:
+                b.hide()
         elif text == 'Open DAPI matching':
             button_action(tools,b,'DAPI matching…');b.hide()
     button_action(tools,launcher.qc_button,'Quality-control plots…')
@@ -246,11 +258,12 @@ def setup_matching(panel):
             if isinstance(w,QPushButton):
                 w.setToolTip(text)
                 if text in file_buttons:button_action(filemenu,w)
-                elif text in split_buttons or w in panel.merge_widgets:button_action(splitmenu,w)
+                elif text in split_buttons or w in panel.merge_widgets or text=='Delete selected MAP2 object':button_action(splitmenu,w)
                 elif text in ['Automatic proportions and volumes','Compare DAPI volumes']:button_action(plots,w)
                 elif text=='Save matching and comparison…':button_action(filemenu,w,icon=QStyle.SP_DialogSaveButton)
                 mapping={'Link selected objects':'Link','Mark DAPI as unmatched':'Unmatched',
                     'Mark DAPI as uncertain':'Uncertain','Remove link / Reset review':'Reset review',
+                    'Delete selected MAP2 object':'Delete MAP2',
                     'Undo last decision':'Undo','Preview MAP2 split from DAPI':'Preview split',
                     'Accept MAP2 split':'Accept split','Cancel split preview':'Cancel preview'}
                 if text in mapping: short_button(w,mapping[text])
