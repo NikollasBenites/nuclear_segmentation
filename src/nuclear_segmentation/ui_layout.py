@@ -116,6 +116,8 @@ def setup_launcher(launcher):
     short_button(launcher.start, 'Start analysis', icon=QStyle.SP_MediaPlay)
     menu = menu_for(launcher.viewer, 'Nuclear Segmentation')
     launcher.app_menu = menu
+    from .roi_smoothing_ui import RoiSmoothingMenu
+    launcher.roi_smoothing_menu = RoiSmoothingMenu(launcher.viewer, menu.addMenu('ROI'))
     analysis = menu.addMenu('Analysis'); analysis.setToolTipsVisible(True)
     for label, mode in [('New analysis…','segment'),('Resume analysis…','resume'),('Density only…','density_only')]:
         action = analysis.addAction(label)
