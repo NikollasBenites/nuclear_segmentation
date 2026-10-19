@@ -770,7 +770,9 @@ def calculate_z_guard_properties(
         raise ValueError(
             f"Tissue Z planes must satisfy 0 <= first <= last <= {max_z_index}."
         )
-    if guard_um < 0:
+    if not np.isfinite(z_spacing_um) or z_spacing_um <= 0:
+        raise ValueError("Z spacing must be positive and finite.")
+    if not np.isfinite(guard_um) or guard_um < 0:
         raise ValueError("Z guard thickness cannot be negative.")
     if guard_mode not in {"none", "first", "last", "both"}:
         raise ValueError("Z guard mode must be none, first, last, or both.")
@@ -865,7 +867,9 @@ def density_z_planes(settings, nz, dz):
     z = np.arange(nz)
     tissue = (z >= first) & (z <= last)
     effective = tissue.copy()
-    # Match existing whole-object guards: distance <= guard is excluded.
+    if not np.isfinite(dz) or dz <= 0:
+        raise ValueError("Z spacing must be positive and finite.")
+    # Active boundary planes are excluded for both masks and sampling volume.
     # Thus even guard=0 excludes an active surface plane.
     if mode in {"first", "both"}:
         effective &= (z - first) * dz > guard
@@ -882,6 +886,25 @@ def roi_centroid_membership(properties, roi):
     inside = np.zeros(len(properties), dtype=bool)
     inside[valid] = roi[tuple(indices[valid].T)]
     return pd.Series(inside, index=properties.index), indices[:, 0]
+
+
+def sampling_membership(properties, roi, settings, dz):
+    """Directional Z entry, with XY centroid tested in the ROI at that plane.
+
+    first: min_z is the entry; last: max_z is the reverse entry.
+    both/none retain centroid sampling. Whole-object guards remain separate.
+    This is a segmented-object rule, not a full optical-fractionator estimator.
+    """
+    mode = settings["z_guard_mode"]
+    coords = properties[["centroid_z_px", "centroid_y_px", "centroid_x_px"]].copy()
+    if mode in {"first", "last"}:
+        coords["centroid_z_px"] = properties["min_z" if mode == "first" else "max_z"]
+    inside, entry_z = roi_centroid_membership(coords, roi)
+    _, sampling = density_z_planes(settings, roi.shape[0], dz)
+    valid = (entry_z >= 0) & (entry_z < roi.shape[0])
+    in_z = np.zeros(len(properties), dtype=bool)
+    in_z[valid] = sampling[entry_z[valid]]
+    return inside, pd.Series(in_z, index=properties.index), entry_z
 
 
 def calculate_density_summary(

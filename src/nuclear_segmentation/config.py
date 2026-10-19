@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def defaults():
-    data = json.loads(files('nuclear_segmentation').joinpath('defaults.json').read_text())
+    data = json.loads(files('nuclear_segmentation').joinpath('defaults.json').read_text(encoding='utf-8'))
     data['PROCESSING_DEVICE'] = 'auto'
     return data
 

@@ -40,7 +40,7 @@ class AnalysisSession:
         self.collector = LayerCollector()
 
     def stage(self, name):
-        source = files('nuclear_segmentation').joinpath('stages', name + '.py').read_text()
+        source = files('nuclear_segmentation').joinpath('stages', name + '.py').read_text(encoding='utf-8')
         exec(compile(source, 'nuclear_segmentation/stages/' + name + '.py', 'exec'), self.ns)
 
     def prepare(self, preview_only=False):
@@ -53,7 +53,7 @@ class AnalysisSession:
         import textwrap
         import re
         self.log('Loading analysis functions…')
-        source = files('nuclear_segmentation').joinpath('core.py').read_text()
+        source = files('nuclear_segmentation').joinpath('core.py').read_text(encoding='utf-8')
         exec(compile(source, 'nuclear_segmentation/core.py', 'exec'), self.ns)
         self.ns.update(self.config)
         self.ns.update(session_input_path=self.input_path, session_previous_folder=self.previous_folder,
@@ -171,8 +171,11 @@ class AnalysisSession:
             raise ValueError('QC plots require resume or segment mode.')
         if self.ns.get('current_keep') is None:
             raise ValueError('Fix invalid filter settings first.')
-        self.stage('qc')
-        self.ns['plt'].show(block=False)
+        tabs = self.ns['analysis_tabs']
+        tabs.setCurrentWidget(self.ns['live_plots'])
+        self.ns['filter_dock_widget'].show()
+        self.ns['filter_dock_widget'].raise_()
+        self.ns['live_plots'].schedule()
 
     def save_roi(self, path):
         density_only = self.ns['RUN_MODE'] == 'density_only'

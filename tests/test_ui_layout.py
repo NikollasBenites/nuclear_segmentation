@@ -35,3 +35,16 @@ def test_launcher_and_pinned_summary():
     ns['count_label'].value='Masks kept: 7 / 12'
     assert ns['filter_summary'][0].value=='Masks kept: 7 / 12'
     viewer.close()
+
+
+def test_compact_combo_preserves_choices_and_selection():
+    from qtpy.QtWidgets import QWidget, QVBoxLayout, QComboBox, QListView
+    from nuclear_segmentation.ui_layout import compact
+    app = QApplication.instance() or QApplication([])
+    panel = QWidget(); layout = QVBoxLayout(panel); combo = QComboBox()
+    for i in range(30): combo.addItem(f'Channel µ {i}', i)
+    combo.setCurrentIndex(17); layout.addWidget(combo)
+    compact(panel); view = combo.view(); compact(panel)
+    assert combo.currentData() == 17 and combo.count() == 30
+    assert isinstance(view, QListView) and combo.view() is view
+    assert combo.maxVisibleItems() == 16

@@ -29,7 +29,7 @@ last_z_widget = Slider(
     step=1,
     label="last tissue Z",
 )
-max_guard_um = max(1.0, float(np.ceil(max_z_index * z_spacing_um / 2)))
+max_guard_um = max(1.0, float(np.ceil(max_z_index * z_spacing_um)))
 guard_widget = FloatSlider(
     value=float(np.clip(INITIAL_Z_GUARD_UM, 0, max_guard_um)),
     min=0.0,
@@ -42,6 +42,16 @@ guard_mode_widget = ComboBox(
     choices=["none", "first", "last", "both"],
     label="Z guard mode",
 )
+
+guard_mode_widget.tooltip = (
+    "first: exclude contact with the first boundary/guard; count by min Z, including the last plane. "
+    "last: reverse direction, count by max Z, including the first plane. "
+    "both: exclude contact with either boundary/guard (whole-object selection). "
+    "none: centroid within the selected Z range. Zero guard still excludes an active boundary."
+)
+first_z_widget.tooltip = "First Z plane (0-based). Active in first/both, including when guard is zero."
+last_z_widget.tooltip = "Last Z plane (0-based). Active in last/both, including when guard is zero."
+guard_widget.tooltip = "Physical distance from each active boundary. Masks touching that zone are excluded."
 
 maximum_volume = float(np.ceil(filter_properties["volume_um3"].max()))
 volume_widget = FloatSlider(
@@ -166,6 +176,7 @@ def current_filter_settings():
         "last_tissue_z": int(last_z_widget.value),
         "z_guard_um": float(guard_widget.value),
         "z_guard_mode": str(guard_mode_widget.value),
+        "z_counting_rule": "directional_entry_v1",
         "perinuclear_combination": str(perinuclear_combination_widget.value),
         "perinuclear_filters": {
             name: {
@@ -243,14 +254,20 @@ def apply_filter_settings(settings):
     else:
         intensity_keep = pd.concat(intensity_conditions, axis=1).any(axis=1)
 
+    inside, in_z, counting_z = sampling_membership(
+        filter_properties, mntb_roi, settings, z_spacing_um)
+    # Keep centroid diagnostics, but do not use centroid Z as a second gate.
     _, sampling_z = density_z_planes(settings, masks.shape[0], z_spacing_um)
     z_valid = (roi_centroid_z >= 0) & (roi_centroid_z < masks.shape[0])
     centroid_in_z = np.zeros(len(filter_properties), dtype=bool)
     centroid_in_z[z_valid] = sampling_z[roi_centroid_z[z_valid]]
     filter_properties["centroid_in_mntb_roi"] = roi_inside
     filter_properties["centroid_in_sampling_z"] = centroid_in_z
-    filter_properties["excluded_by_sampling_roi"] = ~(roi_inside & centroid_in_z)
-    eligible = (~filter_properties['excluded_by_z_guard']) & roi_inside & centroid_in_z
+    filter_properties["counting_z_px"] = counting_z
+    filter_properties["counting_point_in_roi"] = inside
+    filter_properties["counting_point_in_sampling_z"] = in_z
+    filter_properties["excluded_by_sampling_roi"] = ~(inside & in_z)
+    eligible = (~filter_properties['excluded_by_z_guard']) & inside & in_z
     automatic = morphology_keep & perinuclear_keep & intensity_keep & eligible
     filter_properties['automatic_keep'] = automatic
     reasons = []
@@ -339,11 +356,9 @@ def refresh_live_filter(*_):
         )
         density_result = calculate_density_summary(roi_plane_counts, settings, VOXEL_SPACING_UM, int(current_keep.sum()), roi_reviewed)
         roi_volume_label.value = format_density_panel(density_result)
-        density_label.value = ""
-        density = density_result["retained_nuclei_per_mm3"]
-        #density_label.value = (f"Nuclei per (100 µm)³: {density / 1000:,.1f}"
-                                #if density is not None
-                                #else f"Density unavailable: {density_result['density_status']}")
+        density = density_result["retained_nuclei_per_100um_cube"]
+        density_label.value = (f"Density: {density:,.1f} nuclei/(100 µm)³"
+                               if density is not None else "Density: pending ROI review")
         status_label.value = "Valid filter settings"
         viewer.status = (
             f"Kept {int(current_keep.sum())}/{len(current_keep)} | "
@@ -354,6 +369,12 @@ def refresh_live_filter(*_):
     except ValueError as error:
         current_keep = None
         filtered_masks = None
+        # Do not leave a previous valid selection displayed as if it were current.
+        for name in [live_layer_name, guard_layer_name]:
+            if name in viewer.layers:
+                viewer.layers[name].data = np.zeros_like(masks)
+        count_label.value = "Masks kept: unavailable (invalid settings)"
+        guard_count_label.value = "Z guard excluded: unavailable"
         roi_volume_label.value = "Density unavailable: invalid settings"
         density_label.value = "Density unavailable: invalid settings"
         status_label.value = f"Invalid settings: {error}"
@@ -361,6 +382,8 @@ def refresh_live_filter(*_):
 
     if 'manual_review_panel' in globals():
         manual_review_panel.refresh()
+    if 'live_plots' in globals():
+        live_plots.schedule()
 
 
 for widget in [
@@ -423,6 +446,7 @@ def invalidate_mntb_roi(*_):
     density_label.value = "ROI changed: accept reviewed ROI to recalculate"
     roi_volume_label.value = "ROI volume: pending review"
     if 'manual_review_panel' in globals(): manual_review_panel.refresh()
+    if 'live_plots' in globals(): live_plots.schedule()
 
 roi_review_button.changed.connect(accept_mntb_roi)
 # Disconnect callbacks when this cell is rerun in an existing viewer.

@@ -25,12 +25,22 @@ def calculate_retrospective_density(*_):
         retrospective_reviewed = False
         retrospective_status.value = "Invalid or empty ROI"
         return
-    inside, centroid_z = roi_centroid_membership(saved_retained, roi)
-    _, sampling = density_z_planes(saved_settings, roi.shape[0], VOXEL_SPACING_UM[0])
-    valid_z = (centroid_z >= 0) & (centroid_z < roi.shape[0])
-    in_z = np.zeros(len(saved_retained), dtype=bool)
-    in_z[valid_z] = sampling[centroid_z[valid_z]]
-    counted = inside & in_z
+    if saved_settings.get("z_counting_rule") == "directional_entry_v1":
+        inside, in_z, _ = sampling_membership(saved_retained, roi, saved_settings, VOXEL_SPACING_UM[0])
+        guards = calculate_z_guard_properties(
+            saved_retained, saved_settings["first_tissue_z"], saved_settings["last_tissue_z"],
+            saved_settings["z_guard_um"], saved_settings["z_guard_mode"],
+            VOXEL_SPACING_UM[0], roi.shape[0] - 1)
+        counted = inside & in_z & ~guards["excluded_by_z_guard"]
+    else:
+        # Old exports keep their recorded centroid rule. Use Resume to migrate
+        # from raw masks; density-only cannot recover previously excluded IDs.
+        inside, centroid_z = roi_centroid_membership(saved_retained, roi)
+        _, sampling = density_z_planes(saved_settings, roi.shape[0], VOXEL_SPACING_UM[0])
+        valid_z = (centroid_z >= 0) & (centroid_z < roi.shape[0])
+        in_z = np.zeros(len(saved_retained), dtype=bool)
+        in_z[valid_z] = sampling[centroid_z[valid_z]]
+        counted = inside & in_z
     retrospective_counts = np.count_nonzero(roi, axis=(1, 2))
     retrospective_result = calculate_density_summary(retrospective_counts, saved_settings,
                                                      VOXEL_SPACING_UM, int(counted.sum()), True)
@@ -79,5 +89,7 @@ retrospective_accept.changed.connect(calculate_retrospective_density)
 retrospective_save.changed.connect(save_retrospective_density)
 retrospective_panel = Container(widgets=[retrospective_info, retrospective_status,
                                           retrospective_accept, retrospective_save])
-viewer.window.add_dock_widget(retrospective_panel, area="right", name="Previous analysis: density only")
+from nuclear_segmentation.ui_layout import compact, scroll
+compact(retrospective_panel.native)
+retrospective_dock_widget = viewer.window.add_dock_widget(scroll(retrospective_panel.native), area="right", name="Previous analysis: density only")
 print("Review ROI, accept, then Save density addendum. Later analysis cells are skipped in density_only mode.")

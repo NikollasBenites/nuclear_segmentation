@@ -302,7 +302,7 @@ else:
         )
 
     configuration = {
-        "schema_version": 7,
+        "schema_version": 8,
         "manual_review": manual_review.to_record(),
         "nominal_section_thickness_um": float(NOMINAL_SECTION_THICKNESS_UM),
         "mntb_roi": {"source": roi_source, "mask_file": "mntb_roi.tif", "reviewed": True},

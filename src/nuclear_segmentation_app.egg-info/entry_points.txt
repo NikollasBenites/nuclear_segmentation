@@ -1,0 +1,2 @@
+[console_scripts]
+nuclear-segmentation = nuclear_segmentation.app:main

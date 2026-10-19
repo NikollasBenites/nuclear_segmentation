@@ -395,7 +395,7 @@ class MatchingPanel(QWidget):
         if not self.may_replace():return
         path,_=QFileDialog.getOpenFileName(self,'Open dapi_matching.json','','JSON (*.json)')
         if not path:return
-        record=json.loads(Path(path).read_text());paths=list(record['paths'])
+        record=json.loads(Path(path).read_text(encoding='utf-8'));paths=list(record['paths'])
         if record.get('relative_mask_paths'):
             paths=[str(Path(path).parent/n) for n in record['relative_mask_paths']]
         for i,title in enumerate(['DAPI','MAP2']):

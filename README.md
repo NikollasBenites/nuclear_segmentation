@@ -1,3 +1,9 @@
+> GUI maintenance, 2026-10-19 (version remains 1.0.1): the analysis panel now
+> provides Filters, Density and auto-updating Graphs tabs. Long density and
+> matching text is scrollable; wrapped labels resize to their content. Graphs
+> include volume, sphericity, channel intensity, shell fractions and a cached
+> whole-stack Z profile. See GUI_AND_PLOTS_1_0_1.md for usage and scope.
+
 # Nuclear Segmentation 1.0.0
 
 A Napari desktop application for 3D segmentation, intensity measurements,
@@ -170,7 +176,18 @@ resume intentionally restores the source recorded in that export.
 
 ## Density
 
-Density uses object centroids within the reviewed ROI and the effective Z range.
+Z selection is directional in `first` and `last` modes. In `first`, a mask is
+excluded if its minimum Z touches/crosses the first boundary plus guard; its
+minimum Z must be at or before the last plane. It may extend beyond that last
+plane. `last` mirrors this rule using maximum Z and the opposite direction.
+Zero guard still excludes contact with the active boundary. `both` preserves
+whole-object exclusion at both faces; `none` preserves centroid selection.
+For directional modes the XY centroid is tested against the ROI at the entry
+plane, without imposing a second centroid-Z gate. This operational ROI rule
+is not an XY stereological counting frame or a full optical fractionator.
+New exports record `z_counting_rule=directional_entry_v1`. Resume recomputes
+selection from raw masks; density-only preserves the old centroid rule for
+legacy exports and cannot recover masks excluded in that original analysis.
 ROI tissue volume describes the anatomical mask. Effective volume is the ROI
 volume in the counting range after tissue limits and guards. The live first and
 last tissue planes determine full measured thickness before guards.
@@ -261,7 +278,7 @@ After a new segmentation or **Resume analysis / adjust filters**, a scrollable
 7. Export results to save decisions. Exporting supports zero retained objects.
 
 Keep overrides volume, sphericity, intensity, and shell association criteria.
-It never overrides the Z guard, centroid membership in the reviewed ROI, or the
+It never overrides the Z guard, counting-point membership in the reviewed ROI, or the
 counting Z interval. A prior Keep remains recorded when later boundary changes
 make an object ineligible, but the object is excluded until eligible again.
 Manual exclusions persist when sliders change. ROI edits require acceptance

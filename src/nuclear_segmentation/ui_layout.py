@@ -1,34 +1,151 @@
 """Compact desktop presentation. Scientific calculations remain in their modules."""
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import Qt, QTimer, QObject, QEvent
 from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QScrollArea, QSizePolicy, QLabel,
-    QPushButton, QAbstractButton, QTabWidget, QMenu, QStyle,
+    QPushButton, QAbstractButton, QTabWidget, QMenu, QStyle, QComboBox, QListView, QLineEdit, QToolBar,
 )
+
+
+class _LabelHeight(QObject):
+    """Keep wrapped QLabel height in sync with text, font and available width."""
+    def __init__(self, label):
+        super().__init__(label)
+        self.label = label
+        self.parent_widget = None
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.update_height)
+        label.installEventFilter(self)
+        self.watch_parent()
+        self.timer.start(0)
+
+    def watch_parent(self):
+        if self.parent_widget is not None:
+            try:
+                self.parent_widget.removeEventFilter(self)
+            except RuntimeError:
+                pass  # Qt may already have destroyed a toolbar/container.
+        self.parent_widget = self.label.parentWidget()
+        if self.parent_widget is not None:
+            self.parent_widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if obj is self.label and kind == QEvent.ParentChange:
+            self.watch_parent()
+        if kind in (QEvent.Resize, QEvent.LayoutRequest, QEvent.Show,
+                    QEvent.FontChange, QEvent.StyleChange, QEvent.ParentChange):
+            self.timer.start(0)
+        return False
+
+    def update_height(self):
+        label = self.label
+        if label.wordWrap() and label.width() > 1:
+            height = max(0, label.heightForWidth(max(1, label.width())))
+            if label.minimumHeight() != height:
+                label.setMinimumHeight(height)
+                label.updateGeometry()
+
+
+class _FormWrap(QObject):
+    def __init__(self, layout):
+        super().__init__(layout)
+        self.layout = layout
+        self.host = layout.parentWidget()
+        if self.host is not None:
+            self.host.installEventFilter(self)
+        self.update_policy()
+
+    def update_policy(self):
+        policy = (QFormLayout.WrapAllRows if self.host is not None and self.host.width() < 440
+                  else QFormLayout.WrapLongRows)
+        if self.layout.rowWrapPolicy() != policy:
+            self.layout.setRowWrapPolicy(policy)
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Resize, QEvent.Show):
+            self.update_policy()
+        return False
+
+
+def _in_toolbar(widget):
+    parent = widget.parentWidget()
+    while parent is not None:
+        if isinstance(parent, QToolBar):
+            return True
+        parent = parent.parentWidget()
+    return False
+
+
+def _compact_layout(layout):
+    layout.setContentsMargins(6, 6, 6, 6)
+    layout.setSpacing(4)
+    if isinstance(layout, QFormLayout):
+        layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        if not hasattr(layout, '_nuclear_wrap'):
+            layout._nuclear_wrap = _FormWrap(layout)
+        else:
+            layout._nuclear_wrap.update_policy()
+    for i in range(layout.count()):
+        child = layout.itemAt(i).layout()
+        if child is not None:
+            _compact_layout(child)
 
 
 def compact(widget):
     """Reduce spacing without imposing a fixed font or display scale."""
+    # Replace popup views before enumerating descendants (setView deletes the old view).
+    combos = ([widget] if isinstance(widget, QComboBox) else []) + widget.findChildren(QComboBox)
+    for combo in combos:
+        if not combo.property("nuclear_popup_configured"):
+            combo.setView(QListView(combo))
+            combo.setStyleSheet(combo.styleSheet() + "\nQComboBox { combobox-popup: 0; }")
+            combo.setMaxVisibleItems(16)
+            combo.setProperty("nuclear_popup_configured", True)
     for obj in [widget] + widget.findChildren(QWidget):
         layout = obj.layout()
         if layout is not None:
-            layout.setContentsMargins(6, 6, 6, 6)
-            layout.setSpacing(4)
-            if isinstance(layout, QFormLayout):
-                layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            _compact_layout(layout)
+        if isinstance(obj, (QLineEdit, QComboBox)):
+            obj.setMinimumWidth(0)
+            obj.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         if isinstance(obj, QAbstractButton):
+            short = {
+                'Use optional OME-Zarr cache': 'Use OME-Zarr cache',
+                'Include corrected images in analysis export': 'Export corrected images',
+                'Run automatic matching': 'Run matching',
+                'Automatic proportions and volumes': 'Class proportions / volumes',
+                'Select best overlap candidate': 'Select best overlap',
+                'Use corrected channel for segmentation': 'Segment corrected channel',
+                'Measure this channel on the corrected image': 'Measure corrected channel',
+                'Apply selected correction to analysis': 'Apply correction to analysis',
+                'Correct Z of selected layer': 'Correct selected layer in Z',
+                'Intensity profiles: include zero pixels': 'Profiles: include zero pixels',
+                'Accept reviewed MNTB ROI': 'Accept reviewed ROI',
+                'Compare one-to-one matches only': 'One-to-one matches only',
+                'Histogram: fraction of each group': 'Histogram: group fractions',
+            }
+            if obj.text() in short:
+                obj.setToolTip(obj.toolTip() or obj.text())
+                obj.setText(short[obj.text()])
             if not obj.toolTip():
                 obj.setToolTip(obj.text().replace('&', ''))
             obj.setToolTipDuration(15000)
-        if isinstance(obj, QLabel):
+        if isinstance(obj, QLabel) and not _in_toolbar(obj):
             obj.setTextFormat(Qt.PlainText)
             obj.setWordWrap(True)
             obj.setMinimumWidth(0)
+            obj.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            if not hasattr(obj, '_nuclear_height'):
+                obj._nuclear_height = _LabelHeight(obj)
     # Editors remain resizable; the outer scroll area controls minimum height.
     widget.setMinimumWidth(0)
 
 
 def scroll(widget):
+    if widget.layout() is not None:
+        widget.layout().setAlignment(Qt.AlignTop)
     area = QScrollArea()
     area.setWidgetResizable(True)
     area.setWidget(widget)
@@ -168,7 +285,7 @@ def setup_preview(preview):
         menu = root.addMenu(title); menu.setToolTipsVisible(True)
         for b in panel.findChildren(QPushButton):
             text = b.text()
-            if text.startswith(('Show selected Z profile','Compare P99','Save ', 'Export ', 'Reset ')):
+            if b is not preview.apply_button and text.startswith(('Show selected Z profile','Compare P99','Save ', 'Export ', 'Reset ')):
                 group = menu
                 button_action(group,b)
                 b.hide()
@@ -184,6 +301,7 @@ def setup_preview(preview):
         'max_gain':'Largest multiplier allowed for a plane. Limits amplification of dim planes.',
     }
     for key,field in preview.z_panel.fields.items(): field.setToolTip(tips[key])
+    short_button(preview.apply_button, 'Apply ROI limits', 'Save the reviewed ROI and apply its intensity limits to segmentation.')
     preview.lower.setToolTip('Lower percentile estimated from all voxels inside the reviewed 3D ROI.')
     preview.upper.setToolTip('Upper percentile estimated from all voxels inside the reviewed 3D ROI.')
     for i in range(preview.tabs.count()):
@@ -199,24 +317,40 @@ def pin_live_summary(viewer, ns):
     pinned=[]
     for key in ['count_label','guard_count_label','roi_volume_label','density_label','status_label','roi_review_button']:
         w=ns[key];panel.remove(w);pinned.append(w)
-    summary=Container(widgets=pinned,labels=False)
+    # Keep counts and primary density visible; long details have their own tab.
+    summary=Container(widgets=[ns[key] for key in ('count_label', 'density_label', 'roi_review_button')], labels=False)
     root=QWidget();layout=QVBoxLayout(root)
     compact(summary.native);compact(panel.native)
-    layout.addWidget(summary.native)
     panel.native.layout().setAlignment(Qt.AlignTop)
-    for control in panel:
-        control.native.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     for i in range(panel.native.layout().count()):
         row = panel.native.layout().itemAt(i).widget()
         if row is not None:
-            row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-    layout.addWidget(scroll(panel.native),1)
+            row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+    summary_area = scroll(summary.native)
+    summary_area.setMinimumHeight(130)
+    summary_area.setMaximumHeight(170)
+    layout.addWidget(summary_area)
+    tabs = QTabWidget(); tabs.setUsesScrollButtons(True)
+    tabs.addTab(scroll(panel.native), 'Filters')
+    details = QWidget(); details_layout = QVBoxLayout(details)
+    for key in ('guard_count_label', 'status_label', 'roi_volume_label'):
+        details_layout.addWidget(ns[key].native)
+    details_layout.addStretch()
+    compact(details)
+    tabs.addTab(scroll(details), 'Density')
+    # The reusable plot widget reads the current table, never reruns segmentation.
+    from .live_plots import LivePlots
+    plots = LivePlots(ns)
+    tabs.addTab(plots, 'Graphs')
+    layout.addWidget(tabs, 1)
     viewer.window.remove_dock_widget(ns['filter_dock_widget'])
     ns['filter_summary']=summary
+    ns['analysis_tabs']=tabs
+    ns['live_plots']=plots
     ns['filter_dock_widget']=viewer.window.add_dock_widget(root,area='right',name='Filters and density')
-    # Readouts stay visible while sliders scroll; permit narrow screen layouts.
     ns['filter_dock_widget'].setMinimumWidth(230)
     ns['roi_review_button'].native.setToolTip('Accept the reviewed ROI for the current density calculation. Editing the ROI requires accepting it again.')
+    plots.schedule()
 
 
 def setup_matching(panel):
@@ -277,7 +411,14 @@ def setup_matching(panel):
     for name,page in pages.items():
         layouts[name].addStretch();compact(page)
     old.addWidget(tabs,1)
-    for w in [panel.details,panel.multiple_note,panel.message]:old.addWidget(w)
+    details = QWidget(); details_layout = QVBoxLayout(details)
+    for w in [panel.details,panel.multiple_note,panel.message]:
+        details_layout.addWidget(w)
+    details_layout.addStretch()
+    compact(details)
+    panel.details_scroll = scroll(details)
+    panel.details_scroll.setMaximumHeight(180)
+    old.addWidget(panel.details_scroll)
     for name in ['All','MATCH','AMBIGUOUS','NO_MATCH']:
         a=views.addAction('Show '+name)
         a.triggered.connect(lambda checked=False,n=name: panel.auto_group.setCurrentText(n))

@@ -274,8 +274,9 @@ class Launcher(QWidget):
         if self.session:
             if QMessageBox.question(self,'Replace current view?','Export results to save manual review and ROI edits first. Replace the current analysis view?') != QMessageBox.StandardButton.Yes:return
             ns=self.session.ns
+            if 'live_plots' in ns: ns['live_plots'].dispose()
             if 'manual_review_panel' in ns: ns['manual_review_panel'].close()
-            for key in ('filter_dock_widget','retrospective_panel'):
+            for key in ('filter_dock_widget','retrospective_dock_widget'):
                 if key in ns:
                     widget=ns[key];self.viewer.window.remove_dock_widget(getattr(widget,'native',widget))
             self.viewer.layers.clear();self.session=None
