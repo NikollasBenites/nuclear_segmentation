@@ -119,13 +119,21 @@ class ZCorrectionPanel(QWidget):
             corrected = layer is self.outputs.get(match)
             records.append(dict(channel=match, source_path=str(self.preview.session.input_path),
                                 corrected=corrected, correction=self.records.get(match) if corrected else None))
-        path, _ = QFileDialog.getSaveFileName(self, 'Save image data as OME-TIFF',
-                                             'selected_channels.ome.tif', 'OME-TIFF (*.ome.tif *.ome.tiff)')
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, 'Save multichannel image data', 'selected_channels.tif',
+            'ImageJ TIFF - float32 (*.tif *.tiff);;'
+            'ImageJ TIFF - uint16 rescaled per channel (0 to volume max) (*.tif *.tiff);;'
+            'OME-TIFF - float32 (*.ome.tif *.ome.tiff);;'
+            'OME-TIFF - uint16 rescaled per channel (0 to volume max) (*.ome.tif *.ome.tiff)')
         if not path:
             return
         saved = export_layers(path, layers, self.preview.session.ns['VOXEL_SPACING_UM'], records,
-                              [self.preview.session.input_path, self.launcher.get_config().get('MNTB_ROI_MASK_PATH')])
-        self.status.setText('Saved image data and correction metadata: ' + str(saved))
+                              [self.preview.session.input_path, self.launcher.get_config().get('MNTB_ROI_MASK_PATH')],
+                              file_format='ome' if selected_filter.startswith('OME-TIFF') else 'imagej',
+                              pixel_type='uint16' if 'uint16' in selected_filter else 'float32')
+        note = ('uint16: each channel rescaled from 0 to its whole-volume maximum; '
+                'conversion recorded in JSON. ' if 'uint16' in selected_filter else 'float32. ')
+        self.status.setText('Saved ' + note + str(saved))
 
     def selected(self):
         active = self.viewer.layers.selection.active
