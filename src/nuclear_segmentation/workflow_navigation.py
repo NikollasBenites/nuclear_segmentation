@@ -128,6 +128,11 @@ class WorkflowNavigation(QWidget):
         self.collapse_button.setToolTip(
             "Expand workflow navigation" if collapsed else "Collapse workflow navigation"
         )
-        self.setFixedWidth(64 if collapsed else 210)
+        if collapsed:
+            self.setFixedWidth(64)
+        else:
+            self.setMinimumWidth(170)
+            self.setMaximumWidth(320)
+            self.resize(210, self.height())
         if changed:
             self.collapsed_changed.emit(collapsed)
