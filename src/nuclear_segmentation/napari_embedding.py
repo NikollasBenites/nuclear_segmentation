@@ -7,15 +7,20 @@ deliberately absent from this proof of concept.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from qtpy.QtCore import Signal
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
+    QListWidget,
+    QListWidgetItem,
+    QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -75,12 +80,146 @@ def _shutdown_viewer_model(viewer: Any) -> None:
         shutdown()
 
 
+class OwnedLayerList(QListWidget):
+    """Small layer list that never invokes napari's injected context actions.
+
+    napari 0.10's native ``QtLayerList`` right-click menu resolves its
+    ``LayerList`` argument through napari's native-main-window providers. An
+    independently embedded ``ViewerModel`` is intentionally absent from those
+    global providers. This widget binds visibility and active selection
+    directly to the owned model and disables a context menu until NuCytoSeg
+    supplies its own explicit layer operations.
+    """
+
+    def __init__(self, viewer, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.viewer = viewer
+        self._syncing = False
+        self._disposed = False
+        self._layer_callbacks: dict[Any, tuple[Callable, Callable]] = {}
+        self.setObjectName("ownedLayerList")
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+        self.setSelectionMode(self.SelectionMode.SingleSelection)
+        self.itemChanged.connect(self._on_item_changed)
+        self.currentItemChanged.connect(self._on_current_item_changed)
+        for event_name in ("inserted", "removed", "moved", "reordered", "renamed"):
+            emitter = getattr(self.viewer.layers.events, event_name, None)
+            if emitter is not None:
+                emitter.connect(self._rebuild_from_event)
+        self.viewer.layers.selection.events.active.connect(self._on_active_layer_changed)
+        self._rebuild()
+
+    def _rebuild_from_event(self, event=None) -> None:
+        self._rebuild()
+
+    def _disconnect_layer_callbacks(self) -> None:
+        for layer, (name_callback, visible_callback) in self._layer_callbacks.items():
+            layer.events.name.disconnect(name_callback)
+            layer.events.visible.disconnect(visible_callback)
+        self._layer_callbacks.clear()
+
+    def _rebuild(self) -> None:
+        if self._disposed:
+            return
+        self._syncing = True
+        self._disconnect_layer_callbacks()
+        self.clear()
+        for layer in reversed(self.viewer.layers):
+            item = QListWidgetItem(layer.name)
+            item.setData(Qt.ItemDataRole.UserRole, layer)
+            item.setFlags(
+                item.flags()
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsEnabled
+            )
+            item.setCheckState(
+                Qt.CheckState.Checked if layer.visible else Qt.CheckState.Unchecked
+            )
+            self.addItem(item)
+            name_callback = lambda event, current=layer: self._sync_layer(current)
+            visible_callback = lambda event, current=layer: self._sync_layer(current)
+            layer.events.name.connect(name_callback)
+            layer.events.visible.connect(visible_callback)
+            self._layer_callbacks[layer] = (name_callback, visible_callback)
+            if layer is self.viewer.layers.selection.active:
+                self.setCurrentItem(item)
+        self._syncing = False
+
+    def _item_for_layer(self, layer):
+        for row in range(self.count()):
+            item = self.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) is layer:
+                return item
+        return None
+
+    def _sync_layer(self, layer) -> None:
+        if self._disposed or self._syncing:
+            return
+        item = self._item_for_layer(layer)
+        if item is None:
+            return
+        self._syncing = True
+        item.setText(layer.name)
+        item.setCheckState(
+            Qt.CheckState.Checked if layer.visible else Qt.CheckState.Unchecked
+        )
+        self._syncing = False
+
+    def _on_item_changed(self, item: QListWidgetItem) -> None:
+        if self._syncing:
+            return
+        layer = item.data(Qt.ItemDataRole.UserRole)
+        if layer is not None:
+            layer.visible = item.checkState() == Qt.CheckState.Checked
+
+    def _on_current_item_changed(self, current, previous=None) -> None:
+        if self._syncing or current is None:
+            return
+        layer = current.data(Qt.ItemDataRole.UserRole)
+        if layer is not None and layer in self.viewer.layers:
+            self.viewer.layers.selection.active = layer
+
+    def _on_active_layer_changed(self, event=None) -> None:
+        if self._syncing or self._disposed:
+            return
+        item = self._item_for_layer(self.viewer.layers.selection.active)
+        if item is not None:
+            self._syncing = True
+            self.setCurrentItem(item)
+            self._syncing = False
+
+    def contextMenuEvent(self, event) -> None:
+        """Accept right-clicks without opening napari's unsafe native menu."""
+        event.accept()
+
+    def dispose(self) -> None:
+        if self._disposed:
+            return
+        self._disposed = True
+        self._disconnect_layer_callbacks()
+        for event_name in ("inserted", "removed", "moved", "reordered", "renamed"):
+            emitter = getattr(self.viewer.layers.events, event_name, None)
+            if emitter is not None:
+                emitter.disconnect(self._rebuild_from_event)
+        self.viewer.layers.selection.events.active.disconnect(
+            self._on_active_layer_changed
+        )
+        self.clear()
+
+
 class EmbeddedNapariWidget(QWidget):
     """Application-owned widget containing a public napari ``QtViewer``."""
 
     status_changed = Signal(str)
 
-    def __init__(self, parent: QWidget | None = None, *, load_demo: bool = True):
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        load_demo: bool = True,
+        qt_viewer_factory=None,
+    ):
         super().__init__(parent)
         from napari import __version__ as napari_version
         from napari.components import ViewerModel
@@ -91,8 +230,10 @@ class EmbeddedNapariWidget(QWidget):
                 f"{DISPLAY_NAME} requires napari 0.10.0 or later; found {napari_version}."
             )
         self._closed = False
+        self._demo_labels = None
         self.viewer = ViewerModel(title=DISPLAY_NAME)
-        self.qt_viewer = QtViewer(self.viewer, show_welcome_screen=False)
+        factory = qt_viewer_factory or QtViewer
+        self.qt_viewer = factory(self.viewer, show_welcome_screen=False)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -115,25 +256,65 @@ class EmbeddedNapariWidget(QWidget):
         layout.addWidget(title)
 
         display = QHBoxLayout()
+        self.display_group = QButtonGroup(self)
+        self.display_group.setExclusive(True)
+        self.display_buttons = {}
         for text, dimensions in (("2D", 2), ("3D", 3)):
-            button = QPushButton(text)
+            button = self._tool_button(text, f"Show the volume in {text}")
+            button.setCheckable(True)
+            button.setChecked(dimensions == 2)
+            self.display_group.addButton(button)
             button.clicked.connect(
-                lambda checked=False, value=dimensions: self.set_ndisplay(value)
+                lambda checked=False, value=dimensions: self._run_ui_action(
+                    lambda: self.set_ndisplay(value)
+                )
             )
+            self.display_buttons[dimensions] = button
             display.addWidget(button)
-        reset = QPushButton("Reset view")
-        reset.clicked.connect(lambda checked=False: self.viewer.reset_view())
+        reset = self._tool_button("Reset", "Reset the camera view")
+        reset.clicked.connect(
+            lambda checked=False: self._run_ui_action(self.viewer.reset_view)
+        )
         display.addWidget(reset)
         layout.addLayout(display)
 
         editing = QHBoxLayout()
-        for text, mode in (("Pan", "pan_zoom"), ("Paint", "paint"), ("Erase", "erase")):
-            button = QPushButton(text)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.setExclusive(True)
+        self.mode_buttons = {}
+        for text, mode, tooltip in (
+            ("Pan", "pan_zoom", "Pan and zoom without editing labels"),
+            ("Pick", "pick", "Pick the label under the cursor"),
+            ("Paint", "paint", "Paint the selected label"),
+            ("Erase", "erase", "Erase label voxels"),
+        ):
+            button = self._tool_button(text, tooltip)
+            button.setCheckable(True)
+            button.setChecked(mode == "pan_zoom")
+            self.mode_group.addButton(button)
             button.clicked.connect(
-                lambda checked=False, value=mode: self.set_demo_label_mode(value)
+                lambda checked=False, value=mode: self._run_ui_action(
+                    lambda: self.set_demo_label_mode(value)
+                )
             )
+            self.mode_buttons[mode] = button
             editing.addWidget(button)
         layout.addLayout(editing)
+
+        label_row = QHBoxLayout()
+        label_row.addWidget(QLabel("Selected label"))
+        self.selected_label_control = QSpinBox()
+        self.selected_label_control.setRange(0, 2**31 - 1)
+        self.selected_label_control.setToolTip(
+            "Label value used by Pick, Paint, and Erase modes"
+        )
+        self.selected_label_control.valueChanged.connect(
+            lambda value: self._run_ui_action(
+                lambda: self.set_selected_label(value)
+            )
+        )
+        label_row.addWidget(self.selected_label_control, 1)
+        layout.addLayout(label_row)
 
         note = QLabel(
             "Select a layer below. Paint and Erase operate only on the disposable "
@@ -141,10 +322,26 @@ class EmbeddedNapariWidget(QWidget):
         )
         note.setWordWrap(True)
         layout.addWidget(note)
-        layout.addWidget(self.qt_viewer.layerButtons)
-        layout.addWidget(self.qt_viewer.layers, 1)
-        layout.addWidget(self.qt_viewer.controls)
+        self.layer_list = OwnedLayerList(self.viewer)
+        layout.addWidget(self.layer_list, 1)
         return tools
+
+    @staticmethod
+    def _tool_button(text: str, tooltip: str) -> QToolButton:
+        button = QToolButton()
+        button.setText(text)
+        button.setToolTip(tooltip)
+        button.setAutoRaise(False)
+        return button
+
+    def _run_ui_action(self, callback: Callable[[], Any]) -> bool:
+        """Keep expected control errors inside the Qt callback boundary."""
+        try:
+            callback()
+        except Exception as exc:
+            self.status_changed.emit(f"Viewer action failed: {exc}")
+            return False
+        return True
 
     def load_demo_layers(self) -> None:
         """Populate the viewer with synthetic calibrated smoke-test layers."""
@@ -193,7 +390,12 @@ class EmbeddedNapariWidget(QWidget):
         labels.brush_size = 5
         labels.mode = "pan_zoom"
         labels.mouse_drag_callbacks.append(self._on_demo_label_mouse_drag)
-        self.viewer.scale_bar.visible = True
+        labels.events.selected_label.connect(self._on_selected_label_changed)
+        labels.events.mode.connect(self._on_demo_label_mode_changed)
+        self._demo_labels = labels
+        self._on_selected_label_changed()
+        self._on_demo_label_mode_changed()
+        self.viewer.canvas.overlays.scale_bar.visible = True
         self.status_changed.emit("Synthetic calibrated layers loaded")
 
     def _on_demo_label_mouse_drag(self, layer, event):
@@ -206,41 +408,69 @@ class EmbeddedNapariWidget(QWidget):
         yield
 
     def demo_labels(self):
-        return self.viewer.layers["Editable demonstration labels"]
+        if self._demo_labels is None or self._demo_labels not in self.viewer.layers:
+            raise RuntimeError("The disposable demonstration Labels layer is unavailable.")
+        return self._demo_labels
 
     def set_ndisplay(self, dimensions: int) -> None:
         if dimensions not in (2, 3):
             raise ValueError("Display dimensions must be 2 or 3.")
         self.viewer.dims.ndisplay = dimensions
+        self.display_buttons[dimensions].setChecked(True)
         self.status_changed.emit(f"{dimensions}D display active")
 
     def set_demo_label_mode(self, mode: str) -> None:
-        if mode not in {"pan_zoom", "paint", "erase"}:
+        if mode not in {"pan_zoom", "pick", "paint", "erase"}:
             raise ValueError("Unsupported labels interaction mode.")
         labels = self.demo_labels()
         self.viewer.layers.selection.active = labels
         labels.mode = mode
+        self.mode_buttons[mode].setChecked(True)
         self.status_changed.emit(f"Demonstration labels mode: {mode}")
+
+    def set_selected_label(self, value: int) -> None:
+        labels = self.demo_labels()
+        labels.selected_label = int(value)
+
+    def _on_selected_label_changed(self, event=None) -> None:
+        if self._demo_labels is None:
+            return
+        self.selected_label_control.blockSignals(True)
+        self.selected_label_control.setValue(int(self._demo_labels.selected_label))
+        self.selected_label_control.blockSignals(False)
+
+    def _on_demo_label_mode_changed(self, event=None) -> None:
+        if self._demo_labels is None:
+            return
+        mode = str(self._demo_labels.mode)
+        button = self.mode_buttons.get(mode)
+        if button is not None:
+            button.setChecked(True)
+
+    def pick_demo_label_at_data_position(self, position) -> int:
+        """Headless equivalent of a Labels Pick click for regression tests."""
+        labels = self.demo_labels()
+        value = labels.get_value(position)
+        selected = 0 if value is None else int(value)
+        labels.selected_label = selected
+        return selected
 
     def shutdown(self) -> None:
         """Idempotently release the embedded viewer and its slicing worker."""
         if self._closed:
             return
         self._closed = True
-        if self.viewer.layers:
-            labels = next(
-                (
-                    layer
-                    for layer in self.viewer.layers
-                    if layer.name == "Editable demonstration labels"
-                ),
-                None,
-            )
-            if labels is not None and self._on_demo_label_mouse_drag in labels.mouse_drag_callbacks:
+        labels = self._demo_labels
+        if labels is not None:
+            if self._on_demo_label_mouse_drag in labels.mouse_drag_callbacks:
                 labels.mouse_drag_callbacks.remove(self._on_demo_label_mouse_drag)
+            labels.events.selected_label.disconnect(self._on_selected_label_changed)
+            labels.events.mode.disconnect(self._on_demo_label_mode_changed)
+        self.layer_list.dispose()
         _shutdown_viewer_model(self.viewer)
         self.viewer.layers.clear()
         self.qt_viewer.close()
+        self._demo_labels = None
 
     def closeEvent(self, event) -> None:
         self.shutdown()
