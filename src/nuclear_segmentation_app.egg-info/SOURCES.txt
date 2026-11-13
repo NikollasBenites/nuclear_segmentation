@@ -7,12 +7,14 @@ src/nuclear_segmentation/automatic_matching.py
 src/nuclear_segmentation/config.py
 src/nuclear_segmentation/core.py
 src/nuclear_segmentation/defaults.json
+src/nuclear_segmentation/embedding_smoke_test.py
 src/nuclear_segmentation/image_export.py
 src/nuclear_segmentation/live_plots.py
 src/nuclear_segmentation/manual_review.py
 src/nuclear_segmentation/map2_split.py
 src/nuclear_segmentation/matching.py
 src/nuclear_segmentation/matching_ui.py
+src/nuclear_segmentation/napari_embedding.py
 src/nuclear_segmentation/normalization.py
 src/nuclear_segmentation/normalization_ui.py
 src/nuclear_segmentation/roi_smoothing.py
@@ -59,6 +61,7 @@ tests/test_live_plots.py
 tests/test_manual_review.py
 tests/test_map2_split.py
 tests/test_matching.py
+tests/test_napari_embedding.py
 tests/test_normalization.py
 tests/test_roi_smoothing.py
 tests/test_ui_layout.py

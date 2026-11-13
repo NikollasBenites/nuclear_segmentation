@@ -11,7 +11,7 @@ Requires-Dist: scikit-image>=0.26.0
 Requires-Dist: tifffile>=2026.9.15
 Requires-Dist: matplotlib>=3.11.2
 Requires-Dist: numba>=0.61
-Requires-Dist: napari>=0.9.1
+Requires-Dist: napari>=0.10.0
 Requires-Dist: magicgui>=0.10.2
 Requires-Dist: qtpy>=2.4.3
 Provides-Extra: gui

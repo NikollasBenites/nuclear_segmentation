@@ -54,7 +54,11 @@ def test_selected_layer_preview_apply(sample, tmp_path, monkeypatch):
         from qtpy.QtWidgets import QFileDialog
         import tifffile
         target = tmp_path / 'preview.ome.tif'
-        monkeypatch.setattr(QFileDialog, 'getSaveFileName', lambda *a: (str(target), ''))
+        monkeypatch.setattr(
+            QFileDialog,
+            'getSaveFileName',
+            lambda *a: (str(target), 'OME-TIFF - float32 (*.ome.tif *.ome.tiff)'),
+        )
         panel.save_corrected()
         np.testing.assert_array_equal(tifffile.imread(target), first)
         panel.include_export.setChecked(True)

@@ -1,0 +1,7 @@
+# Reproducible GUI stack for the Phase 1 embedding smoke test.
+# Run from the repository root with Python 3.12:
+#   python -m pip install -r requirements-embedding-smoke.txt
+-e .[gui]
+napari==0.10.0
+PyQt6==6.11.0
+qtpy==2.4.3
