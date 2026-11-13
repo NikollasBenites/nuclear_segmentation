@@ -219,6 +219,7 @@ class EmbeddedNapariWidget(QWidget):
         *,
         load_demo: bool = True,
         qt_viewer_factory=None,
+        show_controls: bool = True,
     ):
         super().__init__(parent)
         from napari import __version__ as napari_version
@@ -231,6 +232,7 @@ class EmbeddedNapariWidget(QWidget):
             )
         self._closed = False
         self._demo_labels = None
+        self._label_control_events_connected = False
         self.viewer = ViewerModel(title=DISPLAY_NAME)
         factory = qt_viewer_factory or QtViewer
         self.qt_viewer = factory(self.viewer, show_welcome_screen=False)
@@ -239,7 +241,11 @@ class EmbeddedNapariWidget(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(self.qt_viewer, 1)
-        root.addWidget(self._build_viewer_tools())
+        self.viewer_tools = None
+        self.layer_list = None
+        if show_controls:
+            self.viewer_tools = self._build_viewer_tools()
+            root.addWidget(self.viewer_tools)
 
         if load_demo:
             self.load_demo_layers()
@@ -390,11 +396,13 @@ class EmbeddedNapariWidget(QWidget):
         labels.brush_size = 5
         labels.mode = "pan_zoom"
         labels.mouse_drag_callbacks.append(self._on_demo_label_mouse_drag)
-        labels.events.selected_label.connect(self._on_selected_label_changed)
-        labels.events.mode.connect(self._on_demo_label_mode_changed)
         self._demo_labels = labels
-        self._on_selected_label_changed()
-        self._on_demo_label_mode_changed()
+        if self.viewer_tools is not None:
+            labels.events.selected_label.connect(self._on_selected_label_changed)
+            labels.events.mode.connect(self._on_demo_label_mode_changed)
+            self._label_control_events_connected = True
+            self._on_selected_label_changed()
+            self._on_demo_label_mode_changed()
         self.viewer.canvas.overlays.scale_bar.visible = True
         self.status_changed.emit("Synthetic calibrated layers loaded")
 
@@ -464,9 +472,12 @@ class EmbeddedNapariWidget(QWidget):
         if labels is not None:
             if self._on_demo_label_mouse_drag in labels.mouse_drag_callbacks:
                 labels.mouse_drag_callbacks.remove(self._on_demo_label_mouse_drag)
-            labels.events.selected_label.disconnect(self._on_selected_label_changed)
-            labels.events.mode.disconnect(self._on_demo_label_mode_changed)
-        self.layer_list.dispose()
+            if self._label_control_events_connected:
+                labels.events.selected_label.disconnect(self._on_selected_label_changed)
+                labels.events.mode.disconnect(self._on_demo_label_mode_changed)
+                self._label_control_events_connected = False
+        if self.layer_list is not None:
+            self.layer_list.dispose()
         _shutdown_viewer_model(self.viewer)
         self.viewer.layers.clear()
         self.qt_viewer.close()
