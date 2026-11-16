@@ -14,6 +14,8 @@ from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.projection_crop import (
     crop_czyx,
     generate_xy_projection,
+    masked_crop_czyx,
+    polygon_roi_mask,
     selection_bounding_box,
 )
 from nuclear_segmentation.project_state import (
@@ -70,6 +72,40 @@ def test_polygon_rectangle_bounds_clipping_and_invalid_selection():
         selection_bounding_box([[-5, -5], [-2, -1]], (20, 30))
 
 
+def test_polygon_mask_is_boolean_deterministic_and_rejects_invalid_geometry():
+    vertices = np.array([[2, 3], [2, 9], [8, 3]], dtype=float)
+    bbox, mask = polygon_roi_mask(vertices, (12, 14))
+    assert bbox == (2, 8, 3, 9)
+    assert mask.dtype == bool
+    assert mask.shape == (6, 6)
+    assert mask[0, 0]
+    assert not mask[-1, -1]
+    bbox_again, mask_again = polygon_roi_mask(vertices, (12, 14))
+    assert bbox_again == bbox
+    np.testing.assert_array_equal(mask_again, mask)
+    with pytest.raises(ValueError, match="Self-intersecting"):
+        polygon_roi_mask([[1, 1], [7, 7], [1, 7], [7, 1]], (10, 10))
+    with pytest.raises(ValueError, match="degenerate"):
+        polygon_roi_mask([[1, 1], [2, 2], [3, 3]], (10, 10))
+    with pytest.raises(ValueError, match="finite"):
+        polygon_roi_mask([[1, 1], [2, np.nan], [3, 1]], (10, 10))
+
+
+def test_polygon_masked_crop_preserves_dtype_z_channels_and_source():
+    source = np.arange(2 * 3 * 10 * 11, dtype=np.uint16).reshape(2, 3, 10, 11)
+    original = source.copy()
+    bbox, mask = polygon_roi_mask([[1, 2], [1, 8], [7, 2]], source.shape[-2:])
+    cropped = masked_crop_czyx(source, bbox, mask)
+    assert cropped.shape == (2, 3, *mask.shape)
+    assert cropped.dtype == source.dtype
+    expected = source[:, :, bbox[0] : bbox[1], bbox[2] : bbox[3]].copy()
+    expected[:, :, ~mask] = 0
+    np.testing.assert_array_equal(cropped, expected)
+    np.testing.assert_array_equal(source, original)
+    with pytest.raises(ValueError, match="does not match"):
+        masked_crop_czyx(source, bbox, np.ones((2, 2), dtype=bool))
+
+
 def _dataset(source_format="TIFF"):
     data = np.arange(2 * 4 * 12 * 14, dtype=np.uint16).reshape(2, 4, 12, 14)
     return ImportedDataset(
@@ -113,6 +149,29 @@ def test_project_crop_preserves_source_identity_z_dtype_values_and_provenance(
     assert state.working_offset_yx == (2, 3)
     assert state.reset_crop() is dataset
     np.testing.assert_array_equal(state.working_dataset.data_czyx, original)
+
+
+def test_project_polygon_crop_records_independent_mask_and_physical_provenance():
+    dataset = _dataset("Leica LIF")
+    original = dataset.data_czyx.copy()
+    state = ProjectState()
+    state.set_dataset(dataset)
+    vertices = np.array([[2, 3], [2, 10], [9, 3]], dtype=float)
+    bbox, mask = polygon_roi_mask(vertices, dataset.data_czyx.shape[-2:])
+    working = state.apply_crop(bbox, vertices, mask, "polygon")
+    assert working.data_czyx.shape == (2, 4, *mask.shape)
+    assert working.data_czyx.dtype == np.uint16
+    assert np.all(working.data_czyx[:, :, ~mask] == 0)
+    rectangular = original[:, :, bbox[0] : bbox[1], bbox[2] : bbox[3]]
+    np.testing.assert_array_equal(working.data_czyx[:, :, mask], rectangular[:, :, mask])
+    np.testing.assert_array_equal(state.original_dataset.data_czyx, original)
+    assert state.roi_mask_yx is not mask
+    np.testing.assert_array_equal(state.roi_mask_yx, mask)
+    assert state.crop_provenance.selection_type == "polygon"
+    assert state.crop_provenance.spatial_offset_yx_um == (1.0, 0.75)
+    assert state.crop_provenance.original_vertices_yx_um[0] == (1.0, 0.75)
+    assert state.crop_provenance.roi_pixel_count == int(mask.sum())
+    assert state.crop_provenance.roi_area_um2 == pytest.approx(mask.sum() * 0.5 * 0.25)
 
 
 def test_crop_czyx_rejects_invalid_bounds_without_copying_source():
@@ -220,4 +279,24 @@ def test_desktop_projection_preview_apply_reset_and_review_isolation(qapp, tmp_p
     assert all(layer.data.shape == (4, 12, 14) for layer in restored)
     assert all(tuple(layer.translate) == (0.0, 0.0, 0.0) for layer in restored)
     np.testing.assert_array_equal(window.project_state.original_dataset.data_czyx, source_copy)
+
+    assert window.crop_workspace.generate_projection(0, "maximum")
+    _wait(qapp, lambda: window.crop_workspace._thread is None)
+    assert window.crop_workspace.start_drawing("polygon")
+    polygon = window.crop_workspace.selection_layer
+    vertices = np.array([[2, 3], [2, 10], [9, 3]], dtype=float)
+    polygon.add(vertices, shape_type="polygon")
+    expected_bbox, expected_mask = polygon_roi_mask(vertices, original.shape[-2:])
+    assert window.crop_workspace.preview_crop()
+    for channel, layer in enumerate(window.crop_workspace.preview_layers):
+        expected = masked_crop_czyx(
+            original[channel : channel + 1], expected_bbox, expected_mask
+        )[0]
+        np.testing.assert_array_equal(layer.data, expected)
+    np.testing.assert_array_equal(window.project_state.original_dataset.data_czyx, source_copy)
+    assert window.crop_workspace.confirm_crop()
+    np.testing.assert_array_equal(window.project_state.roi_mask_yx, expected_mask)
+    assert window.project_state.crop_provenance.selection_type == "polygon"
+    assert np.all(window.project_state.working_dataset.data_czyx[:, :, ~expected_mask] == 0)
+    assert window.crop_workspace.reset_crop()
     window.close()

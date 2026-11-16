@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import logging
 
 from qtpy.QtCore import QSize, Qt, QThread
 from qtpy.QtGui import QAction, QKeySequence
@@ -20,6 +21,7 @@ from qtpy.QtWidgets import (
 from .context_panel import ContextPanel
 from .crop_workspace import CropWorkspaceController
 from .image_import import TiffImportWorker, inspect_tiff
+from .import_loading import ImportLoadingDialog
 from .layer_panel import LayerPanel
 from .lif_import import LifEnumerationWorker, LifImportWorker
 from .mask_selection import MaskSelectionController
@@ -63,6 +65,8 @@ class DesktopWindow(QMainWindow):
         self._import_worker = None
         self._pending_import_path: Path | None = None
         self._pending_lif_series = None
+        self._loading_dialog = None
+        self.import_diagnostics = []
         self._load_after_worker_finished = False
         self._close_when_import_finishes = False
         self._bioimage_factory = bioimage_factory
@@ -424,6 +428,7 @@ class DesktopWindow(QMainWindow):
             worker = TiffImportWorker(self._pending_import_path, options)
         else:
             options.pop("axes_override", None)
+            self._show_lif_loading_dialog()
             worker = LifImportWorker(
                 self._pending_import_path,
                 self._pending_lif_series.index,
@@ -439,6 +444,9 @@ class DesktopWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.failed.connect(self._show_import_error)
+        diagnostic = getattr(worker, "diagnostic", None)
+        if diagnostic is not None:
+            diagnostic.connect(self._record_import_diagnostic)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(self._import_finished)
@@ -448,6 +456,29 @@ class DesktopWindow(QMainWindow):
         self.open_image_action.setEnabled(False)
         self.context_panel.project_page.set_loading(True)
         thread.start()
+
+    def _show_lif_loading_dialog(self) -> None:
+        self._finish_loading_dialog()
+        series = self._pending_lif_series
+        self._loading_dialog = ImportLoadingDialog(
+            self._pending_import_path.name,
+            series.name,
+            self,
+        )
+        self._loading_dialog.show()
+
+    def _record_import_diagnostic(self, message: str) -> None:
+        text = str(message)
+        self.import_diagnostics.append(text)
+        self.import_diagnostics[:] = self.import_diagnostics[-500:]
+        logging.getLogger("nuclear_segmentation.import").info(text)
+        if self._loading_dialog is not None:
+            self._loading_dialog.update_stage(text)
+
+    def _finish_loading_dialog(self) -> None:
+        if self._loading_dialog is not None:
+            self._loading_dialog.finish()
+            self._loading_dialog = None
 
     def _show_series_browser(self, source: Path, series) -> None:
         if self._close_when_import_finishes:
@@ -492,6 +523,10 @@ class DesktopWindow(QMainWindow):
 
     def _apply_imported_dataset(self, dataset) -> None:
         self.crop_workspace.clear_workspace_for_new_project()
+        self._record_import_diagnostic(
+            f"layer_creation_started: file={dataset.source_filename} "
+            f"series={dataset.series_index}"
+        )
         viewer = self.embedding.viewer
         old_layers = [
             layer
@@ -541,6 +576,11 @@ class DesktopWindow(QMainWindow):
             f"Loaded {dataset.source_filename}: {len(dataset.channels)} channel(s)",
             5000,
         )
+        self._record_import_diagnostic(
+            f"import_completed: file={dataset.source_filename} "
+            f"series={dataset.series_index} CZYX={dataset.standardized_shape}"
+        )
+        self._finish_loading_dialog()
 
     def _display_working_dataset(self, dataset) -> None:
         viewer = self.embedding.viewer
@@ -672,6 +712,8 @@ class DesktopWindow(QMainWindow):
         self._channel_layer_callbacks.clear()
 
     def _show_import_error(self, message: str) -> None:
+        self._record_import_diagnostic(f"import_failed: {message}")
+        self._finish_loading_dialog()
         self.project_state.set_import_status(f"Import failed: {message}")
         self.statusBar().showMessage(f"Image import failed: {message}", 8000)
 
@@ -836,6 +878,16 @@ class DesktopWindow(QMainWindow):
             }
             #projectSection QPushButton { background: #17677a; border-radius: 5px; padding: 7px; }
             #placeholderNote { color: #8fa1b3; padding: 10px 3px; }
+            #importLoadingDialog { background: #101c27; color: #e5edf3; }
+            #importLoadingDialog QLabel { color: #c4d1dc; }
+            #importLoadingDialog #loadingTitle {
+                color: #75dcd4; font-size: 16px; font-weight: 700;
+            }
+            #importLoadingDialog QProgressBar {
+                background: #0a141d; border: 1px solid #314759;
+                border-radius: 4px; min-height: 10px;
+            }
+            #importLoadingDialog QProgressBar::chunk { background: #218ba0; }
             QSplitter::handle { background: #253342; width: 2px; }
             QStatusBar { border-top: 1px solid #263748; font-size: 12px; min-height: 25px; }
             """
@@ -851,6 +903,7 @@ class DesktopWindow(QMainWindow):
             return
         if not self._closed:
             self._closed = True
+            self._finish_loading_dialog()
             self.save_layout()
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
             self.mask_selection.dispose()

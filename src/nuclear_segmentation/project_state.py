@@ -50,6 +50,12 @@ class CropProvenance:
     selection_vertices_yx: tuple[tuple[float, float], ...]
     voxel_spacing_zyx_um: tuple[float, float, float]
     spatial_offset_yx_um: tuple[float, float]
+    selection_type: str
+    cropped_vertices_yx: tuple[tuple[float, float], ...]
+    original_vertices_yx_um: tuple[tuple[float, float], ...]
+    roi_mask_shape_yx: tuple[int, int]
+    roi_pixel_count: int
+    roi_area_um2: float
 
 
 class ProjectState(QObject):
@@ -66,6 +72,7 @@ class ProjectState(QObject):
         self.original_dataset: ImportedDataset | None = None
         self.working_dataset: ImportedDataset | None = None
         self.crop_provenance: CropProvenance | None = None
+        self.roi_mask_yx: np.ndarray | None = None
         self.working_offset_yx = (0, 0)
         self.analysis_mode = "segment"
         self.import_status = "No image loaded"
@@ -87,6 +94,7 @@ class ProjectState(QObject):
         self.original_dataset = dataset
         self.working_dataset = dataset
         self.crop_provenance = None
+        self.roi_mask_yx = None
         self.working_offset_yx = (0, 0)
         self.voxel_spacing_zyx_um = dataset.voxel_spacing_zyx_um
         self.calibration_source = dataset.calibration_source
@@ -103,26 +111,51 @@ class ProjectState(QObject):
         self.changed.emit(dataset)
         self.channels_changed.emit(tuple(self.channels))
 
-    def apply_crop(self, bounding_box, selection_vertices) -> ImportedDataset:
-        from .projection_crop import crop_czyx
+    def apply_crop(
+        self,
+        bounding_box,
+        selection_vertices,
+        roi_mask_yx=None,
+        selection_type="rectangle",
+    ) -> ImportedDataset:
+        from .projection_crop import crop_czyx, masked_crop_czyx
 
         if self.original_dataset is None:
             raise ValueError("Load a dataset before applying a crop.")
         y0, y1, x0, x1 = (int(value) for value in bounding_box)
-        cropped = crop_czyx(
-            self.original_dataset.data_czyx, (y0, y1, x0, x1)
-        )
+        rectangular = crop_czyx(self.original_dataset.data_czyx, (y0, y1, x0, x1))
+        if roi_mask_yx is None:
+            roi_mask = np.ones(rectangular.shape[-2:], dtype=bool)
+            cropped = rectangular
+        else:
+            roi_mask = np.asarray(roi_mask_yx, dtype=bool)
+            cropped = masked_crop_czyx(
+                self.original_dataset.data_czyx,
+                (y0, y1, x0, x1),
+                roi_mask,
+            )
         spacing = tuple(self.voxel_spacing_zyx_um)
+        vertices = tuple(
+            (float(vertex[0]), float(vertex[1])) for vertex in selection_vertices
+        )
+        cropped_vertices = tuple((y - y0, x - x0) for y, x in vertices)
+        physical_vertices = tuple(
+            (y * spacing[1], x * spacing[2]) for y, x in vertices
+        )
+        pixel_count = int(np.count_nonzero(roi_mask))
         provenance = CropProvenance(
             original_shape_czyx=self.original_dataset.standardized_shape,
             cropped_shape_czyx=tuple(int(value) for value in cropped.shape),
             bounding_box_y0_y1_x0_x1=(y0, y1, x0, x1),
-            selection_vertices_yx=tuple(
-                (float(vertex[0]), float(vertex[1]))
-                for vertex in selection_vertices
-            ),
+            selection_vertices_yx=vertices,
             voxel_spacing_zyx_um=spacing,
             spatial_offset_yx_um=(y0 * spacing[1], x0 * spacing[2]),
+            selection_type=str(selection_type),
+            cropped_vertices_yx=cropped_vertices,
+            original_vertices_yx_um=physical_vertices,
+            roi_mask_shape_yx=tuple(int(value) for value in roi_mask.shape),
+            roi_pixel_count=pixel_count,
+            roi_area_um2=pixel_count * spacing[1] * spacing[2],
         )
         metadata = dict(self.original_dataset.acquisition_metadata)
         metadata["crop"] = {
@@ -131,6 +164,12 @@ class ProjectState(QObject):
             "original_shape_czyx": list(provenance.original_shape_czyx),
             "cropped_shape_czyx": list(provenance.cropped_shape_czyx),
             "spatial_offset_yx_um": list(provenance.spatial_offset_yx_um),
+            "selection_type": provenance.selection_type,
+            "cropped_vertices_yx": [list(vertex) for vertex in cropped_vertices],
+            "original_vertices_yx_um": [list(vertex) for vertex in physical_vertices],
+            "roi_mask_shape_yx": list(provenance.roi_mask_shape_yx),
+            "roi_pixel_count": provenance.roi_pixel_count,
+            "roi_area_um2": provenance.roi_area_um2,
         }
         self.working_dataset = replace(
             self.original_dataset,
@@ -143,6 +182,7 @@ class ProjectState(QObject):
         self.dataset = self.working_dataset
         self.working_offset_yx = (y0, x0)
         self.crop_provenance = provenance
+        self.roi_mask_yx = np.array(roi_mask, copy=True)
         return self.working_dataset
 
     def reset_crop(self) -> ImportedDataset:
@@ -151,6 +191,7 @@ class ProjectState(QObject):
         self.working_dataset = self.original_dataset
         self.dataset = self.original_dataset
         self.crop_provenance = None
+        self.roi_mask_yx = None
         self.working_offset_yx = (0, 0)
         return self.original_dataset
 

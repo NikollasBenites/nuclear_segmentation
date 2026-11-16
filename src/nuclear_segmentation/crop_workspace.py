@@ -4,7 +4,12 @@ from __future__ import annotations
 import numpy as np
 from qtpy.QtCore import QObject, QThread, Signal, Slot
 
-from .projection_crop import generate_xy_projection, selection_bounding_box
+from .projection_crop import (
+    generate_xy_projection,
+    masked_crop_czyx,
+    polygon_roi_mask,
+    selection_bounding_box,
+)
 
 
 class ProjectionWorker(QObject):
@@ -45,6 +50,8 @@ class CropWorkspaceController(QObject):
         self._source_visibility = {}
         self._preview_bbox_original = None
         self._preview_vertices_original = None
+        self._preview_roi_mask = None
+        self._preview_selection_type = None
         self._thread = None
         self._worker = None
         self._disposed = False
@@ -175,16 +182,29 @@ class CropWorkspaceController(QObject):
             raise ValueError("Draw a rectangle or polygon before previewing the crop.")
         vertices = np.asarray(self.selection_layer.data[-1], dtype=float)
         dataset = self.project_state.working_dataset
-        local_bbox = selection_bounding_box(vertices, dataset.data_czyx.shape[-2:])
+        raw_type = self.selection_layer.shape_type[-1]
+        selection_type = str(getattr(raw_type, "value", raw_type)).lower()
+        if selection_type == "polygon":
+            local_bbox, roi_mask = polygon_roi_mask(
+                vertices, dataset.data_czyx.shape[-2:]
+            )
+        elif selection_type == "rectangle":
+            local_bbox = selection_bounding_box(
+                vertices, dataset.data_czyx.shape[-2:]
+            )
+            y0, y1, x0, x1 = local_bbox
+            roi_mask = np.ones((y1 - y0, x1 - x0), dtype=bool)
+        else:
+            raise ValueError(f"Unsupported crop selection type: {selection_type}")
         offset_y, offset_x = self.project_state.working_offset_yx
         y0, y1, x0, x1 = local_bbox
         original_bbox = (y0 + offset_y, y1 + offset_y, x0 + offset_x, x1 + offset_x)
         original_vertices = vertices + np.asarray((offset_y, offset_x))
-        return original_bbox, original_vertices
+        return original_bbox, original_vertices, roi_mask, selection_type
 
     def preview_crop(self) -> bool:
         try:
-            bbox, vertices = self._selection()
+            bbox, vertices, roi_mask, selection_type = self._selection()
         except ValueError as error:
             self._status(str(error))
             return False
@@ -200,8 +220,16 @@ class CropWorkspaceController(QObject):
         for layer in self._source_visibility:
             layer.visible = False
         for channel in self.project_state.channels:
+            if selection_type == "polygon":
+                preview_data = masked_crop_czyx(
+                    original.data_czyx[channel.index : channel.index + 1],
+                    bbox,
+                    roi_mask,
+                )[0]
+            else:
+                preview_data = original.data_czyx[channel.index, :, y0:y1, x0:x1]
             layer = self.viewer.add_image(
-                original.data_czyx[channel.index, :, y0:y1, x0:x1],
+                preview_data,
                 name=f"Crop preview · {channel.name}",
                 colormap=channel.colormap,
                 blending="additive",
@@ -214,6 +242,8 @@ class CropWorkspaceController(QObject):
             self.preview_layers.append(layer)
         self._preview_bbox_original = bbox
         self._preview_vertices_original = vertices
+        self._preview_roi_mask = np.array(roi_mask, copy=True)
+        self._preview_selection_type = selection_type
         if self.preview_layers:
             self.viewer.layers.selection.active = self.preview_layers[0]
         self._status(f"Crop preview: CZYX {original.data_czyx[:, :, y0:y1, x0:x1].shape}")
@@ -229,6 +259,8 @@ class CropWorkspaceController(QObject):
         self._source_visibility.clear()
         self._preview_bbox_original = None
         self._preview_vertices_original = None
+        self._preview_roi_mask = None
+        self._preview_selection_type = None
 
     def confirm_crop(self) -> bool:
         if self._preview_bbox_original is None:
@@ -236,8 +268,15 @@ class CropWorkspaceController(QObject):
             return False
         bbox = self._preview_bbox_original
         vertices = np.array(self._preview_vertices_original, copy=True)
+        roi_mask = np.array(self._preview_roi_mask, copy=True)
+        selection_type = self._preview_selection_type
         self.cancel_preview()
-        dataset = self.project_state.apply_crop(bbox, vertices)
+        dataset = self.project_state.apply_crop(
+            bbox,
+            vertices,
+            roi_mask_yx=roi_mask if selection_type == "polygon" else None,
+            selection_type=selection_type,
+        )
         self.working_dataset_changed.emit(dataset)
         self._remove_layer(self.projection_layer)
         self._remove_layer(self.selection_layer)
@@ -276,6 +315,8 @@ class CropWorkspaceController(QObject):
         self.selection_layer = None
         self._preview_bbox_original = None
         self._preview_vertices_original = None
+        self._preview_roi_mask = None
+        self._preview_selection_type = None
 
     def dispose(self) -> None:
         if self._disposed:
