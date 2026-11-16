@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from qtpy.QtCore import Signal
-from qtpy.QtWidgets import QLabel, QStackedWidget, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QLabel, QScrollArea, QStackedWidget, QVBoxLayout, QWidget
 
 from .workflow_navigation import WORKFLOWS
 from .project_panel import ProjectPanel
@@ -38,7 +38,11 @@ class ContextPanel(QWidget):
         for workflow in WORKFLOWS:
             if workflow.key == "project":
                 self.project_page = ProjectPanel(project_state)
-                self._indexes[workflow.key] = self.stack.addWidget(self.project_page)
+                project_scroll = QScrollArea()
+                project_scroll.setWidgetResizable(True)
+                project_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                project_scroll.setWidget(self.project_page)
+                self._indexes[workflow.key] = self.stack.addWidget(project_scroll)
                 continue
             page = QWidget()
             page_layout = QVBoxLayout(page)

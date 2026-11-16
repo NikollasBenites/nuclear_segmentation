@@ -65,6 +65,8 @@ class DesktopWindow(QMainWindow):
         self._load_after_worker_finished = False
         self._close_when_import_finishes = False
         self._bioimage_factory = bioimage_factory
+        self._syncing_channels = False
+        self._channel_layer_callbacks = {}
         self.workspace_settings = WorkspaceSettings(settings)
         self.project_state = ProjectState(self)
 
@@ -113,6 +115,12 @@ class DesktopWindow(QMainWindow):
         )
         self.context_panel.project_page.analysis_mode_changed.connect(
             self._set_analysis_mode
+        )
+        self.context_panel.project_page.channel_panel.change_requested.connect(
+            self._update_channel_configuration
+        )
+        self.context_panel.project_page.calibration_requested.connect(
+            self._apply_manual_calibration
         )
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
@@ -298,6 +306,21 @@ class DesktopWindow(QMainWindow):
     def _set_analysis_mode(self, mode: str) -> None:
         self.project_state.analysis_mode = str(mode)
 
+    def _apply_manual_calibration(self, spacing) -> None:
+        if not self.project_state.dataset_ready:
+            self.statusBar().showMessage("Load a dataset before applying calibration", 5000)
+            return
+        try:
+            self.project_state.set_calibration(spacing)
+        except (TypeError, ValueError) as error:
+            self.statusBar().showMessage(f"Calibration: {error}", 6000)
+            return
+        for layer in self._channel_layer_callbacks:
+            if layer in self.embedding.viewer.layers:
+                layer.scale = self.project_state.voxel_spacing_zyx_um
+        self.context_panel.project_page.calibration_source.setText("manual override")
+        self.statusBar().showMessage("Manual Z/Y/X calibration applied", 5000)
+
     def open_image_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -469,7 +492,7 @@ class DesktopWindow(QMainWindow):
                         blending="additive",
                         scale=dataset.voxel_spacing_zyx_um,
                         units=("µm", "µm", "µm"),
-                        visible=channel.index == 0,
+                        visible=channel.visible,
                         metadata={
                             "nucytoseg_imported": True,
                             "channel_index": channel.index,
@@ -492,12 +515,92 @@ class DesktopWindow(QMainWindow):
         viewer.layers.selection.active = added[0] if added else None
         viewer.canvas.overlays.scale_bar.visible = True
         self.project_state.set_dataset(dataset)
+        self._connect_channel_layers(added)
         self._pending_import_path = None
         self._pending_lif_series = None
         self.statusBar().showMessage(
             f"Loaded {dataset.source_filename}: {len(dataset.channels)} channel(s)",
             5000,
         )
+
+    def _channel_for_index(self, index: int):
+        return next(
+            (channel for channel in self.project_state.channels if channel.index == index),
+            None,
+        )
+
+    def _layer_for_channel(self, index: int):
+        return next(
+            (
+                layer
+                for layer in self.embedding.viewer.layers
+                if (getattr(layer, "metadata", {}) or {}).get("nucytoseg_imported")
+                and (getattr(layer, "metadata", {}) or {}).get("channel_index") == index
+            ),
+            None,
+        )
+
+    def _update_channel_configuration(self, index: int, field: str, value) -> None:
+        if self._syncing_channels:
+            return
+        try:
+            self.project_state.update_channel(index, **{field: value})
+        except ValueError as error:
+            self.project_state.channels_changed.emit(tuple(self.project_state.channels))
+            self.statusBar().showMessage(f"Channel configuration: {error}", 6000)
+            return
+        layer = self._layer_for_channel(index)
+        if layer is None or field == "role":
+            return
+        self._syncing_channels = True
+        try:
+            if field == "name":
+                layer.name = str(value).strip()
+            elif field == "visible":
+                layer.visible = bool(value)
+            elif field == "colormap":
+                layer.colormap = str(value)
+        finally:
+            self._syncing_channels = False
+
+    def _connect_channel_layers(self, layers) -> None:
+        self._disconnect_channel_layers()
+        for layer in layers:
+            index = int(layer.metadata["channel_index"])
+            name_callback = lambda event=None, item=layer, channel=index: self._layer_channel_changed(
+                item, channel, "name"
+            )
+            visible_callback = lambda event=None, item=layer, channel=index: self._layer_channel_changed(
+                item, channel, "visible"
+            )
+            layer.events.name.connect(name_callback)
+            layer.events.visible.connect(visible_callback)
+            self._channel_layer_callbacks[layer] = (name_callback, visible_callback)
+
+    def _layer_channel_changed(self, layer, index: int, field: str) -> None:
+        if self._syncing_channels or layer not in self.embedding.viewer.layers:
+            return
+        value = layer.name if field == "name" else bool(layer.visible)
+        self._syncing_channels = True
+        try:
+            self.project_state.update_channel(index, **{field: value})
+        except ValueError as error:
+            channel = self._channel_for_index(index)
+            if channel is not None:
+                if field == "name":
+                    layer.name = channel.name
+                else:
+                    layer.visible = channel.visible
+            self.statusBar().showMessage(f"Channel configuration: {error}", 6000)
+        finally:
+            self._syncing_channels = False
+
+    def _disconnect_channel_layers(self) -> None:
+        for layer, callbacks in self._channel_layer_callbacks.items():
+            name_callback, visible_callback = callbacks
+            layer.events.name.disconnect(name_callback)
+            layer.events.visible.disconnect(visible_callback)
+        self._channel_layer_callbacks.clear()
 
     def _show_import_error(self, message: str) -> None:
         self.project_state.set_import_status(f"Import failed: {message}")
@@ -669,6 +772,8 @@ class DesktopWindow(QMainWindow):
             self.save_layout()
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
             self.mask_selection.dispose()
+            self._disconnect_channel_layers()
+            self.context_panel.project_page.channel_panel.dispose()
             self.layer_panel.dispose()
             self.viewer_toolbar.dispose()
             self.embedding.shutdown()

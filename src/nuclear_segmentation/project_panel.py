@@ -15,11 +15,14 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from .channel_panel import ChannelConfigurationPanel
+
 
 class ProjectPanel(QWidget):
     open_requested = Signal()
     load_pending_requested = Signal()
     analysis_mode_changed = Signal(str)
+    calibration_requested = Signal(object)
 
     def __init__(self, project_state, parent=None):
         super().__init__(parent)
@@ -68,7 +71,15 @@ class ProjectPanel(QWidget):
         self.calibration_source = QLabel("Not loaded")
         self.calibration_source.setWordWrap(True)
         calibration_form.addRow("Source", self.calibration_source)
+        self.apply_calibration_button = QPushButton("Apply Manual Calibration")
+        self.apply_calibration_button.clicked.connect(self._request_calibration)
+        calibration_form.addRow(self.apply_calibration_button)
         layout.addWidget(calibration)
+
+        channels, channels_layout = self._section("Channel Configuration")
+        self.channel_panel = ChannelConfigurationPanel(project_state)
+        channels_layout.addRow(self.channel_panel)
+        layout.addWidget(channels)
 
         mode_section, mode_form = self._section("Analysis Mode")
         self.analysis_mode = QComboBox()
@@ -130,6 +141,18 @@ class ProjectPanel(QWidget):
             "spacing_override": spacing,
             "time_index": self.time_index.value(),
         }
+
+    def _request_calibration(self) -> None:
+        text_values = [field.text().strip() for field in self.spacing_fields]
+        if not all(text_values):
+            self.calibration_requested.emit(None)
+            return
+        try:
+            spacing = tuple(float(value) for value in text_values)
+        except ValueError:
+            self.calibration_requested.emit(None)
+            return
+        self.calibration_requested.emit(spacing)
 
     def set_pending(self, enabled: bool) -> None:
         self._pending = bool(enabled)

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import tifffile
 from qtpy.QtCore import QSettings
-from qtpy.QtWidgets import QApplication, QWidget
+from qtpy.QtWidgets import QApplication, QMessageBox, QWidget
 
 from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.image_import import inspect_tiff, load_tiff_dataset
@@ -151,6 +151,77 @@ def test_desktop_import_worker_reuses_viewer_and_creates_calibrated_layers(
     window.close()
 
 
+def test_channel_configuration_sync_validation_and_pixel_immutability(qapp, tmp_path):
+    source = tmp_path / "channels.ome.tif"
+    original = np.arange(2 * 3 * 5 * 7, dtype=np.uint16).reshape(2, 3, 5, 7)
+    tifffile.imwrite(
+        source,
+        original,
+        ome=True,
+        metadata={
+            "axes": "CZYX",
+            "Channel": {"Name": ["DNA", "Marker"]},
+            "PhysicalSizeZ": 2.0,
+            "PhysicalSizeY": 0.4,
+            "PhysicalSizeX": 0.4,
+        },
+    )
+    settings = QSettings(str(tmp_path / "workspace.ini"), QSettings.Format.IniFormat)
+    window = DesktopWindow(
+        qt_viewer_factory=FakeQtViewer,
+        settings=settings,
+        restore_workspace=False,
+    )
+    assert window.prepare_image_import(source, confirm_replacement=False)
+    _wait_until(qapp, lambda: window._import_thread is None)
+    first, second = list(window.embedding.viewer.layers)
+    first_data = first.data
+    second_data = second.data
+
+    window._update_channel_configuration(1, "name", "VGLUT2")
+    assert second.name == "VGLUT2"
+    assert window.project_state.channels[1].name == "VGLUT2"
+    assert window.layer_panel.model.item_for_layer(second).text() == "VGLUT2"
+
+    first.name = "Nuclear-reference"
+    qapp.processEvents()
+    assert window.project_state.channels[0].name == "Nuclear-reference"
+    second.name = "Nuclear reference"
+    qapp.processEvents()
+    assert second.name == "VGLUT2"
+
+    window._update_channel_configuration(1, "visible", True)
+    window._update_channel_configuration(1, "colormap", "green")
+    window._update_channel_configuration(1, "role", "segmentation")
+    assert second.visible
+    assert second.colormap.name == "green"
+    assert window.project_state.segmentation_channel == "VGLUT2"
+    assert [channel.role for channel in window.project_state.channels] == [
+        "measurement",
+        "segmentation",
+    ]
+    window._update_channel_configuration(1, "role", "reference")
+    assert window.project_state.segmentation_channel == "VGLUT2"
+    assert window.project_state.channels[1].role == "segmentation"
+    records = window.project_state.analysis_channel_records()
+    assert records[1]["index"] == 1
+    assert records[1]["role"] == "segmentation"
+
+    window.context_panel.project_page.spacing_fields[0].setText("4.0")
+    window.context_panel.project_page.spacing_fields[1].setText("0.6")
+    window.context_panel.project_page.spacing_fields[2].setText("0.5")
+    window.context_panel.project_page.apply_calibration_button.click()
+    assert window.project_state.voxel_spacing_zyx_um == (4.0, 0.6, 0.5)
+    assert tuple(first.scale) == (4.0, 0.6, 0.5)
+    assert tuple(second.scale) == (4.0, 0.6, 0.5)
+
+    assert first.data is first_data
+    assert second.data is second_data
+    np.testing.assert_array_equal(first.data, original[0])
+    np.testing.assert_array_equal(second.data, original[1])
+    window.close()
+
+
 def test_desktop_missing_calibration_waits_for_explicit_values(qapp, tmp_path):
     source = tmp_path / "manual.tif"
     tifffile.imwrite(source, np.ones((3, 5, 7), dtype=np.uint8), metadata={"axes": "ZYX"})
@@ -172,4 +243,78 @@ def test_desktop_missing_calibration_waits_for_explicit_values(qapp, tmp_path):
     _wait_until(qapp, lambda: window._import_thread is None)
     assert window.project_state.dataset.voxel_spacing_zyx_um == (3.0, 0.8, 0.7)
     assert tuple(window.embedding.viewer.layers[0].scale) == (3.0, 0.8, 0.7)
+    window.close()
+
+
+def test_failed_replacement_keeps_active_dataset_and_reports_axes_error(qapp, tmp_path):
+    valid = tmp_path / "valid.ome.tif"
+    tifffile.imwrite(
+        valid,
+        np.ones((2, 4, 5), dtype=np.uint16),
+        ome=True,
+        metadata={
+            "axes": "ZYX",
+            "PhysicalSizeZ": 2.0,
+            "PhysicalSizeY": 0.5,
+            "PhysicalSizeX": 0.5,
+        },
+    )
+    invalid = tmp_path / "ambiguous.tif"
+    tifffile.imwrite(
+        invalid,
+        np.ones((2, 4, 5), dtype=np.uint16),
+        metadata={"axes": "QYX"},
+        photometric="minisblack",
+    )
+    settings = QSettings(str(tmp_path / "workspace.ini"), QSettings.Format.IniFormat)
+    window = DesktopWindow(
+        qt_viewer_factory=FakeQtViewer,
+        settings=settings,
+        restore_workspace=False,
+    )
+    assert window.prepare_image_import(valid, confirm_replacement=False)
+    _wait_until(qapp, lambda: window._import_thread is None)
+    old_dataset = window.project_state.dataset
+    old_layer = window.embedding.viewer.layers[0]
+
+    assert window.prepare_image_import(invalid, confirm_replacement=False)
+    for field, value in zip(
+        window.context_panel.project_page.spacing_fields, (2.0, 0.5, 0.5)
+    ):
+        field.setText(str(value))
+    assert window.load_pending_image()
+    _wait_until(qapp, lambda: window._import_thread is None)
+    assert window.project_state.dataset is old_dataset
+    assert window.embedding.viewer.layers[0] is old_layer
+    assert "Unsupported non-singleton axis" in window.project_state.import_status
+    window.close()
+
+
+def test_project_replacement_requires_confirmation(qapp, tmp_path, monkeypatch):
+    source = tmp_path / "first.ome.tif"
+    replacement = tmp_path / "second.ome.tif"
+    metadata = {
+        "axes": "ZYX",
+        "PhysicalSizeZ": 1.0,
+        "PhysicalSizeY": 0.5,
+        "PhysicalSizeX": 0.5,
+    }
+    tifffile.imwrite(source, np.ones((2, 4, 5), dtype=np.uint8), ome=True, metadata=metadata)
+    tifffile.imwrite(replacement, np.full((2, 4, 5), 2, dtype=np.uint8), ome=True, metadata=metadata)
+    settings = QSettings(str(tmp_path / "workspace.ini"), QSettings.Format.IniFormat)
+    window = DesktopWindow(
+        qt_viewer_factory=FakeQtViewer,
+        settings=settings,
+        restore_workspace=False,
+    )
+    assert window.prepare_image_import(source, confirm_replacement=False)
+    _wait_until(qapp, lambda: window._import_thread is None)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.No,
+    )
+    assert not window.prepare_image_import(replacement)
+    assert window.project_state.dataset.source_path == source.resolve()
+    assert window.embedding.viewer.layers[0].data[0, 0, 0] == 1
     window.close()

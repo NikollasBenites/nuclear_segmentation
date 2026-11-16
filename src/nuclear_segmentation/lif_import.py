@@ -219,6 +219,7 @@ def load_lif_dataset(
                 or f"Channel {index + 1}",
                 role="segmentation" if index == 0 else "measurement",
                 colormap=DEFAULT_COLORMAPS[index % len(DEFAULT_COLORMAPS)],
+                visible=index == 0,
             )
             for index in range(data.shape[0])
         )
