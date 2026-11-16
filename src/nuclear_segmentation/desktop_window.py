@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
 )
 
 from .context_panel import ContextPanel
+from .crop_workspace import CropWorkspaceController
 from .image_import import TiffImportWorker, inspect_tiff
 from .layer_panel import LayerPanel
 from .lif_import import LifEnumerationWorker, LifImportWorker
@@ -86,6 +87,16 @@ class DesktopWindow(QMainWindow):
         self.context_panel = ContextPanel(self.project_state)
         self.context_container = self._build_context_container()
         self.mask_selection = MaskSelectionController(self.embedding.viewer, self)
+        self.crop_workspace = CropWorkspaceController(
+            self.embedding.viewer,
+            self.project_state,
+            self.context_panel.preprocessing_page,
+            self,
+        )
+        self.crop_workspace.working_dataset_changed.connect(
+            self._display_working_dataset
+        )
+        self.crop_workspace.status_changed.connect(self.statusBar().showMessage)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("workspaceSplitter")
@@ -345,6 +356,12 @@ class DesktopWindow(QMainWindow):
         if self._import_thread is not None:
             self.statusBar().showMessage("An image import is already running", 4000)
             return False
+        if self.crop_workspace.busy:
+            self.statusBar().showMessage(
+                "Wait for projection generation to finish before opening another image",
+                5000,
+            )
+            return False
         source = Path(path).expanduser().resolve()
         if confirm_replacement and self._project_has_user_data():
             response = QMessageBox.question(
@@ -474,6 +491,7 @@ class DesktopWindow(QMainWindow):
             return
 
     def _apply_imported_dataset(self, dataset) -> None:
+        self.crop_workspace.clear_workspace_for_new_project()
         viewer = self.embedding.viewer
         old_layers = [
             layer
@@ -523,6 +541,55 @@ class DesktopWindow(QMainWindow):
             f"Loaded {dataset.source_filename}: {len(dataset.channels)} channel(s)",
             5000,
         )
+
+    def _display_working_dataset(self, dataset) -> None:
+        viewer = self.embedding.viewer
+        self._disconnect_channel_layers()
+        old_layers = [
+            layer
+            for layer in list(viewer.layers)
+            if (getattr(layer, "metadata", {}) or {}).get("nucytoseg_imported")
+        ]
+        spacing = self.project_state.voxel_spacing_zyx_um
+        offset_y, offset_x = self.project_state.working_offset_yx
+        added = []
+        try:
+            for channel in self.project_state.channels:
+                added.append(
+                    viewer.add_image(
+                        dataset.data_czyx[channel.index],
+                        name=channel.name,
+                        colormap=channel.colormap,
+                        blending="additive",
+                        scale=spacing,
+                        translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
+                        units=("µm", "µm", "µm"),
+                        visible=channel.visible,
+                        metadata={
+                            "nucytoseg_imported": True,
+                            "channel_index": channel.index,
+                            "source_path": str(dataset.source_path),
+                            "working_crop": self.project_state.crop_provenance is not None,
+                        },
+                    )
+                )
+        except Exception as error:
+            for layer in added:
+                if layer in viewer.layers:
+                    viewer.layers.remove(layer)
+            self._connect_channel_layers(old_layers)
+            self.statusBar().showMessage(f"Could not display working crop: {error}", 8000)
+            return
+        for layer in old_layers:
+            if layer in viewer.layers:
+                viewer.layers.remove(layer)
+        for layer, channel in zip(added, self.project_state.channels):
+            layer.name = channel.name
+        self._connect_channel_layers(added)
+        if added:
+            viewer.layers.selection.active = added[0]
+        viewer.dims.axis_labels = ("Z", "Y", "X")
+        viewer.canvas.overlays.scale_bar.visible = True
 
     def _channel_for_index(self, index: int):
         return next(
@@ -787,8 +854,10 @@ class DesktopWindow(QMainWindow):
             self.save_layout()
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
             self.mask_selection.dispose()
+            self.crop_workspace.dispose()
             self._disconnect_channel_layers()
             self.context_panel.project_page.channel_panel.dispose()
+            self.context_panel.preprocessing_page.dispose()
             self.layer_panel.dispose()
             self.viewer_toolbar.dispose()
             self.embedding.shutdown()

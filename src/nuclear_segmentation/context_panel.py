@@ -6,6 +6,7 @@ from qtpy.QtWidgets import QLabel, QScrollArea, QStackedWidget, QVBoxLayout, QWi
 
 from .workflow_navigation import WORKFLOWS
 from .project_panel import ProjectPanel
+from .preprocessing_panel import PreprocessingPanel
 
 
 SECTIONS = {
@@ -44,6 +45,16 @@ class ContextPanel(QWidget):
                 project_scroll.setWidget(self.project_page)
                 self._indexes[workflow.key] = self.stack.addWidget(project_scroll)
                 continue
+            if workflow.key == "preprocessing":
+                self.preprocessing_page = PreprocessingPanel(project_state)
+                preprocessing_scroll = QScrollArea()
+                preprocessing_scroll.setWidgetResizable(True)
+                preprocessing_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                preprocessing_scroll.setWidget(self.preprocessing_page)
+                self._indexes[workflow.key] = self.stack.addWidget(
+                    preprocessing_scroll
+                )
+                continue
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.setContentsMargins(0, 8, 0, 0)
@@ -52,7 +63,7 @@ class ContextPanel(QWidget):
                 label.setObjectName("contextSection")
                 label.setToolTip("Scientific workflow integration begins in Phase 2")
                 page_layout.addWidget(label)
-            note = QLabel("Interface placeholder — no analysis is executed in Phase 1B.")
+            note = QLabel("Interface placeholder — no analysis is executed here yet.")
             note.setObjectName("placeholderNote")
             note.setWordWrap(True)
             page_layout.addWidget(note)

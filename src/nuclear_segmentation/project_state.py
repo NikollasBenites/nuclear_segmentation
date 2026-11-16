@@ -42,6 +42,16 @@ class ImportedDataset:
         return self.source_path.name
 
 
+@dataclass(frozen=True)
+class CropProvenance:
+    original_shape_czyx: tuple[int, int, int, int]
+    cropped_shape_czyx: tuple[int, int, int, int]
+    bounding_box_y0_y1_x0_x1: tuple[int, int, int, int]
+    selection_vertices_yx: tuple[tuple[float, float], ...]
+    voxel_spacing_zyx_um: tuple[float, float, float]
+    spatial_offset_yx_um: tuple[float, float]
+
+
 class ProjectState(QObject):
     """Own imported-dataset identity without changing analysis schemas."""
 
@@ -53,6 +63,10 @@ class ProjectState(QObject):
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
         self.dataset: ImportedDataset | None = None
+        self.original_dataset: ImportedDataset | None = None
+        self.working_dataset: ImportedDataset | None = None
+        self.crop_provenance: CropProvenance | None = None
+        self.working_offset_yx = (0, 0)
         self.analysis_mode = "segment"
         self.import_status = "No image loaded"
         self.voxel_spacing_zyx_um = None
@@ -70,6 +84,10 @@ class ProjectState(QObject):
 
     def set_dataset(self, dataset: ImportedDataset) -> None:
         self.dataset = dataset
+        self.original_dataset = dataset
+        self.working_dataset = dataset
+        self.crop_provenance = None
+        self.working_offset_yx = (0, 0)
         self.voxel_spacing_zyx_um = dataset.voxel_spacing_zyx_um
         self.calibration_source = dataset.calibration_source
         self.channels = list(dataset.channels)
@@ -84,6 +102,57 @@ class ProjectState(QObject):
         self.set_import_status("Dataset ready")
         self.changed.emit(dataset)
         self.channels_changed.emit(tuple(self.channels))
+
+    def apply_crop(self, bounding_box, selection_vertices) -> ImportedDataset:
+        from .projection_crop import crop_czyx
+
+        if self.original_dataset is None:
+            raise ValueError("Load a dataset before applying a crop.")
+        y0, y1, x0, x1 = (int(value) for value in bounding_box)
+        cropped = crop_czyx(
+            self.original_dataset.data_czyx, (y0, y1, x0, x1)
+        )
+        spacing = tuple(self.voxel_spacing_zyx_um)
+        provenance = CropProvenance(
+            original_shape_czyx=self.original_dataset.standardized_shape,
+            cropped_shape_czyx=tuple(int(value) for value in cropped.shape),
+            bounding_box_y0_y1_x0_x1=(y0, y1, x0, x1),
+            selection_vertices_yx=tuple(
+                (float(vertex[0]), float(vertex[1]))
+                for vertex in selection_vertices
+            ),
+            voxel_spacing_zyx_um=spacing,
+            spatial_offset_yx_um=(y0 * spacing[1], x0 * spacing[2]),
+        )
+        metadata = dict(self.original_dataset.acquisition_metadata)
+        metadata["crop"] = {
+            "bounding_box_y0_y1_x0_x1": list(provenance.bounding_box_y0_y1_x0_x1),
+            "selection_vertices_yx": [list(vertex) for vertex in provenance.selection_vertices_yx],
+            "original_shape_czyx": list(provenance.original_shape_czyx),
+            "cropped_shape_czyx": list(provenance.cropped_shape_czyx),
+            "spatial_offset_yx_um": list(provenance.spatial_offset_yx_um),
+        }
+        self.working_dataset = replace(
+            self.original_dataset,
+            data_czyx=cropped,
+            standardized_shape=provenance.cropped_shape_czyx,
+            voxel_spacing_zyx_um=spacing,
+            calibration_source=str(self.calibration_source),
+            acquisition_metadata=metadata,
+        )
+        self.dataset = self.working_dataset
+        self.working_offset_yx = (y0, x0)
+        self.crop_provenance = provenance
+        return self.working_dataset
+
+    def reset_crop(self) -> ImportedDataset:
+        if self.original_dataset is None:
+            raise ValueError("No original dataset is available.")
+        self.working_dataset = self.original_dataset
+        self.dataset = self.original_dataset
+        self.crop_provenance = None
+        self.working_offset_yx = (0, 0)
+        return self.original_dataset
 
     def set_calibration(self, spacing, source: str = "manual override") -> None:
         values = tuple(float(value) for value in spacing)

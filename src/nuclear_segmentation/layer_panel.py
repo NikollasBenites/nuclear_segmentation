@@ -37,6 +37,15 @@ class LayerTreeModel(QStandardItemModel):
         layer_type = type(layer).__name__.lower()
         metadata = getattr(layer, "metadata", {}) or {}
         role = str(metadata.get("mask_type", "")).lower()
+        if any(
+            metadata.get(key)
+            for key in (
+                "nucytoseg_projection",
+                "nucytoseg_crop_selection",
+                "nucytoseg_crop_preview",
+            )
+        ):
+            return "Annotations & Overlays"
         if layer_type == "image":
             return "Image Layers"
         if layer_type == "labels" or role in {"nuclear", "cytoplasmic"}:
