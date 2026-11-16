@@ -1,12 +1,16 @@
 """Independent NuCytoSeg QMainWindow composition."""
 from __future__ import annotations
 
-from qtpy.QtCore import QSize, Qt
+from pathlib import Path
+
+from qtpy.QtCore import QSize, Qt, QThread
 from qtpy.QtGui import QAction, QKeySequence
 from qtpy.QtWidgets import (
     QHBoxLayout,
+    QFileDialog,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QSplitter,
     QToolButton,
     QVBoxLayout,
@@ -14,10 +18,12 @@ from qtpy.QtWidgets import (
 )
 
 from .context_panel import ContextPanel
+from .image_import import TiffImportWorker, inspect_tiff
 from .layer_panel import LayerPanel
 from .mask_selection import MaskSelectionController
 from .napari_embedding import DISPLAY_NAME, EmbeddedNapariWidget
 from .selected_mask_panel import SelectedMaskPanel
+from .project_state import ProjectState
 from .viewer_toolbar import ViewerToolbar
 from .workflow_navigation import WorkflowNavigation
 from .ui_icons import icon
@@ -30,7 +36,7 @@ from .workspace_settings import (
 
 
 class DesktopWindow(QMainWindow):
-    """Phase 1B application shell; scientific workflows are intentionally absent."""
+    """Independent application shell with Phase 2A project import."""
 
     def __init__(
         self,
@@ -49,7 +55,12 @@ class DesktopWindow(QMainWindow):
         self._closed = False
         self._focus_mode = False
         self._focus_snapshot = None
+        self._import_thread = None
+        self._import_worker = None
+        self._pending_import_path: Path | None = None
+        self._close_when_import_finishes = False
         self.workspace_settings = WorkspaceSettings(settings)
+        self.project_state = ProjectState(self)
 
         self.navigation = WorkflowNavigation()
         self.embedding = EmbeddedNapariWidget(
@@ -64,7 +75,7 @@ class DesktopWindow(QMainWindow):
         viewer_layout.setSpacing(0)
         viewer_layout.addWidget(self.viewer_toolbar)
         viewer_layout.addWidget(self.embedding, 1)
-        self.context_panel = ContextPanel()
+        self.context_panel = ContextPanel(self.project_state)
         self.context_container = self._build_context_container()
         self.mask_selection = MaskSelectionController(self.embedding.viewer, self)
 
@@ -90,6 +101,13 @@ class DesktopWindow(QMainWindow):
             self.selected_mask_panel.set_selection
         )
         self.layer_panel.active_layer_changed.connect(self._update_active_layer_status)
+        self.context_panel.project_page.open_requested.connect(self.open_image_dialog)
+        self.context_panel.project_page.load_pending_requested.connect(
+            self.load_pending_image
+        )
+        self.context_panel.project_page.analysis_mode_changed.connect(
+            self._set_analysis_mode
+        )
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
         root = QWidget()
@@ -103,7 +121,7 @@ class DesktopWindow(QMainWindow):
         self._create_menus()
         self._create_status_widgets()
         self.set_workflow("project")
-        self.statusBar().showMessage("Phase 1B shell ready — no analysis loaded")
+        self.statusBar().showMessage("NuCytoSeg ready — open an image to begin")
         self._apply_theme()
         if restore_workspace:
             self.restore_layout()
@@ -191,14 +209,20 @@ class DesktopWindow(QMainWindow):
         self.open_image_button.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         )
-        self.open_image_button.setEnabled(False)
-        self.open_image_button.setToolTip(
-            "Image import will be connected during scientific workflow integration"
+        self.open_image_button.setDefaultAction(self.open_image_action)
+        self.open_image_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         )
+        self.open_image_button.setToolTip("Open TIFF, OME-TIFF, or Leica LIF")
         layout.addWidget(self.open_image_button)
         return header
 
     def _create_actions(self) -> None:
+        self.open_image_action = QAction("Open Image…", self)
+        self.open_image_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.open_image_action.setIcon(icon("open", accent=True))
+        self.open_image_action.triggered.connect(self.open_image_dialog)
+
         self.quit_action = QAction("Quit NuCytoSeg", self)
         self.quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         self.quit_action.triggered.connect(self.close)
@@ -238,6 +262,8 @@ class DesktopWindow(QMainWindow):
 
     def _create_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
+        file_menu.addAction(self.open_image_action)
+        file_menu.addSeparator()
         file_menu.addAction(self.quit_action)
         view_menu = self.menuBar().addMenu("View")
         view_menu.addAction(self.toggle_navigation_action)
@@ -262,6 +288,159 @@ class DesktopWindow(QMainWindow):
 
     def _update_active_layer_status(self, layer) -> None:
         self.layer_status.setText(f"Layer: {layer.name}" if layer is not None else "Layer: none")
+
+    def _set_analysis_mode(self, mode: str) -> None:
+        self.project_state.analysis_mode = str(mode)
+
+    def open_image_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open microscopy image",
+            "",
+            "Microscopy images (*.tif *.tiff *.ome.tif *.ome.tiff *.lif);;"
+            "TIFF images (*.tif *.tiff *.ome.tif *.ome.tiff);;Leica LIF (*.lif)",
+        )
+        if path:
+            self.prepare_image_import(path)
+
+    def _project_has_user_data(self) -> bool:
+        if self.project_state.dataset_ready:
+            return True
+        return any(
+            not (getattr(layer, "metadata", {}) or {}).get("nucytoseg_demo", False)
+            for layer in self.embedding.viewer.layers
+        )
+
+    def prepare_image_import(self, path, *, confirm_replacement: bool = True) -> bool:
+        if self._import_thread is not None:
+            self.statusBar().showMessage("An image import is already running", 4000)
+            return False
+        source = Path(path).expanduser().resolve()
+        if source.suffix.lower() == ".lif":
+            QMessageBox.information(
+                self,
+                "Leica LIF",
+                "Leica LIF series browsing is implemented in Phase 2A.2.",
+            )
+            return False
+        if confirm_replacement and self._project_has_user_data():
+            response = QMessageBox.question(
+                self,
+                "Replace current project?",
+                "Opening another image will replace the current viewer dataset. "
+                "Unsaved masks or edits are not saved by Phase 2A.1. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                return False
+        try:
+            inspection = inspect_tiff(source)
+        except Exception as error:
+            self._show_import_error(str(error))
+            return False
+        self._pending_import_path = source
+        panel = self.context_panel.project_page
+        panel.set_inspection(inspection)
+        panel.set_pending(True)
+        self.set_workflow("project")
+        if inspection.voxel_spacing_zyx_um is None:
+            self.project_state.set_import_status(
+                "Calibration missing — enter positive Z, Y, and X spacing in µm"
+            )
+            return True
+        return self.load_pending_image()
+
+    def load_pending_image(self) -> bool:
+        if self._pending_import_path is None or self._import_thread is not None:
+            return False
+        panel = self.context_panel.project_page
+        try:
+            options = panel.import_options()
+        except ValueError as error:
+            self._show_import_error(str(error))
+            return False
+        self.project_state.set_import_status(
+            f"Loading {self._pending_import_path.name}…"
+        )
+        panel.set_loading(True)
+        self.open_image_action.setEnabled(False)
+        thread = QThread(self)
+        worker = TiffImportWorker(self._pending_import_path, options)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(self._apply_imported_dataset)
+        worker.failed.connect(self._show_import_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._import_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._import_thread = thread
+        self._import_worker = worker
+        thread.start()
+        return True
+
+    def _import_finished(self) -> None:
+        self._import_thread = None
+        self._import_worker = None
+        self.open_image_action.setEnabled(True)
+        self.context_panel.project_page.set_loading(False)
+        if self._close_when_import_finishes:
+            self._close_when_import_finishes = False
+            self.close()
+
+    def _apply_imported_dataset(self, dataset) -> None:
+        viewer = self.embedding.viewer
+        old_layers = [
+            layer
+            for layer in list(viewer.layers)
+            if not (getattr(layer, "metadata", {}) or {}).get(
+                "nucytoseg_selection_highlight", False
+            )
+        ]
+        added = []
+        try:
+            for channel in dataset.channels:
+                added.append(
+                    viewer.add_image(
+                        dataset.data_czyx[channel.index],
+                        name=channel.name,
+                        colormap=channel.colormap,
+                        blending="additive",
+                        scale=dataset.voxel_spacing_zyx_um,
+                        units=("µm", "µm", "µm"),
+                        visible=channel.index == 0,
+                        metadata={
+                            "nucytoseg_imported": True,
+                            "channel_index": channel.index,
+                            "source_path": str(dataset.source_path),
+                        },
+                    )
+                )
+        except Exception as error:
+            for layer in added:
+                if layer in viewer.layers:
+                    viewer.layers.remove(layer)
+            self._show_import_error(f"Could not create image layers: {error}")
+            return
+        for layer in old_layers:
+            if layer in viewer.layers:
+                viewer.layers.remove(layer)
+        for layer, channel in zip(added, dataset.channels):
+            layer.name = channel.name
+        viewer.dims.axis_labels = ("Z", "Y", "X")
+        viewer.layers.selection.active = added[0] if added else None
+        viewer.canvas.overlays.scale_bar.visible = True
+        self.project_state.set_dataset(dataset)
+        self._pending_import_path = None
+        self.statusBar().showMessage(
+            f"Loaded {dataset.source_filename}: {len(dataset.channels)} channel(s)",
+            5000,
+        )
+
+    def _show_import_error(self, message: str) -> None:
+        self.project_state.set_import_status(f"Import failed: {message}")
+        self.statusBar().showMessage(f"Image import failed: {message}", 8000)
 
     def _update_z_status(self, event=None) -> None:
         steps = self.embedding.viewer.dims.current_step
@@ -404,6 +583,12 @@ class DesktopWindow(QMainWindow):
             #layerTree::item:hover { background: #1b3040; }
             #layerTree::item:selected { background: #15546b; color: #f2fbfc; }
             #contextSection { background: #1a2a38; border-radius: 7px; padding: 12px; font-weight: 600; }
+            #projectSection { background: #162735; border-radius: 7px; }
+            #contextSectionTitle { color: #75dcd4; font-weight: 700; }
+            #projectSection QLineEdit, #projectSection QSpinBox, #projectSection QComboBox {
+                background: #0f1923; border: 1px solid #314759; border-radius: 4px; padding: 4px;
+            }
+            #projectSection QPushButton { background: #17677a; border-radius: 5px; padding: 7px; }
             #placeholderNote { color: #8fa1b3; padding: 10px 3px; }
             QSplitter::handle { background: #253342; width: 2px; }
             QStatusBar { border-top: 1px solid #263748; font-size: 12px; min-height: 25px; }
@@ -411,6 +596,13 @@ class DesktopWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:
+        if self._import_thread is not None and self._import_thread.isRunning():
+            self._close_when_import_finishes = True
+            self.statusBar().showMessage(
+                "Waiting for the active image read to finish before closing…"
+            )
+            event.ignore()
+            return
         if not self._closed:
             self._closed = True
             self.save_layout()

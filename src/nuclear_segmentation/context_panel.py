@@ -1,10 +1,11 @@
-"""Extensible contextual placeholders for Phase 1B workflows."""
+"""Workflow context pages for the independent NuCytoSeg interface."""
 from __future__ import annotations
 
 from qtpy.QtCore import Signal
 from qtpy.QtWidgets import QLabel, QStackedWidget, QVBoxLayout, QWidget
 
 from .workflow_navigation import WORKFLOWS
+from .project_panel import ProjectPanel
 
 
 SECTIONS = {
@@ -24,7 +25,7 @@ class ContextPanel(QWidget):
 
     collapse_requested = Signal()
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, project_state, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("contextPanel")
         layout = QVBoxLayout(self)
@@ -35,6 +36,10 @@ class ContextPanel(QWidget):
         self.stack = QStackedWidget()
         self._indexes: dict[str, int] = {}
         for workflow in WORKFLOWS:
+            if workflow.key == "project":
+                self.project_page = ProjectPanel(project_state)
+                self._indexes[workflow.key] = self.stack.addWidget(self.project_page)
+                continue
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.setContentsMargins(0, 8, 0, 0)

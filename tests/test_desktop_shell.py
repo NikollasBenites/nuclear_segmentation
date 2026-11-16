@@ -57,7 +57,7 @@ def window(qapp, settings):
 def test_main_window_initialization_and_navigation(window):
     assert window.windowTitle().startswith("NuCytoSeg")
     assert window.header_workflow.text() == "PROJECT"
-    assert not window.open_image_button.isEnabled()
+    assert window.open_image_button.isEnabled()
     assert window.embedding.viewer.layers
     original_viewer = window.embedding.viewer
     window.navigation._buttons["segmentation"].click()

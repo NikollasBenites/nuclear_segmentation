@@ -363,6 +363,7 @@ class EmbeddedNapariWidget(QWidget):
             blending="additive",
             scale=spacing,
             units=units,
+            metadata={"nucytoseg_demo": True},
         )
         self.viewer.add_image(
             data.cytoplasmic,
@@ -372,6 +373,7 @@ class EmbeddedNapariWidget(QWidget):
             scale=spacing,
             units=units,
             opacity=0.65,
+            metadata={"nucytoseg_demo": True},
         )
         labels = self.viewer.add_labels(
             data.labels.copy(),
@@ -379,6 +381,7 @@ class EmbeddedNapariWidget(QWidget):
             scale=spacing,
             units=units,
             opacity=0.55,
+            metadata={"nucytoseg_demo": True},
         )
         self.viewer.add_image(
             list(data.multiscale),
@@ -388,6 +391,7 @@ class EmbeddedNapariWidget(QWidget):
             units=units,
             visible=False,
             multiscale=True,
+            metadata={"nucytoseg_demo": True},
         )
         self.viewer.dims.axis_labels = ("Z", "Y", "X")
         self.viewer.dims.set_current_step(0, data.nuclear.shape[0] // 2)
