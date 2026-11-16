@@ -29,6 +29,10 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName(DISPLAY_NAME)
     app.setApplicationDisplayName(DISPLAY_NAME)
     app.setOrganizationName("NuCytoSeg")
+    font = app.font()
+    if font.pointSizeF() < 11:
+        font.setPointSizeF(11)
+        app.setFont(font)
     window = DesktopWindow(load_demo=args.demo)
     window.show()
     return app.exec()

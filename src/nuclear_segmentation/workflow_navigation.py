@@ -4,45 +4,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from qtpy.QtCore import QSize, Qt, Signal
-from qtpy.QtGui import QColor, QIcon, QPainter, QPixmap
 from qtpy.QtWidgets import QButtonGroup, QLabel, QToolButton, QVBoxLayout, QWidget
+
+from .ui_icons import icon
 
 
 @dataclass(frozen=True)
 class WorkflowDefinition:
     key: str
     label: str
-    symbol: str
+    icon_name: str
 
 
 WORKFLOWS = (
-    WorkflowDefinition("project", "Project", "P"),
-    WorkflowDefinition("preprocessing", "Preprocessing", "Pr"),
-    WorkflowDefinition("segmentation", "Segmentation", "S"),
-    WorkflowDefinition("mask_review", "Mask Review", "R"),
-    WorkflowDefinition("matching", "Matching", "M"),
-    WorkflowDefinition("quantification", "Quantification", "Q"),
-    WorkflowDefinition("quality_control", "Quality Control", "QC"),
-    WorkflowDefinition("export", "Export", "E"),
+    WorkflowDefinition("project", "Project", "folder"),
+    WorkflowDefinition("preprocessing", "Preprocessing", "sliders"),
+    WorkflowDefinition("segmentation", "Segmentation", "segment"),
+    WorkflowDefinition("mask_review", "Mask Review", "review"),
+    WorkflowDefinition("matching", "Matching", "link"),
+    WorkflowDefinition("quantification", "Quantification", "bars"),
+    WorkflowDefinition("quality_control", "Quality Control", "quality"),
+    WorkflowDefinition("export", "Export", "export"),
 )
-
-
-def _symbol_icon(symbol: str) -> QIcon:
-    pixmap = QPixmap(28, 28)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor("#26354a"))
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawRoundedRect(1, 1, 26, 26, 7, 7)
-    painter.setPen(QColor("#8dd6ff"))
-    font = painter.font()
-    font.setBold(True)
-    font.setPointSize(7 if len(symbol) > 1 else 9)
-    painter.setFont(font)
-    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, symbol)
-    painter.end()
-    return QIcon(pixmap)
 
 
 class WorkflowNavigation(QWidget):
@@ -69,7 +52,7 @@ class WorkflowNavigation(QWidget):
         for workflow in WORKFLOWS:
             button = QToolButton()
             button.setObjectName(f"workflow_{workflow.key}")
-            button.setIcon(_symbol_icon(workflow.symbol))
+            button.setIcon(icon(workflow.icon_name))
             button.setIconSize(QSize(28, 28))
             button.setText(workflow.label)
             button.setToolTip(workflow.label)
@@ -86,6 +69,8 @@ class WorkflowNavigation(QWidget):
 
         self.collapse_button = QToolButton()
         self.collapse_button.setObjectName("collapseNavigation")
+        self.collapse_button.setIcon(icon("collapse"))
+        self.collapse_button.setIconSize(QSize(22, 22))
         self.collapse_button.setText("Collapse")
         self.collapse_button.setToolTip("Collapse workflow navigation")
         self.collapse_button.clicked.connect(lambda: self.set_collapsed(not self._collapsed))
@@ -124,7 +109,13 @@ class WorkflowNavigation(QWidget):
                 if collapsed
                 else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
             )
-        self.collapse_button.setText("›" if collapsed else "Collapse")
+        self.collapse_button.setIcon(icon("expand" if collapsed else "collapse"))
+        self.collapse_button.setText("" if collapsed else "Collapse")
+        self.collapse_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonIconOnly
+            if collapsed
+            else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
         self.collapse_button.setToolTip(
             "Expand workflow navigation" if collapsed else "Collapse workflow navigation"
         )

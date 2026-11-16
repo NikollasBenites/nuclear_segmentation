@@ -4,12 +4,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from qtpy.QtCore import Qt, Signal
-from qtpy.QtGui import QStandardItem, QStandardItemModel
+from qtpy.QtCore import QSize, Qt, Signal
+from qtpy.QtGui import QColor, QStandardItem, QStandardItemModel
 from qtpy.QtWidgets import QAbstractItemView, QTreeView, QVBoxLayout, QWidget
+
+from .ui_icons import icon
 
 
 LAYER_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+VISIBILITY_LAYER_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 
 
 class LayerTreeModel(QStandardItemModel):
@@ -21,7 +24,7 @@ class LayerTreeModel(QStandardItemModel):
         self._syncing = False
         self._disposed = False
         self._callbacks: dict[Any, tuple[Callable, Callable]] = {}
-        self.setHorizontalHeaderLabels(["Layer", "Type"])
+        self.setHorizontalHeaderLabels(["Layer", "Type", "Visible"])
         self.itemChanged.connect(self._on_item_changed)
         for name in ("inserted", "removed", "moved", "reordered"):
             emitter = getattr(viewer.layers.events, name, None)
@@ -56,25 +59,50 @@ class LayerTreeModel(QStandardItemModel):
         self._disconnect_layer_callbacks()
         self.removeRows(0, self.rowCount())
         groups: dict[str, QStandardItem] = {}
+        group_icons = {
+            "Image Layers": "image",
+            "Segmentation Layers": "labels",
+            "Review Layers": "review",
+        }
         for title in ("Image Layers", "Segmentation Layers", "Review Layers"):
             group = QStandardItem(title)
             group.setEditable(False)
             group.setSelectable(False)
+            group.setIcon(icon(group_icons[title]))
+            group_font = group.font()
+            group_font.setBold(True)
+            group.setFont(group_font)
+            group.setForeground(QColor("#9eb3c4"))
             type_cell = QStandardItem("")
             type_cell.setEditable(False)
-            self.appendRow((group, type_cell))
+            visibility_cell = QStandardItem("")
+            visibility_cell.setEditable(False)
+            self.appendRow((group, type_cell, visibility_cell))
             groups[title] = group
         for layer in reversed(self.viewer.layers):
             name_item = QStandardItem(layer.name)
             name_item.setData(layer, LAYER_ROLE)
-            name_item.setCheckable(True)
-            name_item.setCheckState(
-                Qt.CheckState.Checked if layer.visible else Qt.CheckState.Unchecked
+            layer_type = type(layer).__name__.lower()
+            icon_name = (
+                "image"
+                if layer_type == "image"
+                else "labels"
+                if layer_type == "labels"
+                else "other"
             )
+            name_item.setIcon(icon(icon_name))
+            name_item.setToolTip("Double-click or press F2 to rename this layer")
             type_item = QStandardItem(type(layer).__name__)
             type_item.setEditable(False)
             type_item.setData(layer, LAYER_ROLE)
-            groups[self.group_for(layer)].appendRow((name_item, type_item))
+            visibility_item = QStandardItem()
+            visibility_item.setEditable(False)
+            visibility_item.setSelectable(True)
+            visibility_item.setData(layer, VISIBILITY_LAYER_ROLE)
+            self._set_visibility_appearance(visibility_item, layer.visible)
+            groups[self.group_for(layer)].appendRow(
+                (name_item, type_item, visibility_item)
+            )
             name_callback = lambda event, current=layer: self._sync_layer(current)
             visible_callback = lambda event, current=layer: self._sync_layer(current)
             layer.events.name.connect(name_callback)
@@ -91,6 +119,23 @@ class LayerTreeModel(QStandardItemModel):
                     return item
         return None
 
+    def visibility_item_for_layer(self, layer) -> QStandardItem | None:
+        item = self.item_for_layer(layer)
+        return None if item is None else item.parent().child(item.row(), 2)
+
+    @staticmethod
+    def _set_visibility_appearance(item: QStandardItem, visible: bool) -> None:
+        item.setIcon(icon("eye", accent=True) if visible else icon("eye_off"))
+        item.setToolTip("Hide layer" if visible else "Show layer")
+        item.setAccessibleText("Layer visible" if visible else "Layer hidden")
+
+    def toggle_visibility(self, layer) -> bool:
+        """Toggle one layer without affecting ViewerModel selection."""
+        if layer not in self.viewer.layers:
+            return False
+        layer.visible = not layer.visible
+        return True
+
     def _sync_layer(self, layer) -> None:
         if self._disposed or self._syncing:
             return
@@ -99,9 +144,9 @@ class LayerTreeModel(QStandardItemModel):
             return
         self._syncing = True
         item.setText(layer.name)
-        item.setCheckState(
-            Qt.CheckState.Checked if layer.visible else Qt.CheckState.Unchecked
-        )
+        visibility_item = self.visibility_item_for_layer(layer)
+        if visibility_item is not None:
+            self._set_visibility_appearance(visibility_item, layer.visible)
         self._syncing = False
 
     def _on_item_changed(self, item: QStandardItem) -> None:
@@ -113,7 +158,6 @@ class LayerTreeModel(QStandardItemModel):
         self._syncing = True
         if layer.name != item.text():
             layer.name = item.text()
-        layer.visible = item.checkState() == Qt.CheckState.Checked
         self._syncing = False
 
     def dispose(self) -> None:
@@ -142,6 +186,7 @@ class LayerPanel(QWidget):
         layout.setContentsMargins(0, 8, 0, 0)
         self.tree = QTreeView()
         self.tree.setObjectName("layerTree")
+        self.tree.setIconSize(QSize(22, 22))
         self.tree.setAlternatingRowColors(False)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setEditTriggers(
@@ -152,9 +197,12 @@ class LayerPanel(QWidget):
         self.tree.setModel(self.model)
         self.tree.expandAll()
         self.tree.header().setStretchLastSection(False)
-        self.tree.header().setSectionResizeMode(0, self.tree.header().ResizeMode.Stretch)
-        self.tree.header().setSectionResizeMode(1, self.tree.header().ResizeMode.ResizeToContents)
+        header = self.tree.header()
+        header.setSectionResizeMode(0, header.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, header.ResizeMode.ResizeToContents)
         self.tree.selectionModel().currentChanged.connect(self._on_current_changed)
+        self.tree.clicked.connect(self._on_tree_clicked)
         viewer.layers.selection.events.active.connect(self._on_active_changed)
         for name in ("inserted", "removed", "moved", "reordered"):
             emitter = getattr(viewer.layers.events, name, None)
@@ -173,6 +221,19 @@ class LayerPanel(QWidget):
         layer = current.data(LAYER_ROLE)
         if layer is not None and layer in self.viewer.layers:
             self.viewer.layers.selection.active = layer
+
+    def _on_tree_clicked(self, index) -> None:
+        layer = index.data(VISIBILITY_LAYER_ROLE)
+        if layer is None:
+            return
+        active = self.viewer.layers.selection.active
+        self.model.toggle_visibility(layer)
+        if active is not None and active in self.viewer.layers:
+            item = self.model.item_for_layer(active)
+            if item is not None:
+                self._syncing = True
+                self.tree.setCurrentIndex(item.index())
+                self._syncing = False
 
     def _on_active_changed(self, event=None) -> None:
         if self._disposed:

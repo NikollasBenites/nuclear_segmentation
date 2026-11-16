@@ -1,7 +1,7 @@
 """Independent NuCytoSeg QMainWindow composition."""
 from __future__ import annotations
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QSize, Qt
 from qtpy.QtGui import QAction, QKeySequence
 from qtpy.QtWidgets import (
     QHBoxLayout,
@@ -18,6 +18,7 @@ from .layer_panel import LayerPanel
 from .napari_embedding import DISPLAY_NAME, EmbeddedNapariWidget
 from .viewer_toolbar import ViewerToolbar
 from .workflow_navigation import WorkflowNavigation
+from .ui_icons import icon
 from .workspace_settings import (
     WorkspaceSettings,
     WorkspaceSnapshot,
@@ -41,7 +42,7 @@ class DesktopWindow(QMainWindow):
         super().__init__(parent)
         self.setObjectName("nucytosegDesktopWindow")
         self.setWindowTitle(f"{DISPLAY_NAME} — Scientific Image Analysis")
-        self.setMinimumSize(960, 640)
+        self.setMinimumSize(1024, 680)
         self.resize(1440, 900)
         self._closed = False
         self._focus_mode = False
@@ -73,15 +74,21 @@ class DesktopWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
-        self.splitter.setSizes([210, 950, 280])
-        self.setCentralWidget(self.splitter)
-
+        self.splitter.setSizes([210, 890, 340])
         self.navigation.workflow_changed.connect(self.set_workflow)
         self.embedding.status_changed.connect(self.statusBar().showMessage)
         self.viewer_toolbar.status_changed.connect(self.statusBar().showMessage)
         self.layer_panel.active_layer_changed.connect(self._update_active_layer_status)
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
+        root = QWidget()
+        root.setObjectName("desktopRoot")
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        root_layout.addWidget(self._build_application_header())
+        root_layout.addWidget(self.splitter, 1)
+        self.setCentralWidget(root)
         self._create_menus()
         self._create_status_widgets()
         self.set_workflow("project")
@@ -93,19 +100,27 @@ class DesktopWindow(QMainWindow):
     def _build_context_container(self) -> QWidget:
         container = QWidget()
         container.setObjectName("contextContainer")
-        container.setMinimumWidth(220)
-        container.setMaximumWidth(480)
+        container.setMinimumWidth(320)
+        container.setMaximumWidth(540)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         header = QWidget()
+        header.setObjectName("contextPanelHeader")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(12, 8, 8, 4)
+        header_layout.setContentsMargins(16, 12, 10, 8)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        kicker = QLabel("CONTEXT PANEL")
+        kicker.setObjectName("panelKicker")
+        titles.addWidget(kicker)
         title = QLabel("Parameters")
         title.setObjectName("panelTitle")
-        header_layout.addWidget(title)
+        titles.addWidget(title)
+        header_layout.addLayout(titles)
         header_layout.addStretch(1)
         self.context_collapse_button = QToolButton()
-        self.context_collapse_button.setText("×")
+        self.context_collapse_button.setIcon(icon("collapse"))
+        self.context_collapse_button.setIconSize(QSize(22, 22))
         self.context_collapse_button.setToolTip("Hide contextual parameters")
         self.context_collapse_button.clicked.connect(self.hide_context_panel)
         header_layout.addWidget(self.context_collapse_button)
@@ -113,11 +128,62 @@ class DesktopWindow(QMainWindow):
         layout.addWidget(self.context_panel, 1)
         layer_title = QLabel("Layers")
         layer_title.setObjectName("panelTitle")
-        layer_title.setContentsMargins(12, 6, 0, 0)
+        layer_title.setContentsMargins(16, 10, 0, 2)
         layout.addWidget(layer_title)
         self.layer_panel = LayerPanel(self.embedding.viewer)
         layout.addWidget(self.layer_panel, 1)
         return container
+
+    def _build_application_header(self) -> QWidget:
+        header = QWidget()
+        header.setObjectName("applicationHeader")
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(18, 10, 14, 10)
+        layout.setSpacing(12)
+
+        brand = QVBoxLayout()
+        brand.setSpacing(0)
+        name = QLabel("NuCytoSeg")
+        name.setObjectName("applicationName")
+        subtitle = QLabel("3D microscopy segmentation and quantitative analysis")
+        subtitle.setObjectName("applicationSubtitle")
+        brand.addWidget(name)
+        brand.addWidget(subtitle)
+        layout.addLayout(brand)
+        layout.addSpacing(20)
+
+        self.header_workflow = QLabel("PROJECT")
+        self.header_workflow.setObjectName("headerWorkflow")
+        layout.addWidget(self.header_workflow)
+        layout.addStretch(1)
+
+        for action, icon_name, tooltip in (
+            (self.focus_action, "focus", "Toggle Focus Mode"),
+            (self.restore_layout_action, "restore", "Restore previous layout"),
+            (self.reset_layout_action, "reset", "Reset workspace layout"),
+        ):
+            action.setIcon(icon(icon_name))
+            button = QToolButton()
+            button.setObjectName("headerActionButton")
+            button.setDefaultAction(action)
+            button.setIconSize(QSize(22, 22))
+            button.setToolTip(tooltip)
+            layout.addWidget(button)
+
+        self.open_image_button = QToolButton()
+        self.open_image_button.setObjectName("openImageButton")
+        self.open_image_button.setText("Open Image")
+        self.open_image_button.setIcon(icon("open", accent=True))
+        self.open_image_button.setIconSize(QSize(22, 22))
+        self.open_image_button.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.open_image_button.setEnabled(False)
+        self.open_image_button.setToolTip(
+            "Image import will be connected during scientific workflow integration"
+        )
+        layout.addWidget(self.open_image_button)
+        return header
 
     def _create_actions(self) -> None:
         self.quit_action = QAction("Quit NuCytoSeg", self)
@@ -144,14 +210,17 @@ class DesktopWindow(QMainWindow):
         )
 
         self.focus_action = QAction("Focus Mode", self)
+        self.focus_action.setIcon(icon("focus"))
         self.focus_action.setCheckable(True)
         self.focus_action.setShortcut("Ctrl+Shift+F")
         self.focus_action.toggled.connect(self.set_focus_mode)
 
         self.restore_layout_action = QAction("Restore Previous Layout", self)
+        self.restore_layout_action.setIcon(icon("restore"))
         self.restore_layout_action.triggered.connect(self.restore_previous_layout)
 
         self.reset_layout_action = QAction("Reset Layout", self)
+        self.reset_layout_action.setIcon(icon("reset"))
         self.reset_layout_action.triggered.connect(self.reset_layout)
 
     def _create_menus(self) -> None:
@@ -192,6 +261,8 @@ class DesktopWindow(QMainWindow):
         label = self.context_panel.heading.text()
         if hasattr(self, "workflow_status"):
             self.workflow_status.setText(f"Workflow: {label}")
+        if hasattr(self, "header_workflow"):
+            self.header_workflow.setText(label.upper())
         self.statusBar().showMessage(f"{label} workspace selected")
 
     def _toggle_navigation(self, visible: bool) -> None:
@@ -259,7 +330,7 @@ class DesktopWindow(QMainWindow):
         self.navigation.set_collapsed(False)
         self.toggle_navigation_action.setChecked(True)
         self.toggle_context_action.setChecked(True)
-        self.splitter.setSizes([210, 950, 280])
+        self.splitter.setSizes([210, 890, 340])
         self.set_workflow("project")
         self.statusBar().showMessage("Default workspace layout restored", 4000)
 
@@ -289,22 +360,37 @@ class DesktopWindow(QMainWindow):
     def _apply_theme(self) -> None:
         self.setStyleSheet(
             """
-            QMainWindow, QWidget { background: #111821; color: #d9e3ee; }
-            QMenuBar, QMenu, QStatusBar { background: #151e29; color: #d9e3ee; }
+            QMainWindow, #desktopRoot { background: #0d151e; }
+            QWidget { color: #dce7f1; font-size: 13px; }
+            QMenuBar, QMenu, QStatusBar { background: #121d29; color: #d9e3ee; }
+            QMenuBar { padding: 4px 6px; }
             QMenuBar::item:selected, QMenu::item:selected { background: #263b50; }
-            #workflowNavigation { background: #151e29; border-right: 1px solid #253342; }
-            #navigationBrand, #panelTitle { font-size: 15px; font-weight: 700; color: #f2f7fb; }
-            QToolButton { background: transparent; border: 0; border-radius: 6px; padding: 6px; }
-            QToolButton:hover { background: #223142; }
-            QToolButton:checked { background: #234963; color: #a9e2ff; }
-            #contextContainer { background: #151e29; border-left: 1px solid #253342; }
-            #layerTree { background: #111821; border: 0; alternate-background-color: #151e29; }
-            #layerTree::item { min-height: 25px; }
-            #layerTree::item:selected { background: #234963; }
-            #contextSection { background: #1c2734; border-radius: 6px; padding: 10px; font-weight: 600; }
-            #placeholderNote { color: #8fa1b3; padding: 8px 2px; }
+            #applicationHeader { background: #121d29; border-bottom: 1px solid #263748; }
+            #applicationName { font-size: 20px; font-weight: 700; color: #f4f9fc; }
+            #applicationSubtitle { font-size: 11px; color: #8296a9; }
+            #headerWorkflow { color: #66d9d0; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+            #openImageButton { background: #17677a; color: #dffcff; border-radius: 7px; padding: 8px 13px; }
+            #openImageButton:disabled { background: #20313d; color: #708391; }
+            #workflowNavigation { background: #121d29; border-right: 1px solid #263748; }
+            #navigationBrand, #panelTitle { font-size: 16px; font-weight: 700; color: #f2f7fb; }
+            #panelKicker { font-size: 10px; font-weight: 600; color: #8298aa; letter-spacing: 1px; }
+            QToolButton { background: transparent; border: 0; border-radius: 7px; padding: 7px; }
+            QToolButton:hover { background: #203343; }
+            QToolButton:checked { background: #15546b; color: #bff7f2; }
+            QToolButton:disabled { color: #526171; }
+            #headerActionButton { background: #192a38; }
+            #contextContainer { background: #121d29; border-left: 1px solid #263748; }
+            #contextPanelHeader { border-bottom: 1px solid #263748; }
+            #contextHeading { font-size: 17px; font-weight: 650; color: #f1f6fa; }
+            #layerTree { background: #0f1923; border: 0; alternate-background-color: #151e29; }
+            #layerTree QHeaderView::section { background: #162432; color: #94a9bb; border: 0; padding: 7px; font-weight: 600; }
+            #layerTree::item { min-height: 34px; padding: 2px; }
+            #layerTree::item:hover { background: #1b3040; }
+            #layerTree::item:selected { background: #15546b; color: #f2fbfc; }
+            #contextSection { background: #1a2a38; border-radius: 7px; padding: 12px; font-weight: 600; }
+            #placeholderNote { color: #8fa1b3; padding: 10px 3px; }
             QSplitter::handle { background: #253342; width: 2px; }
-            QStatusBar { border-top: 1px solid #253342; }
+            QStatusBar { border-top: 1px solid #263748; font-size: 12px; min-height: 25px; }
             """
         )
 

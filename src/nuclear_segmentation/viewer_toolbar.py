@@ -1,8 +1,10 @@
 """Explicit embedded-viewer controls that avoid napari window actions."""
 from __future__ import annotations
 
-from qtpy.QtCore import Qt, Signal
+from qtpy.QtCore import QSize, Signal
 from qtpy.QtWidgets import QButtonGroup, QToolButton, QVBoxLayout, QWidget
+
+from .ui_icons import icon
 
 
 class ViewerToolbar(QWidget):
@@ -14,7 +16,7 @@ class ViewerToolbar(QWidget):
         super().__init__(parent)
         self.viewer = viewer
         self.setObjectName("viewerToolbar")
-        self.setFixedWidth(48)
+        self.setFixedWidth(56)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 8, 5, 8)
         layout.setSpacing(5)
@@ -22,20 +24,22 @@ class ViewerToolbar(QWidget):
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
         definitions = (
-            ("2d", "2D", "Switch to 2D slice view", False),
-            ("3d", "3D", "Switch to 3D volume view", False),
-            ("pan_zoom", "↔", "Pan and zoom", True),
-            ("review", "◎", "Review/select the active layer without editing", True),
-            ("paint", "✎", "Paint the active Labels layer", True),
-            ("erase", "⌫", "Erase from the active Labels layer", True),
-            ("pick", "⌖", "Pick a value from the active Labels layer", True),
+            ("2d", "view2d", "Switch to 2D slice view", False),
+            ("3d", "view3d", "Switch to 3D volume view", False),
+            ("fit", "fit", "Fit image to view", False),
+            ("pan_zoom", "pan", "Pan and zoom", True),
+            ("review", "select", "Review/select without editing", True),
+            ("paint", "paint", "Paint the active Labels layer", True),
+            ("erase", "erase", "Erase from the active Labels layer", True),
+            ("pick", "pick", "Pick a value from the active Labels layer", True),
         )
-        for key, text, tooltip, is_tool in definitions:
+        for key, icon_name, tooltip, is_tool in definitions:
             button = QToolButton()
             button.setObjectName(f"viewerTool_{key}")
-            button.setText(text)
+            button.setIcon(icon(icon_name))
+            button.setIconSize(QSize(25, 25))
             button.setToolTip(tooltip)
-            button.setFixedSize(38, 38)
+            button.setFixedSize(44, 44)
             if is_tool:
                 button.setCheckable(True)
                 self.tool_group.addButton(button)
@@ -44,6 +48,8 @@ class ViewerToolbar(QWidget):
                 )
             elif key == "2d":
                 button.clicked.connect(lambda: self.set_ndisplay(2))
+            elif key == "fit":
+                button.clicked.connect(self.fit_to_view)
             else:
                 button.clicked.connect(lambda: self.set_ndisplay(3))
             self.buttons[key] = button
@@ -74,6 +80,11 @@ class ViewerToolbar(QWidget):
         self.viewer.dims.ndisplay = dimensions
         self.status_changed.emit(f"{dimensions}D display active")
         return True
+
+    def fit_to_view(self) -> None:
+        """Reset the napari camera without changing layer data or calibration."""
+        self.viewer.reset_view()
+        self.status_changed.emit("Image fitted to view")
 
     def activate_tool(self, mode: str) -> bool:
         layer = self.active_layer()

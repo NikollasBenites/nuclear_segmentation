@@ -9,6 +9,7 @@ import pytest
 
 from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.layer_panel import LAYER_ROLE
+from nuclear_segmentation.ui_icons import icon
 from nuclear_segmentation.workspace_settings import SETTINGS_GROUP
 
 
@@ -53,11 +54,14 @@ def window(qapp, settings):
 
 def test_main_window_initialization_and_navigation(window):
     assert window.windowTitle().startswith("NuCytoSeg")
+    assert window.header_workflow.text() == "PROJECT"
+    assert not window.open_image_button.isEnabled()
     assert window.embedding.viewer.layers
     original_viewer = window.embedding.viewer
     window.navigation._buttons["segmentation"].click()
     assert window.navigation.current_workflow == "segmentation"
     assert window.context_panel.heading.text() == "Segmentation"
+    assert window.header_workflow.text() == "SEGMENTATION"
     assert window.embedding.viewer is original_viewer
 
 
@@ -132,20 +136,49 @@ def test_layer_tree_selection_visibility_rename_add_remove_and_reorder(window, q
     item = panel.model.item_for_layer(image)
     panel.tree.setCurrentIndex(item.index())
     assert viewer.layers.selection.active is image
-    item.setCheckState(Qt.CheckState.Unchecked)
+    active = viewer.layers.selection.active
+    visibility_item = panel.model.visibility_item_for_layer(image)
+    assert visibility_item.toolTip() == "Hide layer"
+    assert not visibility_item.icon().isNull()
+    panel.tree.clicked.emit(visibility_item.index())
     assert not image.visible
-    item.setCheckState(Qt.CheckState.Checked)
+    assert viewer.layers.selection.active is active
+    assert visibility_item.toolTip() == "Show layer"
+
+    image.visible = True
+    qapp.processEvents()
+    assert visibility_item.toolTip() == "Hide layer"
+    assert viewer.layers.selection.active is active
+
+    visibility_before_rename = image.visible
     item.setText("Renamed image")
     assert image.name == "Renamed image"
+    assert image.visible is visibility_before_rename
     added = viewer.add_labels(image.data.astype("uint16"), name="Nuclear Masks")
     qapp.processEvents()
     assert panel.model.item_for_layer(added) is not None
+    other = viewer.add_points([[1, 2, 3]], name="Review Points")
+    qapp.processEvents()
+    viewer.layers.selection.active = image
+    other_visibility = panel.model.visibility_item_for_layer(other)
+    panel.tree.clicked.emit(other_visibility.index())
+    assert not other.visible
+    assert viewer.layers.selection.active is image
     viewer.layers.move(0, 1)
     qapp.processEvents()
     assert panel.model.item_for_layer(added) is not None
     viewer.layers.remove(added)
+    viewer.layers.remove(other)
     qapp.processEvents()
     assert panel.model.item_for_layer(added) is None
+
+
+def test_vector_icons_render_at_multiple_pixel_sizes(qapp):
+    for name in ("eye", "eye_off", "folder", "paint", "fit"):
+        value = icon(name)
+        assert not value.isNull()
+        assert not value.pixmap(16, 16).isNull()
+        assert not value.pixmap(64, 64).isNull()
 
 
 def test_viewer_toolbar_validates_active_layer_and_commands(window):
@@ -153,6 +186,8 @@ def test_viewer_toolbar_validates_active_layer_and_commands(window):
     toolbar = window.viewer_toolbar
     image = viewer.layers[0]
     labels = window.embedding.demo_labels()
+    data_identity = id(labels.data)
+    physical_scale = tuple(labels.scale)
     viewer.layers.selection.active = image
     assert not toolbar.buttons["paint"].isEnabled()
     assert not toolbar.activate_tool("paint")
@@ -168,6 +203,9 @@ def test_viewer_toolbar_validates_active_layer_and_commands(window):
     assert toolbar.set_ndisplay(3)
     assert viewer.dims.ndisplay == 3
     assert toolbar.set_ndisplay(2)
+    toolbar.fit_to_view()
+    assert id(labels.data) == data_identity
+    assert tuple(labels.scale) == physical_scale
 
 
 def test_active_layer_external_change_selects_tree_row(window):
