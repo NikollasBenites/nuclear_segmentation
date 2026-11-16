@@ -189,6 +189,9 @@ class _IconEngine(QIconEngine):
             )
             _polyline(painter, *points)
             return
+        if name == "chevron_down":
+            _polyline(painter, 5, 8, 12, 15, 19, 8)
+            return
         if name == "focus":
             for points in (
                 (9, 4, 4, 4, 4, 9),

@@ -318,3 +318,38 @@ def test_project_replacement_requires_confirmation(qapp, tmp_path, monkeypatch):
     assert window.project_state.dataset.source_path == source.resolve()
     assert window.embedding.viewer.layers[0].data[0, 0, 0] == 1
     window.close()
+
+
+def test_long_provenance_path_axes_and_dimensions_remain_accessible(qapp, tmp_path):
+    nested = tmp_path / ("long_leica_experiment_folder_" * 3)
+    nested.mkdir()
+    source = nested / ("multidimensional_mntb_acquisition_" * 2 + ".ome.tif")
+    tifffile.imwrite(
+        source,
+        np.ones((2, 3, 5, 7), dtype=np.uint8),
+        ome=True,
+        metadata={
+            "axes": "CZYX",
+            "PhysicalSizeZ": 2.0,
+            "PhysicalSizeY": 0.5,
+            "PhysicalSizeX": 0.5,
+        },
+    )
+    settings = QSettings(str(tmp_path / "workspace.ini"), QSettings.Format.IniFormat)
+    window = DesktopWindow(
+        qt_viewer_factory=FakeQtViewer,
+        settings=settings,
+        restore_workspace=False,
+    )
+    window.context_container.setMaximumWidth(340)
+    assert window.prepare_image_import(source, confirm_replacement=False)
+    _wait_until(qapp, lambda: window._import_thread is None)
+    values = window.context_panel.project_page.provenance_values
+    assert values["path"].text() == str(source.resolve())
+    assert values["path"].toolTip() == str(source.resolve())
+    assert values["path"].wordWrap()
+    assert values["original_axes"].text() == "CZYX"
+    assert values["original_dimensions"].text() == "(2, 3, 5, 7)"
+    assert values["standardized"].text() == "(2, 3, 5, 7)"
+    assert window.context_panel.project_page.sections["provenance"].expanded
+    window.close()

@@ -1,21 +1,23 @@
 """Functional Phase 2A project/import controls."""
 from __future__ import annotations
 
-from qtpy.QtCore import Signal
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
     QComboBox,
     QFormLayout,
-    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from .channel_panel import ChannelConfigurationPanel
+from .collapsible_section import CollapsibleSection
 
 
 class ProjectPanel(QWidget):
@@ -23,6 +25,7 @@ class ProjectPanel(QWidget):
     load_pending_requested = Signal()
     analysis_mode_changed = Signal(str)
     calibration_requested = Signal(object)
+    section_state_changed = Signal(str, bool)
 
     def __init__(self, project_state, parent=None):
         super().__init__(parent)
@@ -30,31 +33,47 @@ class ProjectPanel(QWidget):
         self._pending = False
         self._metadata_spacing_available = False
         self._spacing_manually_edited = False
+        self.sections = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
-        provenance, provenance_form = self._section("Image Provenance")
+        provenance, provenance_form = self._provenance_section()
         self.provenance_values = {}
         for key, title in (
             ("filename", "File"),
             ("path", "Path"),
             ("format", "Format"),
             ("series", "Series"),
-            ("original", "Original"),
-            ("standardized", "CZYX"),
+            ("original_axes", "Original axes"),
+            ("original_dimensions", "Original dimensions"),
+            ("standardized", "CZYX dimensions"),
             ("dtype", "Data type"),
             ("channels", "Channels"),
             ("planes", "Z planes"),
         ):
             value = QLabel("Not loaded")
             value.setWordWrap(True)
-            value.setTextInteractionFlags(value.textInteractionFlags())
+            value.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            value.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            )
+            value.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+            )
+            value.setMinimumWidth(0)
             self.provenance_values[key] = value
-            provenance_form.addRow(title, value)
+            row = provenance_form.rowCount()
+            label = QLabel(title)
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            provenance_form.addWidget(label, row, 0)
+            provenance_form.addWidget(value, row, 1)
         layout.addWidget(provenance)
 
-        calibration, calibration_form = self._section("Calibration and Axes")
+        calibration, calibration_form = self._section(
+            "calibration", "Calibration and Axes"
+        )
         self.axes_override = QLineEdit()
         self.axes_override.setPlaceholderText("Auto from TIFF metadata")
         calibration_form.addRow("Axes override", self.axes_override)
@@ -76,12 +95,14 @@ class ProjectPanel(QWidget):
         calibration_form.addRow(self.apply_calibration_button)
         layout.addWidget(calibration)
 
-        channels, channels_layout = self._section("Channel Configuration")
+        channels, channels_layout = self._section(
+            "channels", "Channel Configuration"
+        )
         self.channel_panel = ChannelConfigurationPanel(project_state)
         channels_layout.addRow(self.channel_panel)
         layout.addWidget(channels)
 
-        mode_section, mode_form = self._section("Analysis Mode")
+        mode_section, mode_form = self._section("analysis_mode", "Analysis Mode")
         self.analysis_mode = QComboBox()
         self.analysis_mode.addItem("New Segmentation", "segment")
         self.analysis_mode.addItem("Resume Analysis", "resume")
@@ -110,23 +131,49 @@ class ProjectPanel(QWidget):
         project_state.changed.connect(self.set_dataset)
         project_state.import_status_changed.connect(self.status_label.setText)
 
-    @staticmethod
-    def _section(title: str):
-        frame = QFrame()
-        frame.setObjectName("projectSection")
-        root = QVBoxLayout(frame)
-        root.setContentsMargins(10, 8, 10, 10)
-        heading = QLabel(title)
-        heading.setObjectName("contextSectionTitle")
-        root.addWidget(heading)
+    def _register_section(self, section: CollapsibleSection) -> None:
+        self.sections[section.key] = section
+        section.expanded_changed.connect(self.section_state_changed)
+
+    def _section(self, key: str, title: str):
+        frame = CollapsibleSection(key, title)
+        self._register_section(frame)
         form = QFormLayout()
-        form.setContentsMargins(0, 4, 0, 0)
-        root.addLayout(form)
+        form.setContentsMargins(10, 8, 10, 10)
+        frame.set_content_layout(form)
         return frame, form
+
+    def _provenance_section(self):
+        frame = CollapsibleSection("provenance", "Image Provenance")
+        self._register_section(frame)
+        grid = QGridLayout()
+        grid.setContentsMargins(10, 8, 10, 10)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+        frame.set_content_layout(grid)
+        return frame, grid
+
+    def section_states(self) -> dict[str, bool]:
+        return {key: section.expanded for key, section in self.sections.items()}
+
+    def set_section_states(self, states) -> None:
+        if not isinstance(states, dict):
+            states = dict(states or ())
+        for key, expanded in states.items():
+            section = self.sections.get(str(key))
+            if section is not None and isinstance(expanded, bool):
+                section.set_expanded(expanded, emit=False)
+
+    def expand_section(self, key: str) -> None:
+        section = self.sections.get(key)
+        if section is not None:
+            section.set_expanded(True)
 
     def import_options(self) -> dict:
         text_values = [field.text().strip() for field in self.spacing_fields]
         if any(text_values) and not all(text_values):
+            self.expand_section("calibration")
             raise ValueError("Enter all three Z, Y, and X spacing values.")
         spacing = None
         if all(text_values) and (
@@ -135,6 +182,7 @@ class ProjectPanel(QWidget):
             try:
                 spacing = tuple(float(value) for value in text_values)
             except ValueError as error:
+                self.expand_section("calibration")
                 raise ValueError("Spacing values must be numbers in micrometers.") from error
         return {
             "axes_override": self.axes_override.text().strip() or None,
@@ -145,11 +193,13 @@ class ProjectPanel(QWidget):
     def _request_calibration(self) -> None:
         text_values = [field.text().strip() for field in self.spacing_fields]
         if not all(text_values):
+            self.expand_section("calibration")
             self.calibration_requested.emit(None)
             return
         try:
             spacing = tuple(float(value) for value in text_values)
         except ValueError:
+            self.expand_section("calibration")
             self.calibration_requested.emit(None)
             return
         self.calibration_requested.emit(spacing)
@@ -165,9 +215,11 @@ class ProjectPanel(QWidget):
     def set_inspection(self, inspection) -> None:
         self.provenance_values["filename"].setText(inspection.source_path.name)
         self.provenance_values["path"].setText(str(inspection.source_path))
+        self.provenance_values["path"].setToolTip(str(inspection.source_path))
         self.provenance_values["format"].setText(inspection.source_format)
-        self.provenance_values["original"].setText(
-            f"{inspection.reported_axes} {inspection.reported_shape}"
+        self.provenance_values["original_axes"].setText(inspection.reported_axes)
+        self.provenance_values["original_dimensions"].setText(
+            str(inspection.reported_shape)
         )
         self._metadata_spacing_available = inspection.voxel_spacing_zyx_um is not None
         self._spacing_manually_edited = False
@@ -176,6 +228,7 @@ class ProjectPanel(QWidget):
                 field.setText(f"{value:g}")
             self.calibration_source.setText(inspection.calibration_source)
         else:
+            self.expand_section("calibration")
             for field in self.spacing_fields:
                 field.clear()
             self.calibration_source.setText("Manual calibration required")
@@ -184,9 +237,11 @@ class ProjectPanel(QWidget):
         values = self.provenance_values
         values["filename"].setText(source_path.name)
         values["path"].setText(str(source_path))
+        values["path"].setToolTip(str(source_path))
         values["format"].setText("Leica LIF")
         values["series"].setText(f"{series.index}: {series.name}")
-        values["original"].setText(f"{series.dimensions} {series.shape}")
+        values["original_axes"].setText(series.dimensions)
+        values["original_dimensions"].setText(str(series.shape))
         values["channels"].setText(str(series.channel_count))
         values["planes"].setText(str(series.z_planes))
         self.time_index.setMaximum(max(series.time_points - 1, 0))
@@ -199,6 +254,7 @@ class ProjectPanel(QWidget):
                 field.setText(f"{value:g}")
             self.calibration_source.setText("Leica metadata")
         else:
+            self.expand_section("calibration")
             for field in self.spacing_fields:
                 field.clear()
             self.calibration_source.setText("Manual calibration required")
@@ -210,11 +266,11 @@ class ProjectPanel(QWidget):
         values = self.provenance_values
         values["filename"].setText(dataset.source_filename)
         values["path"].setText(str(dataset.source_path))
+        values["path"].setToolTip(str(dataset.source_path))
         values["format"].setText(dataset.source_format)
         values["series"].setText(f"{dataset.series_index}: {dataset.series_name}")
-        values["original"].setText(
-            f"{dataset.reported_axes} {dataset.reported_shape}"
-        )
+        values["original_axes"].setText(dataset.reported_axes)
+        values["original_dimensions"].setText(str(dataset.reported_shape))
         values["standardized"].setText(str(dataset.standardized_shape))
         values["dtype"].setText(dataset.dtype)
         values["channels"].setText(str(len(dataset.channels)))

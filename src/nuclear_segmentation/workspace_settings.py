@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
 from qtpy.QtCore import QByteArray, QSettings
 from qtpy.QtGui import QGuiApplication
@@ -20,6 +21,7 @@ class WorkspaceSnapshot:
     navigation_visible: bool
     context_visible: bool
     workflow: str
+    project_sections: tuple[tuple[str, bool], ...] = ()
 
 
 class WorkspaceSettings:
@@ -41,6 +43,16 @@ class WorkspaceSettings:
             sizes = tuple(max(0, int(value)) for value in raw_sizes)
         except (TypeError, ValueError):
             sizes = ()
+        raw_sections = self.settings.value(self._key(slot, "project_sections"), "{}")
+        try:
+            parsed_sections = json.loads(str(raw_sections))
+            sections = tuple(
+                (str(key), bool(value))
+                for key, value in parsed_sections.items()
+                if isinstance(value, bool)
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            sections = ()
         return WorkspaceSnapshot(
             geometry=geometry,
             window_state=state if isinstance(state, QByteArray) else QByteArray(),
@@ -55,6 +67,7 @@ class WorkspaceSettings:
                 self._key(slot, "context_visible"), True, type=bool
             ),
             workflow=str(self.settings.value(self._key(slot, "workflow"), "project")),
+            project_sections=sections,
         )
 
     def write(self, snapshot: WorkspaceSnapshot, slot: str = "current") -> None:
@@ -66,6 +79,7 @@ class WorkspaceSettings:
             "navigation_visible": snapshot.navigation_visible,
             "context_visible": snapshot.context_visible,
             "workflow": snapshot.workflow,
+            "project_sections": json.dumps(dict(snapshot.project_sections)),
         }
         for name, value in values.items():
             self.settings.setValue(self._key(slot, name), value)

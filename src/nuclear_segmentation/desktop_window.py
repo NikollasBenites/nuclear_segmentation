@@ -313,6 +313,7 @@ class DesktopWindow(QMainWindow):
         try:
             self.project_state.set_calibration(spacing)
         except (TypeError, ValueError) as error:
+            self.context_panel.project_page.expand_section("calibration")
             self.statusBar().showMessage(f"Calibration: {error}", 6000)
             return
         for layer in self._channel_layer_callbacks:
@@ -546,6 +547,7 @@ class DesktopWindow(QMainWindow):
         try:
             self.project_state.update_channel(index, **{field: value})
         except ValueError as error:
+            self.context_panel.project_page.expand_section("channels")
             self.project_state.channels_changed.emit(tuple(self.project_state.channels))
             self.statusBar().showMessage(f"Channel configuration: {error}", 6000)
             return
@@ -639,6 +641,9 @@ class DesktopWindow(QMainWindow):
             navigation_visible=self.toggle_navigation_action.isChecked(),
             context_visible=self.toggle_context_action.isChecked(),
             workflow=self.navigation.current_workflow,
+            project_sections=tuple(
+                self.context_panel.project_page.section_states().items()
+            ),
         )
 
     def apply_snapshot(self, snapshot: WorkspaceSnapshot) -> bool:
@@ -656,6 +661,7 @@ class DesktopWindow(QMainWindow):
         if len(snapshot.splitter_sizes) == 3 and sum(snapshot.splitter_sizes) > 0:
             self.splitter.setSizes(list(snapshot.splitter_sizes))
         self.set_workflow(snapshot.workflow)
+        self.context_panel.project_page.set_section_states(snapshot.project_sections)
         return restored
 
     def save_layout(self) -> None:
@@ -688,6 +694,9 @@ class DesktopWindow(QMainWindow):
         self.toggle_context_action.setChecked(True)
         self.splitter.setSizes([210, 890, 340])
         self.set_workflow("project")
+        self.context_panel.project_page.set_section_states(
+            {key: True for key in self.context_panel.project_page.sections}
+        )
         self.statusBar().showMessage("Default workspace layout restored", 4000)
 
     def set_focus_mode(self, enabled: bool) -> None:
@@ -748,6 +757,12 @@ class DesktopWindow(QMainWindow):
             #layerTree::item:selected { background: #15546b; color: #f2fbfc; }
             #contextSection { background: #1a2a38; border-radius: 7px; padding: 12px; font-weight: 600; }
             #projectSection { background: #162735; border-radius: 7px; }
+            #collapsibleSectionHeader {
+                background: #1a3040; color: #eef7fa; border-radius: 6px;
+                padding: 8px 10px; font-weight: 700; text-align: left;
+            }
+            #collapsibleSectionHeader:hover { background: #214052; }
+            #collapsibleSectionContent QLabel { color: #c8d7e3; }
             #contextSectionTitle { color: #75dcd4; font-weight: 700; }
             #projectSection QLineEdit, #projectSection QSpinBox, #projectSection QComboBox {
                 background: #0f1923; border: 1px solid #314759; border-radius: 4px; padding: 4px;

@@ -101,6 +101,54 @@ def test_focus_mode_restores_unsaved_normal_layout(window, qapp):
     assert window.splitter.sizes() == normal_sizes
 
 
+def test_project_sections_toggle_independently_preserve_values_and_workflow(window):
+    panel = window.context_panel.project_page
+    panel.axes_override.setText("TCZYX")
+    assert all(section.expanded for section in panel.sections.values())
+    panel.sections["provenance"].header.click()
+    panel.sections["channels"].header.click()
+    assert not panel.sections["provenance"].expanded
+    assert panel.sections["calibration"].expanded
+    assert not panel.sections["channels"].expanded
+    assert panel.axes_override.text() == "TCZYX"
+    window.set_workflow("preprocessing")
+    window.set_workflow("project")
+    assert not panel.sections["provenance"].expanded
+    assert not panel.sections["channels"].expanded
+    assert panel.axes_override.text() == "TCZYX"
+    panel.sections["provenance"].header.click()
+    panel.sections["channels"].header.click()
+
+
+def test_project_section_states_restore_and_invalid_values_expand(
+    qapp, settings
+):
+    first = DesktopWindow(
+        qt_viewer_factory=FakeQtViewer,
+        settings=settings,
+        restore_workspace=False,
+    )
+    first.context_panel.project_page.sections["calibration"].set_expanded(False)
+    first.context_panel.project_page.sections["channels"].set_expanded(False)
+    first.close()
+    second = DesktopWindow(
+        qt_viewer_factory=FakeQtViewer,
+        settings=settings,
+        restore_workspace=True,
+    )
+    panel = second.context_panel.project_page
+    assert not panel.sections["calibration"].expanded
+    assert not panel.sections["channels"].expanded
+    panel.spacing_fields[0].setText("1")
+    with pytest.raises(ValueError, match="all three"):
+        panel.import_options()
+    assert panel.sections["calibration"].expanded
+    panel.sections["channels"].set_expanded(False)
+    second._update_channel_configuration(99, "name", "invalid")
+    assert panel.sections["channels"].expanded
+    second.close()
+
+
 def test_workspace_save_restore_history_and_reset(window):
     window.set_workflow("matching")
     window.navigation.set_collapsed(True)
