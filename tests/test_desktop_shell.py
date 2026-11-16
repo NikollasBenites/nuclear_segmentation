@@ -237,21 +237,27 @@ def test_review_tool_selects_clears_and_highlights_masks_without_data_changes(
     viewer.dims.set_current_step(0, first_position[0])
     assert window.mask_selection.select_at_data_position(labels, first_position) == 1
     assert window.mask_selection.selected_mask_id == 1
-    assert labels.selected_label == 1
-    assert labels.show_selected_label
-    assert labels.contour >= 2
-    assert window.context_panel.mask_id_label.text() == "Mask ID: 1"
+    assert labels.selected_label == original_selected
+    assert labels.show_selected_label == original_show_selected
+    assert labels.contour == original_contour
+    highlight = window.mask_selection._highlight_layer
+    assert highlight is not None
+    assert highlight.metadata["nucytoseg_selection_highlight"]
+    assert highlight.data.size < labels.data.size
+    assert viewer.layers.selection.active is labels
+    assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: 1"
 
     viewer.dims.set_current_step(0, min(first_position[0] + 1, labels.data.shape[0] - 1))
     assert window.mask_selection.selected_mask_id == 1
     viewer.dims.set_current_step(0, second_position[0])
     assert window.mask_selection.select_at_data_position(labels, second_position) == 2
-    assert window.context_panel.mask_id_label.text() == "Mask ID: 2"
+    assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: 2"
 
     viewer.dims.set_current_step(0, background_position[0])
     assert window.mask_selection.select_at_data_position(labels, background_position) is None
     assert window.mask_selection.selected_mask_id is None
-    assert window.context_panel.mask_id_label.text() == "Mask ID: —"
+    assert window.mask_selection._highlight_layer is None
+    assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: —"
     assert labels.selected_label == original_selected
     assert labels.contour == original_contour
     assert labels.show_selected_label == original_show_selected
@@ -271,7 +277,7 @@ def test_review_mouse_callback_uses_active_labels_layer(window, monkeypatch):
     )
     window.mask_selection._on_mouse_press(labels, event)
     assert window.mask_selection.selected_mask_id == 2
-    assert window.context_panel.mask_id_label.text() == "Mask ID: 2"
+    assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: 2"
 
 
 def test_review_selection_switches_labels_layers_and_isolates_editing(window):
@@ -291,26 +297,107 @@ def test_review_selection_switches_labels_layers_and_isolates_editing(window):
     second_position = tuple(np.argwhere(second.data == 9)[0])
     viewer.dims.set_current_step(0, second_position[0])
     assert window.mask_selection.select_at_data_position(second, second_position) == 9
-    assert window.context_panel.mask_id_label.text() == "Mask ID: 9"
+    assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: 9"
 
     viewer.layers.selection.active = first
     assert window.mask_selection.selected_mask_id == 3
-    assert first.show_selected_label
+    assert window.mask_selection._highlight_layer is not None
     assert window.viewer_toolbar.activate_tool("paint")
     assert str(first.mode) == "paint"
     assert window.mask_selection._on_mouse_press not in first.mouse_drag_callbacks
-    assert not first.show_selected_label
+    assert window.mask_selection._highlight_layer is None
     assert window.mask_selection.select_at_data_position(first, first_position) is None
     assert window.mask_selection.selected_mask_id == 3
     assert window.viewer_toolbar.activate_tool("erase")
     assert str(first.mode) == "erase"
 
     assert window.viewer_toolbar.activate_tool("review")
-    viewer.dims.ndisplay = 3
+    window.viewer_toolbar.set_ndisplay(3)
     assert window.mask_selection.select_at_data_position(first, first_position) is None
     assert window.mask_selection.selected_mask_id == 3
-    viewer.dims.ndisplay = 2
+    window.viewer_toolbar.set_ndisplay(2)
     viewer.layers.remove(second)
+
+
+def test_review_3d_ray_picking_nearest_rotation_spacing_and_persistence(window):
+    viewer = window.embedding.viewer
+    data = np.zeros((10, 12, 12), dtype=np.uint16)
+    data[2:4, 2:4, 2:4] = 11
+    data[7:9, 7:9, 7:9] = 22
+    original = data.copy()
+    labels = viewer.add_labels(
+        data,
+        name="Anisotropic masks",
+        scale=(3.0, 0.7, 0.7),
+    )
+    viewer.layers.selection.active = labels
+    assert window.viewer_toolbar.activate_tool("review")
+    assert window.viewer_toolbar.set_ndisplay(3)
+    labels.refresh(data_displayed=True)
+
+    center = np.array((5.0, 5.0, 5.0))
+    world_position = np.asarray(labels.data_to_world(center), dtype=float)
+    forward = np.asarray(labels.data_to_world(center + (1, 1, 1)), dtype=float)
+    forward = (forward - world_position) / np.linalg.norm(forward - world_position)
+    assert (
+        window.mask_selection.pick_from_ray(
+            labels, world_position, forward, (0, 1, 2), world=True
+        )
+        == 11
+    )
+    assert window.mask_selection.selected_mask_id == 11
+    highlight = window.mask_selection._highlight_layer
+    assert highlight is not None
+    assert highlight.contour == 0
+    assert window.layer_panel.model.item_for_layer(highlight) is None
+    np.testing.assert_allclose(
+        highlight.data_to_world((1, 1, 1)), labels.data_to_world((2, 2, 2))
+    )
+
+    assert (
+        window.mask_selection.pick_from_ray(
+            labels, world_position, -forward, (0, 1, 2), world=True
+        )
+        == 22
+    )
+    assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: 22"
+    assert window.viewer_toolbar.set_ndisplay(2)
+    assert window.mask_selection.selected_mask_id == 22
+    assert window.mask_selection._highlight_layer.contour == 2
+    assert window.viewer_toolbar.set_ndisplay(3)
+    assert window.mask_selection.selected_mask_id == 22
+
+    window.set_workflow("export")
+    assert window.selected_mask_panel.isVisible()
+    assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: 22"
+    sidebar_layout = window.context_container.layout()
+    assert sidebar_layout.indexOf(window.selected_mask_panel) > sidebar_layout.indexOf(
+        window.layer_panel
+    )
+
+    empty_position = np.asarray(labels.data_to_world((5, 1, 1)), dtype=float)
+    assert (
+        window.mask_selection.pick_from_ray(
+            labels, empty_position, forward, (0, 1, 2), world=True
+        )
+        is None
+    )
+    assert window.mask_selection.selected_mask_id is None
+    np.testing.assert_array_equal(labels.data, original)
+
+    window.mask_selection.pick_from_ray(
+        labels, world_position, forward, (0, 1, 2), world=True
+    )
+    labels.visible = False
+    assert window.mask_selection.selected_layer is None
+    assert window.mask_selection._highlight_layer is None
+    assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: —"
+    labels.visible = True
+    assert window.mask_selection.selected_mask_id == 11
+    callback = window.mask_selection._on_mouse_press
+    viewer.layers.remove(labels)
+    assert callback not in labels.mouse_drag_callbacks
+    assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: —"
 
 
 def test_active_layer_external_change_selects_tree_row(window):

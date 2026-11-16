@@ -1,20 +1,15 @@
-"""Non-destructive 2D mask selection for the NuCytoSeg Review tool."""
+"""Non-destructive 2D/3D mask selection for the NuCytoSeg Review tool."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-
+import numpy as np
 from qtpy.QtCore import QObject, Signal
 
 
-@dataclass(frozen=True)
-class _DisplayState:
-    selected_label: int
-    show_selected_label: bool
-    contour: int
+INTERNAL_HIGHLIGHT_KEY = "nucytoseg_selection_highlight"
 
 
 class MaskSelectionController(QObject):
-    """Own mask selection separately from active-layer and editing state."""
+    """Own object selection separately from active-layer and editing state."""
 
     selection_changed = Signal(object, object)
     status_changed = Signal(str)
@@ -24,19 +19,26 @@ class MaskSelectionController(QObject):
         self.viewer = viewer
         self._tool = "pan_zoom"
         self._review_layer = None
-        self._display_state: _DisplayState | None = None
+        self._highlight_layer = None
         self._selected_by_layer: dict[object, int] = {}
+        self._updating_overlay = False
         self._disposed = False
         viewer.layers.selection.events.active.connect(self._on_active_layer_changed)
+        viewer.dims.events.ndisplay.connect(self._on_ndisplay_changed)
 
     @staticmethod
     def _is_labels(layer) -> bool:
-        return layer is not None and type(layer).__name__.lower() == "labels"
+        metadata = getattr(layer, "metadata", {}) or {}
+        return (
+            layer is not None
+            and type(layer).__name__.lower() == "labels"
+            and not metadata.get(INTERNAL_HIGHLIGHT_KEY, False)
+        )
 
     @property
     def selected_layer(self):
         layer = self.viewer.layers.selection.active
-        if not self._is_labels(layer):
+        if not self._is_labels(layer) or not layer.visible:
             return None
         return layer
 
@@ -55,7 +57,7 @@ class MaskSelectionController(QObject):
         self._emit_selection()
 
     def _on_active_layer_changed(self, event=None) -> None:
-        if self._disposed:
+        if self._disposed or self._updating_overlay:
             return
         self._deactivate_review_layer()
         if self._tool == "review":
@@ -66,37 +68,55 @@ class MaskSelectionController(QObject):
         if not self._is_labels(layer) or layer not in self.viewer.layers:
             return
         self._review_layer = layer
-        self._display_state = _DisplayState(
-            selected_label=int(layer.selected_label),
-            show_selected_label=bool(layer.show_selected_label),
-            contour=int(layer.contour),
-        )
         if self._on_mouse_press not in layer.mouse_drag_callbacks:
             layer.mouse_drag_callbacks.append(self._on_mouse_press)
+        layer.events.visible.connect(self._on_review_visibility_changed)
+        layer.events.name.connect(self._on_review_name_changed)
         selected = self._selected_by_layer.get(layer)
-        if selected is not None:
-            self._apply_highlight(layer, selected)
+        if selected is not None and layer.visible:
+            self._update_highlight(layer, selected)
 
     def _deactivate_review_layer(self) -> None:
         layer = self._review_layer
-        state = self._display_state
         if layer is not None:
             if self._on_mouse_press in layer.mouse_drag_callbacks:
                 layer.mouse_drag_callbacks.remove(self._on_mouse_press)
-            if state is not None and layer in self.viewer.layers:
-                layer.show_selected_label = state.show_selected_label
-                layer.contour = state.contour
-                layer.selected_label = state.selected_label
+            layer.events.visible.disconnect(self._on_review_visibility_changed)
+            layer.events.name.disconnect(self._on_review_name_changed)
+        self._remove_highlight()
         self._review_layer = None
-        self._display_state = None
+
+    def _on_review_visibility_changed(self, event=None) -> None:
+        layer = self._review_layer
+        self._remove_highlight()
+        if layer is not None and layer.visible:
+            selected = self._selected_by_layer.get(layer)
+            if selected is not None:
+                self._update_highlight(layer, selected)
+        self._emit_selection()
+
+    def _on_review_name_changed(self, event=None) -> None:
+        self._emit_selection()
+
+    def _on_ndisplay_changed(self, event=None) -> None:
+        if self._highlight_layer is not None:
+            self._highlight_layer.contour = 2 if self.viewer.dims.ndisplay == 2 else 0
+
+    def prepare_display_change(self, dimensions: int) -> None:
+        """Disable 2D contours before napari constructs a 3D Labels view."""
+        if dimensions == 3 and self._highlight_layer is not None:
+            self._highlight_layer.contour = 0
 
     def _on_mouse_press(self, layer, event) -> None:
         if (
             self._disposed
             or self._tool != "review"
             or layer is not self._review_layer
-            or self.viewer.dims.ndisplay != 2
+            or not layer.visible
         ):
+            return
+        if self.viewer.dims.ndisplay == 3 and event.view_direction is None:
+            self.status_changed.emit("3D selection unavailable for this camera event")
             return
         value = layer.get_value(
             event.position,
@@ -104,10 +124,41 @@ class MaskSelectionController(QObject):
             dims_displayed=event.dims_displayed,
             world=True,
         )
-        self.select_mask(layer, value)
+        self.select_mask(layer, self._normalize_value(value))
+
+    @staticmethod
+    def _normalize_value(value):
+        if isinstance(value, tuple) and len(value) == 2:
+            return value[1]
+        return value
+
+    def pick_from_ray(
+        self,
+        layer,
+        position,
+        view_direction,
+        dims_displayed,
+        *,
+        world: bool = True,
+    ) -> int | None:
+        """Pick the camera-nearest non-background label along a 3D ray."""
+        if (
+            self._tool != "review"
+            or layer is not self.selected_layer
+            or not layer.visible
+            or len(dims_displayed) != 3
+        ):
+            return None
+        value = layer.get_value(
+            position,
+            view_direction=view_direction,
+            dims_displayed=list(dims_displayed),
+            world=world,
+        )
+        return self.select_mask(layer, self._normalize_value(value))
 
     def select_at_data_position(self, layer, position) -> int | None:
-        """Select at a data coordinate; exposed for deterministic tests."""
+        """Select at a data coordinate; exposed for deterministic 2D tests."""
         if (
             self._tool != "review"
             or layer is not self.selected_layer
@@ -126,7 +177,6 @@ class MaskSelectionController(QObject):
         return self.select_mask(layer, value)
 
     def select_mask(self, layer, value) -> int | None:
-        """Select one ID on the active Labels layer without changing its data."""
         if (
             self._tool != "review"
             or layer is not self.selected_layer
@@ -139,26 +189,93 @@ class MaskSelectionController(QObject):
             self.clear_selection(layer)
             return None
         self._selected_by_layer[layer] = selected
-        self._apply_highlight(layer, selected)
+        self._update_highlight(layer, selected)
         self._emit_selection()
         self.status_changed.emit(f"Selected Mask ID: {selected}")
         return selected
 
-    def _apply_highlight(self, layer, selected: int) -> None:
-        layer.selected_label = int(selected)
-        layer.contour = max(2, int(layer.contour))
-        layer.show_selected_label = True
+    @staticmethod
+    def _selected_bounds(data, selected: int):
+        if data.ndim == 2:
+            coordinates = np.argwhere(data == selected)
+            if coordinates.size == 0:
+                return None
+            return coordinates.min(axis=0), coordinates.max(axis=0) + 1
+        minimum = np.full(data.ndim, np.iinfo(np.int64).max, dtype=int)
+        maximum = np.full(data.ndim, -1, dtype=int)
+        for index in range(data.shape[0]):
+            coordinates = np.argwhere(data[index] == selected)
+            if coordinates.size == 0:
+                continue
+            local_min = np.concatenate(([index], coordinates.min(axis=0)))
+            local_max = np.concatenate(([index + 1], coordinates.max(axis=0) + 1))
+            minimum = np.minimum(minimum, local_min)
+            maximum = np.maximum(maximum, local_max)
+        return None if maximum[0] < 0 else (minimum, maximum)
+
+    def _update_highlight(self, layer, selected: int) -> None:
+        self._remove_highlight()
+        data = layer.data[0] if layer.multiscale else layer.data
+        bounds = self._selected_bounds(data, selected)
+        if bounds is None:
+            return
+        minimum, maximum = bounds
+        slices = tuple(slice(int(low), int(high)) for low, high in zip(minimum, maximum))
+        crop = np.pad((np.asarray(data[slices]) == selected).astype(np.uint8), 1)
+        start = minimum.astype(float) - 1
+        origin = np.asarray(layer.data_to_world(start), dtype=float)
+        ndim = data.ndim
+        identity = np.eye(ndim)
+        linear = np.column_stack(
+            [
+                np.asarray(layer.data_to_world(start + identity[axis]), dtype=float)
+                - origin
+                for axis in range(ndim)
+            ]
+        )
+        affine = np.eye(ndim + 1)
+        affine[:ndim, :ndim] = linear
+        affine[:ndim, -1] = origin
+        active = self.viewer.layers.selection.active
+        self._updating_overlay = True
+        try:
+            overlay = self.viewer.add_labels(
+                crop,
+                name="Selected mask highlight",
+                colormap={None: "transparent", 0: "transparent", 1: "#63d9d0"},
+                opacity=0.8,
+                blending="translucent",
+                affine=affine,
+                metadata={INTERNAL_HIGHLIGHT_KEY: True},
+            )
+            overlay.contour = 2 if self.viewer.dims.ndisplay == 2 else 0
+            self._highlight_layer = overlay
+            if active in self.viewer.layers:
+                self.viewer.layers.selection.active = active
+        finally:
+            self._updating_overlay = False
+
+    def _remove_highlight(self) -> None:
+        overlay = self._highlight_layer
+        self._highlight_layer = None
+        if overlay is None or overlay not in self.viewer.layers:
+            return
+        active = self.viewer.layers.selection.active
+        self._updating_overlay = True
+        try:
+            self.viewer.layers.remove(overlay)
+            if active in self.viewer.layers:
+                self.viewer.layers.selection.active = active
+        finally:
+            self._updating_overlay = False
 
     def clear_selection(self, layer=None) -> None:
         layer = layer or self.selected_layer
         if layer is None:
             return
         self._selected_by_layer.pop(layer, None)
-        if layer is self._review_layer and self._display_state is not None:
-            state = self._display_state
-            layer.show_selected_label = state.show_selected_label
-            layer.contour = state.contour
-            layer.selected_label = state.selected_label
+        if layer is self._review_layer:
+            self._remove_highlight()
         self._emit_selection()
         self.status_changed.emit("Mask selection cleared")
 
@@ -175,4 +292,5 @@ class MaskSelectionController(QObject):
         self.viewer.layers.selection.events.active.disconnect(
             self._on_active_layer_changed
         )
+        self.viewer.dims.events.ndisplay.disconnect(self._on_ndisplay_changed)
         self._selected_by_layer.clear()

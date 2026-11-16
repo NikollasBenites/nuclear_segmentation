@@ -12,6 +12,7 @@ class ViewerToolbar(QWidget):
 
     status_changed = Signal(str)
     tool_changed = Signal(str)
+    display_about_to_change = Signal(int)
 
     def __init__(self, viewer, parent: QWidget | None = None):
         super().__init__(parent)
@@ -78,6 +79,7 @@ class ViewerToolbar(QWidget):
     def set_ndisplay(self, dimensions: int) -> bool:
         if dimensions not in (2, 3):
             return False
+        self.display_about_to_change.emit(dimensions)
         self.viewer.dims.ndisplay = dimensions
         self.status_changed.emit(f"{dimensions}D display active")
         return True

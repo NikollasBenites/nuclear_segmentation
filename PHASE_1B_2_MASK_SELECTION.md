@@ -1,5 +1,8 @@
 # NuCytoSeg Phase 1B.2 mask selection
 
+> Phase 1B.3 supersedes the highlight implementation and extends Review picking
+> to 3D. See `PHASE_1B_3_UNIFIED_SELECTION.md` for current behavior.
+
 Phase 1B.2 adds non-destructive 2D mask selection to the independent Qt6
 interface. It does not implement geometry editing, measurements, or scientific
 workflow integration.

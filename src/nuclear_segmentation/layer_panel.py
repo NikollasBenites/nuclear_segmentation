@@ -84,6 +84,9 @@ class LayerTreeModel(QStandardItemModel):
             self.appendRow((group, type_cell, visibility_cell))
             groups[title] = group
         for layer in reversed(self.viewer.layers):
+            metadata = getattr(layer, "metadata", {}) or {}
+            if metadata.get("nucytoseg_selection_highlight", False):
+                continue
             name_item = QStandardItem(layer.name)
             name_item.setData(layer, LAYER_ROLE)
             layer_type = type(layer).__name__.lower()

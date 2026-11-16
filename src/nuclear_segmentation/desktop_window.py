@@ -17,6 +17,7 @@ from .context_panel import ContextPanel
 from .layer_panel import LayerPanel
 from .mask_selection import MaskSelectionController
 from .napari_embedding import DISPLAY_NAME, EmbeddedNapariWidget
+from .selected_mask_panel import SelectedMaskPanel
 from .viewer_toolbar import ViewerToolbar
 from .workflow_navigation import WorkflowNavigation
 from .ui_icons import icon
@@ -81,9 +82,12 @@ class DesktopWindow(QMainWindow):
         self.embedding.status_changed.connect(self.statusBar().showMessage)
         self.viewer_toolbar.status_changed.connect(self.statusBar().showMessage)
         self.viewer_toolbar.tool_changed.connect(self.mask_selection.set_tool)
+        self.viewer_toolbar.display_about_to_change.connect(
+            self.mask_selection.prepare_display_change
+        )
         self.mask_selection.status_changed.connect(self.statusBar().showMessage)
         self.mask_selection.selection_changed.connect(
-            self.context_panel.set_selected_mask
+            self.selected_mask_panel.set_selection
         )
         self.layer_panel.active_layer_changed.connect(self._update_active_layer_status)
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
@@ -139,6 +143,8 @@ class DesktopWindow(QMainWindow):
         layout.addWidget(layer_title)
         self.layer_panel = LayerPanel(self.embedding.viewer)
         layout.addWidget(self.layer_panel, 1)
+        self.selected_mask_panel = SelectedMaskPanel()
+        layout.addWidget(self.selected_mask_panel)
         return container
 
     def _build_application_header(self) -> QWidget:
@@ -389,8 +395,7 @@ class DesktopWindow(QMainWindow):
             #contextContainer { background: #121d29; border-left: 1px solid #263748; }
             #contextPanelHeader { border-bottom: 1px solid #263748; }
             #contextHeading { font-size: 17px; font-weight: 650; color: #f1f6fa; }
-            #maskSelectionCard { background: #162735; border-radius: 7px; }
-            #selectionCardTitle { color: #75dcd4; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+            #selectedMaskPanel { background: #162735; border-top: 1px solid #263748; }
             #selectedMaskId { color: #f2f8fb; font-size: 16px; font-weight: 700; }
             #selectedMaskLayer { color: #94a9bb; font-size: 11px; }
             #layerTree { background: #0f1923; border: 0; alternate-background-color: #151e29; }
