@@ -19,6 +19,7 @@ gui = ["PyQt6>=6.11.0"]
 segmentation = ["cellpose>=4,<5", "torch>=2.2"]
 zarr = ["zarr>=2.16,<3", "numcodecs>=0.12,<0.16"]
 test = ["pytest>=8"]
+lif = ["bioio>=3.7,<4", "bioio-lif>=2,<3"]
 
 [project.scripts]
 nuclear-segmentation = "nuclear_segmentation.app:main"

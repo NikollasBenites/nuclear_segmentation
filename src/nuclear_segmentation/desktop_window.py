@@ -20,10 +20,12 @@ from qtpy.QtWidgets import (
 from .context_panel import ContextPanel
 from .image_import import TiffImportWorker, inspect_tiff
 from .layer_panel import LayerPanel
+from .lif_import import LifEnumerationWorker, LifImportWorker
 from .mask_selection import MaskSelectionController
 from .napari_embedding import DISPLAY_NAME, EmbeddedNapariWidget
 from .selected_mask_panel import SelectedMaskPanel
 from .project_state import ProjectState
+from .series_browser import ImageSeriesBrowser
 from .viewer_toolbar import ViewerToolbar
 from .workflow_navigation import WorkflowNavigation
 from .ui_icons import icon
@@ -46,6 +48,7 @@ class DesktopWindow(QMainWindow):
         qt_viewer_factory=None,
         settings=None,
         restore_workspace: bool = True,
+        bioimage_factory=None,
     ):
         super().__init__(parent)
         self.setObjectName("nucytosegDesktopWindow")
@@ -58,7 +61,10 @@ class DesktopWindow(QMainWindow):
         self._import_thread = None
         self._import_worker = None
         self._pending_import_path: Path | None = None
+        self._pending_lif_series = None
+        self._load_after_worker_finished = False
         self._close_when_import_finishes = False
+        self._bioimage_factory = bioimage_factory
         self.workspace_settings = WorkspaceSettings(settings)
         self.project_state = ProjectState(self)
 
@@ -316,13 +322,6 @@ class DesktopWindow(QMainWindow):
             self.statusBar().showMessage("An image import is already running", 4000)
             return False
         source = Path(path).expanduser().resolve()
-        if source.suffix.lower() == ".lif":
-            QMessageBox.information(
-                self,
-                "Leica LIF",
-                "Leica LIF series browsing is implemented in Phase 2A.2.",
-            )
-            return False
         if confirm_replacement and self._project_has_user_data():
             response = QMessageBox.question(
                 self,
@@ -334,6 +333,21 @@ class DesktopWindow(QMainWindow):
             )
             if response != QMessageBox.StandardButton.Yes:
                 return False
+        if source.suffix.lower() == ".lif":
+            if not source.is_file():
+                self._show_import_error(f"Image file does not exist: {source}")
+                return False
+            self.project_state.set_import_status(
+                f"Reading series catalog from {source.name}…"
+            )
+            worker = LifEnumerationWorker(source, self._bioimage_factory)
+            worker.succeeded.connect(
+                lambda series, selected=source: self._show_series_browser(
+                    selected, series
+                )
+            )
+            self._start_worker(worker)
+            return True
         try:
             inspection = inspect_tiff(source)
         except Exception as error:
@@ -365,11 +379,24 @@ class DesktopWindow(QMainWindow):
         )
         panel.set_loading(True)
         self.open_image_action.setEnabled(False)
+        if self._pending_lif_series is None:
+            worker = TiffImportWorker(self._pending_import_path, options)
+        else:
+            options.pop("axes_override", None)
+            worker = LifImportWorker(
+                self._pending_import_path,
+                self._pending_lif_series.index,
+                options,
+                self._bioimage_factory,
+            )
+        worker.succeeded.connect(self._apply_imported_dataset)
+        self._start_worker(worker)
+        return True
+
+    def _start_worker(self, worker) -> None:
         thread = QThread(self)
-        worker = TiffImportWorker(self._pending_import_path, options)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.succeeded.connect(self._apply_imported_dataset)
         worker.failed.connect(self._show_import_error)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -377,8 +404,36 @@ class DesktopWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._import_thread = thread
         self._import_worker = worker
+        self.open_image_action.setEnabled(False)
+        self.context_panel.project_page.set_loading(True)
         thread.start()
-        return True
+
+    def _show_series_browser(self, source: Path, series) -> None:
+        if self._close_when_import_finishes:
+            return
+        if not series:
+            self._show_import_error("The LIF file contains no readable image series.")
+            return
+        browser = ImageSeriesBrowser(source, series, self)
+        if browser.exec() != ImageSeriesBrowser.DialogCode.Accepted:
+            self.project_state.set_import_status("LIF series selection cancelled")
+            return
+        selected = browser.selected_series
+        self._pending_import_path = source
+        self._pending_lif_series = selected
+        panel = self.context_panel.project_page
+        panel.set_lif_series(source, selected)
+        panel.set_pending(True)
+        self.set_workflow("project")
+        if selected.voxel_spacing_zyx_um is None:
+            self.project_state.set_import_status(
+                "Calibration missing — enter positive Z, Y, and X spacing in µm"
+            )
+            return
+        if self._import_thread is None:
+            self.load_pending_image()
+        else:
+            self._load_after_worker_finished = True
 
     def _import_finished(self) -> None:
         self._import_thread = None
@@ -388,6 +443,11 @@ class DesktopWindow(QMainWindow):
         if self._close_when_import_finishes:
             self._close_when_import_finishes = False
             self.close()
+            return
+        if self._load_after_worker_finished:
+            self._load_after_worker_finished = False
+            self.load_pending_image()
+            return
 
     def _apply_imported_dataset(self, dataset) -> None:
         viewer = self.embedding.viewer
@@ -433,6 +493,7 @@ class DesktopWindow(QMainWindow):
         viewer.canvas.overlays.scale_bar.visible = True
         self.project_state.set_dataset(dataset)
         self._pending_import_path = None
+        self._pending_lif_series = None
         self.statusBar().showMessage(
             f"Loaded {dataset.source_filename}: {len(dataset.channels)} channel(s)",
             5000,

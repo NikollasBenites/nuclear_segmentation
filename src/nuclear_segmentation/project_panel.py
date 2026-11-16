@@ -157,6 +157,29 @@ class ProjectPanel(QWidget):
                 field.clear()
             self.calibration_source.setText("Manual calibration required")
 
+    def set_lif_series(self, source_path, series) -> None:
+        values = self.provenance_values
+        values["filename"].setText(source_path.name)
+        values["path"].setText(str(source_path))
+        values["format"].setText("Leica LIF")
+        values["series"].setText(f"{series.index}: {series.name}")
+        values["original"].setText(f"{series.dimensions} {series.shape}")
+        values["channels"].setText(str(series.channel_count))
+        values["planes"].setText(str(series.z_planes))
+        self.time_index.setMaximum(max(series.time_points - 1, 0))
+        self._metadata_spacing_available = series.voxel_spacing_zyx_um is not None
+        self._spacing_manually_edited = False
+        if self._metadata_spacing_available:
+            for field, value in zip(
+                self.spacing_fields, series.voxel_spacing_zyx_um
+            ):
+                field.setText(f"{value:g}")
+            self.calibration_source.setText("Leica metadata")
+        else:
+            for field in self.spacing_fields:
+                field.clear()
+            self.calibration_source.setText("Manual calibration required")
+
     def _mark_spacing_edited(self, text: str) -> None:
         self._spacing_manually_edited = True
 
