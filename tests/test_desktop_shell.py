@@ -1,11 +1,13 @@
 """Headless contract tests for the independent Phase 1B desktop shell."""
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
+import pytest
 from qtpy.QtCore import QByteArray, QSettings, Qt
 from qtpy.QtWidgets import QApplication, QWidget
-import pytest
 
 from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.layer_panel import LAYER_ROLE
@@ -132,6 +134,8 @@ def test_invalid_settings_recover_to_functional_default(qapp, settings):
 def test_layer_tree_selection_visibility_rename_add_remove_and_reorder(window, qapp):
     viewer = window.embedding.viewer
     panel = window.layer_panel
+    group_names = [panel.model.item(row, 0).text() for row in range(panel.model.rowCount())]
+    assert "Annotations & Overlays" not in group_names
     image = viewer.layers[0]
     item = panel.model.item_for_layer(image)
     panel.tree.setCurrentIndex(item.index())
@@ -159,6 +163,8 @@ def test_layer_tree_selection_visibility_rename_add_remove_and_reorder(window, q
     assert panel.model.item_for_layer(added) is not None
     other = viewer.add_points([[1, 2, 3]], name="Review Points")
     qapp.processEvents()
+    group_names = [panel.model.item(row, 0).text() for row in range(panel.model.rowCount())]
+    assert "Annotations & Overlays" in group_names
     viewer.layers.selection.active = image
     other_visibility = panel.model.visibility_item_for_layer(other)
     panel.tree.clicked.emit(other_visibility.index())
@@ -171,6 +177,8 @@ def test_layer_tree_selection_visibility_rename_add_remove_and_reorder(window, q
     viewer.layers.remove(other)
     qapp.processEvents()
     assert panel.model.item_for_layer(added) is None
+    group_names = [panel.model.item(row, 0).text() for row in range(panel.model.rowCount())]
+    assert "Annotations & Overlays" not in group_names
 
 
 def test_vector_icons_render_at_multiple_pixel_sizes(qapp):
@@ -208,6 +216,103 @@ def test_viewer_toolbar_validates_active_layer_and_commands(window):
     assert tuple(labels.scale) == physical_scale
 
 
+def test_review_tool_selects_clears_and_highlights_masks_without_data_changes(
+    window,
+):
+    viewer = window.embedding.viewer
+    labels = window.embedding.demo_labels()
+    viewer.layers.selection.active = labels
+    original_data = labels.data.copy()
+    original_selected = labels.selected_label
+    original_contour = labels.contour
+    original_show_selected = labels.show_selected_label
+
+    assert window.viewer_toolbar.activate_tool("review")
+    assert str(labels.mode) == "pan_zoom"
+    assert window.mask_selection._on_mouse_press in labels.mouse_drag_callbacks
+
+    first_position = tuple(np.argwhere(labels.data == 1)[0])
+    second_position = tuple(np.argwhere(labels.data == 2)[0])
+    background_position = tuple(np.argwhere(labels.data == 0)[0])
+    viewer.dims.set_current_step(0, first_position[0])
+    assert window.mask_selection.select_at_data_position(labels, first_position) == 1
+    assert window.mask_selection.selected_mask_id == 1
+    assert labels.selected_label == 1
+    assert labels.show_selected_label
+    assert labels.contour >= 2
+    assert window.context_panel.mask_id_label.text() == "Mask ID: 1"
+
+    viewer.dims.set_current_step(0, min(first_position[0] + 1, labels.data.shape[0] - 1))
+    assert window.mask_selection.selected_mask_id == 1
+    viewer.dims.set_current_step(0, second_position[0])
+    assert window.mask_selection.select_at_data_position(labels, second_position) == 2
+    assert window.context_panel.mask_id_label.text() == "Mask ID: 2"
+
+    viewer.dims.set_current_step(0, background_position[0])
+    assert window.mask_selection.select_at_data_position(labels, background_position) is None
+    assert window.mask_selection.selected_mask_id is None
+    assert window.context_panel.mask_id_label.text() == "Mask ID: —"
+    assert labels.selected_label == original_selected
+    assert labels.contour == original_contour
+    assert labels.show_selected_label == original_show_selected
+    np.testing.assert_array_equal(labels.data, original_data)
+
+
+def test_review_mouse_callback_uses_active_labels_layer(window, monkeypatch):
+    viewer = window.embedding.viewer
+    labels = window.embedding.demo_labels()
+    viewer.layers.selection.active = labels
+    assert window.viewer_toolbar.activate_tool("review")
+    monkeypatch.setattr(type(labels), "get_value", lambda self, *args, **kwargs: 2)
+    event = SimpleNamespace(
+        position=(0.0, 0.0, 0.0),
+        view_direction=(1.0, 0.0, 0.0),
+        dims_displayed=(1, 2),
+    )
+    window.mask_selection._on_mouse_press(labels, event)
+    assert window.mask_selection.selected_mask_id == 2
+    assert window.context_panel.mask_id_label.text() == "Mask ID: 2"
+
+
+def test_review_selection_switches_labels_layers_and_isolates_editing(window):
+    viewer = window.embedding.viewer
+    first = window.embedding.demo_labels()
+    second_data = np.zeros_like(first.data)
+    second_data[2:5, 8:14, 9:15] = 9
+    second = viewer.add_labels(second_data, name="Cytoplasmic Masks")
+    viewer.layers.selection.active = first
+    assert window.viewer_toolbar.activate_tool("review")
+    first_position = tuple(np.argwhere(first.data == 3)[0])
+    viewer.dims.set_current_step(0, first_position[0])
+    assert window.mask_selection.select_at_data_position(first, first_position) == 3
+
+    viewer.layers.selection.active = second
+    assert window.mask_selection.selected_mask_id is None
+    second_position = tuple(np.argwhere(second.data == 9)[0])
+    viewer.dims.set_current_step(0, second_position[0])
+    assert window.mask_selection.select_at_data_position(second, second_position) == 9
+    assert window.context_panel.mask_id_label.text() == "Mask ID: 9"
+
+    viewer.layers.selection.active = first
+    assert window.mask_selection.selected_mask_id == 3
+    assert first.show_selected_label
+    assert window.viewer_toolbar.activate_tool("paint")
+    assert str(first.mode) == "paint"
+    assert window.mask_selection._on_mouse_press not in first.mouse_drag_callbacks
+    assert not first.show_selected_label
+    assert window.mask_selection.select_at_data_position(first, first_position) is None
+    assert window.mask_selection.selected_mask_id == 3
+    assert window.viewer_toolbar.activate_tool("erase")
+    assert str(first.mode) == "erase"
+
+    assert window.viewer_toolbar.activate_tool("review")
+    viewer.dims.ndisplay = 3
+    assert window.mask_selection.select_at_data_position(first, first_position) is None
+    assert window.mask_selection.selected_mask_id == 3
+    viewer.dims.ndisplay = 2
+    viewer.layers.remove(second)
+
+
 def test_active_layer_external_change_selects_tree_row(window):
     layer = window.embedding.viewer.layers[1]
     window.embedding.viewer.layers.selection.active = layer
@@ -227,7 +332,13 @@ def test_cleanup_and_repeated_window_construction(qapp, tmp_path):
             restore_workspace=False,
         )
         qt_viewer = value.embedding.qt_viewer
+        labels = value.embedding.demo_labels()
+        value.embedding.viewer.layers.selection.active = labels
+        assert value.viewer_toolbar.activate_tool("review")
+        callback = value.mask_selection._on_mouse_press
+        assert callback in labels.mouse_drag_callbacks
         value.close()
+        assert callback not in labels.mouse_drag_callbacks
         assert qt_viewer.close_count == 1
         assert len(value.embedding.viewer.layers) == 0
         value.close()

@@ -41,7 +41,7 @@ class LayerTreeModel(QStandardItemModel):
             return "Image Layers"
         if layer_type == "labels" or role in {"nuclear", "cytoplasmic"}:
             return "Segmentation Layers"
-        return "Review Layers"
+        return "Annotations & Overlays"
 
     def _disconnect_layer_callbacks(self) -> None:
         for layer, callbacks in self._callbacks.items():
@@ -62,9 +62,13 @@ class LayerTreeModel(QStandardItemModel):
         group_icons = {
             "Image Layers": "image",
             "Segmentation Layers": "labels",
-            "Review Layers": "review",
+            "Annotations & Overlays": "review",
         }
-        for title in ("Image Layers", "Segmentation Layers", "Review Layers"):
+        for title in (
+            "Image Layers",
+            "Segmentation Layers",
+            "Annotations & Overlays",
+        ):
             group = QStandardItem(title)
             group.setEditable(False)
             group.setSelectable(False)
@@ -108,6 +112,9 @@ class LayerTreeModel(QStandardItemModel):
             layer.events.name.connect(name_callback)
             layer.events.visible.connect(visible_callback)
             self._callbacks[layer] = (name_callback, visible_callback)
+        for group in tuple(groups.values()):
+            if group.rowCount() == 0:
+                self.removeRow(group.row())
         self._syncing = False
 
     def item_for_layer(self, layer) -> QStandardItem | None:

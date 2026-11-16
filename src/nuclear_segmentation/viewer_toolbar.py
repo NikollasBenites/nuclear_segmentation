@@ -11,6 +11,7 @@ class ViewerToolbar(QWidget):
     """Compact toolbar operating directly on the selected public layer API."""
 
     status_changed = Signal(str)
+    tool_changed = Signal(str)
 
     def __init__(self, viewer, parent: QWidget | None = None):
         super().__init__(parent)
@@ -67,7 +68,7 @@ class ViewerToolbar(QWidget):
 
     def _active_layer_changed(self, event=None) -> None:
         editable = self._is_labels(self.active_layer())
-        for key in ("paint", "erase", "pick"):
+        for key in ("review", "paint", "erase", "pick"):
             self.buttons[key].setEnabled(editable)
         layer = self.active_layer()
         self.status_changed.emit(
@@ -89,7 +90,7 @@ class ViewerToolbar(QWidget):
     def activate_tool(self, mode: str) -> bool:
         layer = self.active_layer()
         requested = "pan_zoom" if mode == "review" else mode
-        if mode in {"paint", "erase", "pick"} and not self._is_labels(layer):
+        if mode in {"review", "paint", "erase", "pick"} and not self._is_labels(layer):
             self.status_changed.emit(f"{mode.title()} requires an active Labels layer")
             return False
         if layer is None:
@@ -101,6 +102,7 @@ class ViewerToolbar(QWidget):
             self.status_changed.emit(f"Viewer tool unavailable: {exc}")
             return False
         self.buttons[mode].setChecked(True)
+        self.tool_changed.emit(mode)
         self.status_changed.emit(f"{mode.replace('_', ' ').title()} tool active")
         return True
 

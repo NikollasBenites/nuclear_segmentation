@@ -15,6 +15,7 @@ from qtpy.QtWidgets import (
 
 from .context_panel import ContextPanel
 from .layer_panel import LayerPanel
+from .mask_selection import MaskSelectionController
 from .napari_embedding import DISPLAY_NAME, EmbeddedNapariWidget
 from .viewer_toolbar import ViewerToolbar
 from .workflow_navigation import WorkflowNavigation
@@ -64,6 +65,7 @@ class DesktopWindow(QMainWindow):
         viewer_layout.addWidget(self.embedding, 1)
         self.context_panel = ContextPanel()
         self.context_container = self._build_context_container()
+        self.mask_selection = MaskSelectionController(self.embedding.viewer, self)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("workspaceSplitter")
@@ -78,6 +80,11 @@ class DesktopWindow(QMainWindow):
         self.navigation.workflow_changed.connect(self.set_workflow)
         self.embedding.status_changed.connect(self.statusBar().showMessage)
         self.viewer_toolbar.status_changed.connect(self.statusBar().showMessage)
+        self.viewer_toolbar.tool_changed.connect(self.mask_selection.set_tool)
+        self.mask_selection.status_changed.connect(self.statusBar().showMessage)
+        self.mask_selection.selection_changed.connect(
+            self.context_panel.set_selected_mask
+        )
         self.layer_panel.active_layer_changed.connect(self._update_active_layer_status)
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
@@ -382,6 +389,10 @@ class DesktopWindow(QMainWindow):
             #contextContainer { background: #121d29; border-left: 1px solid #263748; }
             #contextPanelHeader { border-bottom: 1px solid #263748; }
             #contextHeading { font-size: 17px; font-weight: 650; color: #f1f6fa; }
+            #maskSelectionCard { background: #162735; border-radius: 7px; }
+            #selectionCardTitle { color: #75dcd4; font-size: 10px; font-weight: 700; letter-spacing: 1px; }
+            #selectedMaskId { color: #f2f8fb; font-size: 16px; font-weight: 700; }
+            #selectedMaskLayer { color: #94a9bb; font-size: 11px; }
             #layerTree { background: #0f1923; border: 0; alternate-background-color: #151e29; }
             #layerTree QHeaderView::section { background: #162432; color: #94a9bb; border: 0; padding: 7px; font-weight: 600; }
             #layerTree::item { min-height: 34px; padding: 2px; }
@@ -399,6 +410,7 @@ class DesktopWindow(QMainWindow):
             self._closed = True
             self.save_layout()
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
+            self.mask_selection.dispose()
             self.layer_panel.dispose()
             self.viewer_toolbar.dispose()
             self.embedding.shutdown()

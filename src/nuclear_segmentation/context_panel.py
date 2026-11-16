@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from qtpy.QtCore import Signal
-from qtpy.QtWidgets import QLabel, QStackedWidget, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QFrame, QLabel, QStackedWidget, QVBoxLayout, QWidget
 
 from .workflow_navigation import WORKFLOWS
 
@@ -32,6 +32,22 @@ class ContextPanel(QWidget):
         self.heading = QLabel()
         self.heading.setObjectName("contextHeading")
         layout.addWidget(self.heading)
+        self.mask_selection_card = QFrame()
+        self.mask_selection_card.setObjectName("maskSelectionCard")
+        selection_layout = QVBoxLayout(self.mask_selection_card)
+        selection_layout.setContentsMargins(12, 9, 12, 9)
+        selection_layout.setSpacing(2)
+        selection_title = QLabel("SELECTED MASK")
+        selection_title.setObjectName("selectionCardTitle")
+        self.mask_id_label = QLabel("Mask ID: —")
+        self.mask_id_label.setObjectName("selectedMaskId")
+        self.mask_layer_label = QLabel("No Labels layer active")
+        self.mask_layer_label.setObjectName("selectedMaskLayer")
+        self.mask_layer_label.setWordWrap(True)
+        selection_layout.addWidget(selection_title)
+        selection_layout.addWidget(self.mask_id_label)
+        selection_layout.addWidget(self.mask_layer_label)
+        layout.addWidget(self.mask_selection_card)
         self.stack = QStackedWidget()
         self._indexes: dict[str, int] = {}
         for workflow in WORKFLOWS:
@@ -58,3 +74,15 @@ class ContextPanel(QWidget):
         label = next(item.label for item in WORKFLOWS if item.key == key)
         self.heading.setText(label)
         self.stack.setCurrentIndex(self._indexes[key])
+
+    def set_selected_mask(self, layer, mask_id: int | None) -> None:
+        """Present application mask selection without performing analysis."""
+        if layer is None:
+            self.mask_id_label.setText("Mask ID: —")
+            self.mask_layer_label.setText("No Labels layer active")
+        elif mask_id is None:
+            self.mask_id_label.setText("Mask ID: —")
+            self.mask_layer_label.setText(f"{layer.name} · no mask selected")
+        else:
+            self.mask_id_label.setText(f"Mask ID: {int(mask_id)}")
+            self.mask_layer_label.setText(layer.name)
