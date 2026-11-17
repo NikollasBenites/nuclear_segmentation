@@ -22,6 +22,7 @@ from .context_panel import ContextPanel
 from .crop_workspace import CropWorkspaceController
 from .image_import import TiffImportWorker, inspect_tiff
 from .image_display_panel import ImageDisplayPanel
+from .image_preparation_workspace import ImagePreparationController
 from .import_loading import ImportLoadingDialog
 from .layer_panel import LayerPanel
 from .lif_import import LifEnumerationWorker, LifImportWorker
@@ -118,6 +119,13 @@ class DesktopWindow(QMainWindow):
             self,
         )
         self.z_correction.status_changed.connect(self.statusBar().showMessage)
+        self.image_preparation = ImagePreparationController(
+            self.embedding.viewer,
+            self.project_state,
+            self.context_panel.preprocessing_page.image_preparation_panel,
+            self,
+        )
+        self.image_preparation.status_changed.connect(self.statusBar().showMessage)
         self.z_correction.correction_applied.connect(self.normalization.invalidate)
         self.project_state.channels_changed.connect(
             lambda channels: self.normalization.invalidate()
@@ -131,6 +139,10 @@ class DesktopWindow(QMainWindow):
         self.crop_workspace.working_dataset_changed.connect(
             lambda dataset: self.z_correction.invalidate_all()
         )
+        self.crop_workspace.working_dataset_changed.connect(
+            lambda dataset: self.image_preparation.invalidate()
+        )
+        self.project_state.z_correction_changed.connect(self.image_preparation.invalidate)
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("workspaceSplitter")
@@ -148,6 +160,12 @@ class DesktopWindow(QMainWindow):
         self.viewer_toolbar.tool_changed.connect(self.mask_selection.set_tool)
         self.viewer_toolbar.display_about_to_change.connect(
             self.mask_selection.prepare_display_change
+        )
+        self.viewer_toolbar.display_about_to_change.connect(
+            self.crop_workspace.prepare_display_change
+        )
+        self.viewer_toolbar.display_about_to_change.connect(
+            self.normalization.prepare_display_change
         )
         self.mask_selection.status_changed.connect(self.statusBar().showMessage)
         self.mask_selection.selection_changed.connect(
@@ -429,7 +447,12 @@ class DesktopWindow(QMainWindow):
                 6000,
             )
             return False
-        if self.crop_workspace.busy or self.normalization.busy or self.z_correction.busy:
+        if (
+            self.crop_workspace.busy
+            or self.normalization.busy
+            or self.z_correction.busy
+            or self.image_preparation.busy
+        ):
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before "
                 "closing the project.",
@@ -444,6 +467,7 @@ class DesktopWindow(QMainWindow):
         self.selected_mask_panel.set_selection(None, None)
         self.normalization.clear_project()
         self.z_correction.clear_project()
+        self.image_preparation.clear_project()
         self.crop_workspace.clear_workspace_for_new_project()
         self._disconnect_channel_layers()
         self.embedding.viewer.layers.clear()
@@ -665,6 +689,7 @@ class DesktopWindow(QMainWindow):
             return
         self.normalization.clear_project()
         self.z_correction.clear_project()
+        self.image_preparation.clear_project()
         for layer in old_layers:
             if layer in viewer.layers:
                 viewer.layers.remove(layer)
@@ -1006,7 +1031,12 @@ class DesktopWindow(QMainWindow):
             )
             event.ignore()
             return
-        if self.normalization.busy or self.crop_workspace.busy or self.z_correction.busy:
+        if (
+            self.normalization.busy
+            or self.crop_workspace.busy
+            or self.z_correction.busy
+            or self.image_preparation.busy
+        ):
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before exiting."
             )
@@ -1020,6 +1050,7 @@ class DesktopWindow(QMainWindow):
             self.mask_selection.dispose()
             self.normalization.dispose()
             self.z_correction.dispose()
+            self.image_preparation.dispose()
             self.crop_workspace.dispose()
             self._disconnect_channel_layers()
             self.context_panel.project_page.channel_panel.dispose()

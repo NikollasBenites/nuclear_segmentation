@@ -40,14 +40,65 @@ display property programmatically updates the panel. Removing the active layer
 disconnects its callbacks. These operations never write to the layer data array,
 change scientific configurations, or invalidate preprocessing previews.
 
+## Stage 2B.4.2 — multichannel image preparation
+
+The Preprocessing workflow now includes **Multichannel Image Preparation**.
+Users can select one, several, or all channels and assign a stable-index route:
+
+- original working image;
+- Z-corrected image, when a current correction report exists;
+- globally normalized image;
+- Z-corrected and globally normalized image, when correction is available.
+
+Every calculation starts from the unmodified working channel. Z correction
+reuses the validated `correct_z()` implementation and current per-channel
+options; it never consumes or recursively corrects a preview. Global
+normalization then applies one pair of percentile limits to the complete ZYX
+channel. It never normalizes individual planes. The explicit mapping is
+`(input - lower_limit) / (upper_limit - lower_limit)`, with deliberate optional
+clipping to `[0, 1]`. Constant and all-zero inputs produce a finite all-zero
+float32 result.
+
+The default sampling scope uses the valid working XY region through every Z
+plane. Polygon exterior fill is excluded while genuine zero-valued voxels in
+the polygon remain samples. An explicitly labelled bounding-box scope is also
+available and warns that it includes exterior fill. The independent Cellpose
+normalization ROI is not selected implicitly.
+
+Prepared layers retain channel order, anisotropic calibration, crop translation,
+colormap, and additive blending. Original-route data share the existing working
+array without a full copy. Z-corrected or normalized routes allocate only their
+selected channel output. Clearing or invalidating preparation removes those
+layers and releases controller references without altering applied Z correction,
+Cellpose normalization, crop, ROI, or source data.
+
+Per-channel provenance records source/series identity, original and working
+shapes, channel index/name, crop offset and ROI digest, calibration, processing
+order, correction report, global limits, mapping, clipping, input/output ranges,
+and the fact that display settings were not applied. Channel renaming updates
+preview names and provenance by stable index.
+
+### Intermittent Shapes dimensionality investigation
+
+Both crop selection and normalization ROI are intentionally 2D Shapes layers.
+Previously, the normalization controller could construct its 2D Shapes layer
+while the viewer was still in 3D display, and either Shapes layer could remain
+active in an editing mode during a later transition to 3D. This creates a
+plausible transient mismatch between `(Y, X)` vertices and a three-axis displayed
+transform, consistent with the reported broadcast from `(2,2)` into `(2,3)`.
+
+The application now switches to 2D before constructing any XY Shapes layer,
+ends Shapes editing and selects a compatible 3D Image before a 3D transition,
+and validates that crop/ROI vertices are strictly `N×2`. No napari internals,
+stored vertices, ROI rasterization, or crop mathematics were changed.
+
 ## Pending stages
 
-- Stage 2B.4.2: multichannel image preparation and processing provenance.
 - Stage 2B.4.3: calibrated OME/ImageJ TIFF export adapter and JSON provenance.
 - Stage 2B.4.4: final regression, memory review, and complete native checklist.
 
 No Cellpose inference, LIF reader change, segmentation-result schema change, or
-SyGlass compatibility claim is part of Stage 2B.4.1.
+SyGlass compatibility claim is part of Stages 2B.4.1–2B.4.2.
 
 ## Automated validation
 
@@ -73,5 +124,22 @@ removal cleanup.
 9. Toggle layers and Z planes and confirm no scientific preview disappears.
 10. Confirm the source TIFF and processing results remain unchanged.
 
-Native macOS and SyGlass validation have not been performed by the automated
-headless environment.
+Stage 2B.4.1 was validated by the user on native macOS. Stage 2B.4.2 and SyGlass
+validation have not been performed by the automated headless environment.
+
+## Native macOS check for Stage 2B.4.2
+
+1. With a polygon or rectangle crop workflow active, alternate between 2D and
+   3D before and after drawing; confirm there is no Shapes dimensionality error.
+2. Repeat with the independent normalization ROI.
+3. Calculate Z correction for multiple channels.
+4. Select all channels in Multichannel Image Preparation.
+5. Assign a mixture of Original, Normalized, Z-corrected, and Z-corrected +
+   normalized routes.
+6. Generate previews and inspect every channel through Z in 2D and 3D.
+7. Verify normalized previews use one consistent mapping across Z.
+8. Change display contrast/gamma/opacity and confirm prepared pixels and reported
+   ranges do not change.
+9. Rename a channel and confirm its prepared preview remains associated with the
+   same index.
+10. Clear prepared previews and confirm Z-correction and source layers remain.

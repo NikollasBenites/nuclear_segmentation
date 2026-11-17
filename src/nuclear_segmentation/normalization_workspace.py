@@ -326,6 +326,9 @@ class NormalizationController(QObject):
         )
         spacing = tuple(self.project_state.voxel_spacing_zyx_um)
         offset_y, offset_x = self.project_state.working_offset_yx
+        # Establish a 2D displayed transform before constructing a 2D Shapes
+        # layer. This avoids transient 2D-vertex/3D-transform mismatches.
+        self.viewer.dims.ndisplay = 2
         self.roi_projection_layer = self.viewer.add_image(
             projection,
             name=f"Normalization ROI projection · {channel.name}",
@@ -356,7 +359,6 @@ class NormalizationController(QObject):
         self.roi_shapes_layer.events.data.connect(self._roi_shapes_changed)
         self._roi_event_connected = True
         self.roi_shapes_layer.mode = "add_polygon"
-        self.viewer.dims.ndisplay = 2
         self.viewer.layers.selection.active = self.roi_shapes_layer
         self.panel.normalization_roi_visibility_button.setChecked(True)
         self.panel.set_normalization_roi_status(
@@ -388,6 +390,11 @@ class NormalizationController(QObject):
             )
             return
         vertices = np.asarray(layer.data[0], dtype=float)
+        if vertices.ndim != 2 or vertices.shape[1] != 2:
+            self.panel.set_normalization_roi_status(
+                "Normalization ROI vertices must contain exactly Y and X coordinates."
+            )
+            return
         dataset = self.project_state.working_dataset
         if dataset is None:
             return
@@ -457,6 +464,23 @@ class NormalizationController(QObject):
             "ROI edit mode active. Changes invalidate dependent normalization results."
         )
         return True
+
+    def prepare_display_change(self, dimensions: int) -> None:
+        """Stop 2D ROI editing before switching the embedded viewer to 3D."""
+        if int(dimensions) != 3:
+            return
+        layer = self.roi_shapes_layer
+        if layer is not None and layer in self.viewer.layers:
+            layer.mode = "pan_zoom"
+            if self.viewer.layers.selection.active is layer:
+                replacement = next(
+                    (
+                        item for item in self.viewer.layers
+                        if type(item).__name__.lower() == "image" and item.ndim >= 3
+                    ),
+                    None,
+                )
+                self.viewer.layers.selection.active = replacement
 
     def reuse_crop_roi(self) -> bool:
         provenance = self.project_state.crop_provenance

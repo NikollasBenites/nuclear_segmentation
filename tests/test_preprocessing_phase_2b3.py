@@ -82,6 +82,12 @@ def test_independent_normalization_roi_draw_edit_clear_and_crop_intersection(
     _wait(qapp, lambda: not normalization.busy)
     assert normalization.roi_projection_layer is not None
     shapes = normalization.roi_shapes_layer
+    assert shapes.ndim == 2
+    assert window.viewer_toolbar.set_ndisplay(3)
+    assert str(shapes.mode) == "pan_zoom"
+    assert window.embedding.viewer.layers.selection.active is not shapes
+    assert window.viewer_toolbar.set_ndisplay(2)
+    assert normalization.edit_roi()
     shapes.add(np.array([[-1, 1], [1, 8], [7, 1]], dtype=float), shape_type="polygon")
     qapp.processEvents()
     assert window.project_state.normalization_roi_mask_yx is None

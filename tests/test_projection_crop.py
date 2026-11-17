@@ -232,6 +232,12 @@ def test_desktop_projection_preview_apply_reset_and_review_isolation(qapp, tmp_p
 
     assert window.crop_workspace.start_drawing("rectangle")
     selection = window.crop_workspace.selection_layer
+    assert selection.ndim == 2
+    assert window.viewer_toolbar.set_ndisplay(3)
+    assert str(selection.mode) == "pan_zoom"
+    assert window.embedding.viewer.layers.selection.active is not selection
+    assert window.viewer_toolbar.set_ndisplay(2)
+    assert window.crop_workspace.start_drawing("rectangle")
     selection.add(
         np.array([[2, 3], [2, 10], [9, 10], [9, 3]], dtype=float),
         shape_type="rectangle",

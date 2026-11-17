@@ -47,6 +47,7 @@ class LayerTreeModel(QStandardItemModel):
                 "nucytoseg_normalization_roi_projection",
                 "nucytoseg_normalization_roi",
                 "nucytoseg_z_correction_preview",
+                "nucytoseg_preparation_preview",
             )
         ):
             return "Annotations & Overlays"

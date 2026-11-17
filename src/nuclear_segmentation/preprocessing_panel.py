@@ -16,6 +16,7 @@ from qtpy.QtWidgets import (
 
 from .collapsible_section import CollapsibleSection
 from .results_panel import ScientificResultsSection
+from .image_preparation_panel import ImagePreparationPanel
 from .z_correction_panel import ZCorrectionPanel
 
 
@@ -135,6 +136,8 @@ class PreprocessingPanel(QWidget):
 
         self.z_correction_panel = ZCorrectionPanel(project_state)
         layout.addWidget(self.z_correction_panel)
+        self.image_preparation_panel = ImagePreparationPanel(project_state)
+        layout.addWidget(self.image_preparation_panel)
 
         self.normalization_calculate_button.clicked.connect(
             self._request_normalization_calculation
@@ -330,3 +333,4 @@ class PreprocessingPanel(QWidget):
     def dispose(self) -> None:
         self.project_state.channels_changed.disconnect(self.set_channels)
         self.z_correction_panel.dispose()
+        self.image_preparation_panel.dispose()

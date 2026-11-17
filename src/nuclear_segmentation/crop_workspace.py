@@ -186,6 +186,10 @@ class CropWorkspaceController(QObject):
     def _ensure_selection_layer(self):
         if self.projection_layer is None or self.projection_layer not in self.viewer.layers:
             raise ValueError("Generate an XY projection before drawing a crop.")
+        # A 2D Shapes layer must be created only after the viewer has left 3D
+        # display. Creating/editing it during the transition can make napari
+        # combine two-coordinate vertices with a three-axis displayed transform.
+        self.viewer.dims.ndisplay = 2
         if self.selection_layer is None or self.selection_layer not in self.viewer.layers:
             self.selection_layer = self.viewer.add_shapes(
                 name="MNTB XY crop selection",
@@ -237,6 +241,8 @@ class CropWorkspaceController(QObject):
         ):
             raise ValueError("Draw a rectangle or polygon before previewing the crop.")
         vertices = np.asarray(self.selection_layer.data[-1], dtype=float)
+        if vertices.ndim != 2 or vertices.shape[1] != 2:
+            raise ValueError("XY crop vertices must contain exactly Y and X coordinates.")
         dataset = self.project_state.working_dataset
         raw_type = self.selection_layer.shape_type[-1]
         selection_type = str(getattr(raw_type, "value", raw_type)).lower()
@@ -364,6 +370,23 @@ class CropWorkspaceController(QObject):
     def _status(self, message: str) -> None:
         self.panel.set_status(message)
         self.status_changed.emit(str(message))
+
+    def prepare_display_change(self, dimensions: int) -> None:
+        """End 2D Shapes interaction before napari changes displayed dimensions."""
+        if int(dimensions) != 3:
+            return
+        layer = self.selection_layer
+        if layer is not None and layer in self.viewer.layers:
+            layer.mode = "pan_zoom"
+            if self.viewer.layers.selection.active is layer:
+                replacement = next(
+                    (
+                        item for item in self.viewer.layers
+                        if type(item).__name__.lower() == "image" and item.ndim >= 3
+                    ),
+                    None,
+                )
+                self.viewer.layers.selection.active = replacement
 
     def clear_workspace_for_new_project(self) -> None:
         self.cancel_preview()
