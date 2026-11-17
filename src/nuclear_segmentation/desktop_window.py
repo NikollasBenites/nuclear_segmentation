@@ -26,6 +26,7 @@ from .layer_panel import LayerPanel
 from .lif_import import LifEnumerationWorker, LifImportWorker
 from .mask_selection import MaskSelectionController
 from .napari_embedding import DISPLAY_NAME, EmbeddedNapariWidget
+from .normalization_workspace import NormalizationController
 from .selected_mask_panel import SelectedMaskPanel
 from .project_state import ProjectState
 from .series_browser import ImageSeriesBrowser
@@ -101,6 +102,22 @@ class DesktopWindow(QMainWindow):
             self._display_working_dataset
         )
         self.crop_workspace.status_changed.connect(self.statusBar().showMessage)
+        self.normalization = NormalizationController(
+            self.embedding.viewer,
+            self.project_state,
+            self.context_panel.preprocessing_page,
+            self,
+        )
+        self.normalization.status_changed.connect(self.statusBar().showMessage)
+        self.project_state.channels_changed.connect(
+            lambda channels: self.normalization.invalidate()
+        )
+        self.project_state.calibration_changed.connect(
+            lambda spacing, source: self.normalization.invalidate()
+        )
+        self.crop_workspace.working_dataset_changed.connect(
+            lambda dataset: self.normalization.invalidate()
+        )
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.setObjectName("workspaceSplitter")
@@ -137,8 +154,12 @@ class DesktopWindow(QMainWindow):
         self.context_panel.project_page.calibration_requested.connect(
             self._apply_manual_calibration
         )
+        self.context_panel.project_page.close_requested.connect(self.close_project)
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
+        self.context_panel.project_page.availability_changed.connect(
+            self.close_project_action.setEnabled
+        )
         root = QWidget()
         root.setObjectName("desktopRoot")
         root_layout = QVBoxLayout(root)
@@ -252,6 +273,16 @@ class DesktopWindow(QMainWindow):
         self.open_image_action.setIcon(icon("open", accent=True))
         self.open_image_action.triggered.connect(self.open_image_dialog)
 
+        self.close_project_action = QAction("Close Project", self)
+        self.close_project_action.setIcon(icon("close"))
+        self.close_project_action.setToolTip(
+            "Close the current project and return to an empty workspace."
+        )
+        self.close_project_action.setEnabled(False)
+        self.close_project_action.triggered.connect(
+            lambda checked=False: self.close_project()
+        )
+
         self.quit_action = QAction("Quit NuCytoSeg", self)
         self.quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         self.quit_action.triggered.connect(self.close)
@@ -292,6 +323,7 @@ class DesktopWindow(QMainWindow):
     def _create_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(self.open_image_action)
+        file_menu.addAction(self.close_project_action)
         file_menu.addSeparator()
         file_menu.addAction(self.quit_action)
         view_menu = self.menuBar().addMenu("View")
@@ -355,6 +387,59 @@ class DesktopWindow(QMainWindow):
             not (getattr(layer, "metadata", {}) or {}).get("nucytoseg_demo", False)
             for layer in self.embedding.viewer.layers
         )
+
+    def _confirm_close_project(self) -> bool:
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Close Project?")
+        dialog.setText(
+            "Closing this project will discard unsaved changes, including mask "
+            "edits and unsaved analysis results.\n\n"
+            "The original source image will not be modified."
+        )
+        close_button = dialog.addButton(
+            "Close without Saving", QMessageBox.ButtonRole.DestructiveRole
+        )
+        dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(dialog.buttons()[-1])
+        dialog.exec()
+        return dialog.clickedButton() is close_button
+
+    def close_project(self, *, confirm: bool = True) -> bool:
+        if self._import_thread is not None:
+            self.statusBar().showMessage(
+                "Wait for the active image import to finish before closing the project.",
+                6000,
+            )
+            return False
+        if self.crop_workspace.busy or self.normalization.busy:
+            self.statusBar().showMessage(
+                "Wait for the active preprocessing calculation to finish before "
+                "closing the project.",
+                6000,
+            )
+            return False
+        if not self._project_has_user_data() and self._pending_import_path is None:
+            return False
+        if confirm and not self._confirm_close_project():
+            return False
+        self.mask_selection.clear_selection()
+        self.selected_mask_panel.set_selection(None, None)
+        self.normalization.clear_project()
+        self.crop_workspace.clear_workspace_for_new_project()
+        self._disconnect_channel_layers()
+        self.embedding.viewer.layers.clear()
+        self._pending_import_path = None
+        self._pending_lif_series = None
+        self._load_after_worker_finished = False
+        self._finish_loading_dialog()
+        self.project_state.clear_project()
+        self.context_panel.project_page.clear_project()
+        self.close_project_action.setEnabled(False)
+        self.set_workflow("project")
+        self.layer_status.setText("Layer: none")
+        self.statusBar().showMessage("Project closed — ready to open another image", 5000)
+        return True
 
     def prepare_image_import(self, path, *, confirm_replacement: bool = True) -> bool:
         if self._import_thread is not None:
@@ -901,12 +986,19 @@ class DesktopWindow(QMainWindow):
             )
             event.ignore()
             return
+        if self.normalization.busy or self.crop_workspace.busy:
+            self.statusBar().showMessage(
+                "Wait for the active preprocessing calculation to finish before exiting."
+            )
+            event.ignore()
+            return
         if not self._closed:
             self._closed = True
             self._finish_loading_dialog()
             self.save_layout()
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
             self.mask_selection.dispose()
+            self.normalization.dispose()
             self.crop_workspace.dispose()
             self._disconnect_channel_layers()
             self.context_panel.project_page.channel_panel.dispose()

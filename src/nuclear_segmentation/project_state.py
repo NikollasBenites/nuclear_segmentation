@@ -65,6 +65,7 @@ class ProjectState(QObject):
     import_status_changed = Signal(str)
     channels_changed = Signal(object)
     calibration_changed = Signal(object, str)
+    normalization_changed = Signal(object, bool)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -80,6 +81,9 @@ class ProjectState(QObject):
         self.calibration_source = None
         self.channels: list[ChannelDescriptor] = []
         self.segmentation_channel_index: int | None = None
+        self.normalization_configuration: dict[str, Any] | None = None
+        self.normalization_preview: dict[str, Any] | None = None
+        self.normalization_is_current = False
 
     @property
     def dataset_ready(self) -> bool:
@@ -107,6 +111,7 @@ class ProjectState(QObject):
             ),
             self.channels[0].index if self.channels else None,
         )
+        self.reset_normalization(emit=False)
         self.set_import_status("Dataset ready")
         self.changed.emit(dataset)
         self.channels_changed.emit(tuple(self.channels))
@@ -183,6 +188,7 @@ class ProjectState(QObject):
         self.working_offset_yx = (y0, x0)
         self.crop_provenance = provenance
         self.roi_mask_yx = np.array(roi_mask, copy=True)
+        self.invalidate_normalization()
         return self.working_dataset
 
     def reset_crop(self) -> ImportedDataset:
@@ -193,7 +199,54 @@ class ProjectState(QObject):
         self.crop_provenance = None
         self.roi_mask_yx = None
         self.working_offset_yx = (0, 0)
+        self.invalidate_normalization()
         return self.original_dataset
+
+    def set_normalization_preview(self, report: dict[str, Any]) -> None:
+        self.normalization_preview = dict(report)
+        self.normalization_is_current = False
+        self.normalization_changed.emit(self.normalization_preview, False)
+
+    def apply_normalization(self, configuration: dict[str, Any]) -> None:
+        self.normalization_configuration = dict(configuration)
+        self.normalization_is_current = True
+        self.normalization_changed.emit(self.normalization_configuration, True)
+
+    def invalidate_normalization(self) -> None:
+        if self.normalization_preview is None and self.normalization_configuration is None:
+            return
+        self.normalization_preview = None
+        self.normalization_is_current = False
+        self.normalization_changed.emit(self.normalization_configuration, False)
+
+    def reset_normalization(self, *, emit: bool = True) -> None:
+        self.normalization_configuration = {
+            "mode": "cellpose_default",
+            "cellpose_normalize": True,
+        }
+        self.normalization_preview = None
+        self.normalization_is_current = False
+        if emit:
+            self.normalization_changed.emit(self.normalization_configuration, False)
+
+    def clear_project(self) -> None:
+        self.dataset = None
+        self.original_dataset = None
+        self.working_dataset = None
+        self.crop_provenance = None
+        self.roi_mask_yx = None
+        self.working_offset_yx = (0, 0)
+        self.voxel_spacing_zyx_um = None
+        self.calibration_source = None
+        self.channels = []
+        self.segmentation_channel_index = None
+        self.normalization_configuration = None
+        self.normalization_preview = None
+        self.normalization_is_current = False
+        self.set_import_status("No image loaded")
+        self.channels_changed.emit(())
+        self.normalization_changed.emit(None, False)
+        self.changed.emit(None)
 
     def set_calibration(self, spacing, source: str = "manual override") -> None:
         values = tuple(float(value) for value in spacing)
@@ -251,6 +304,7 @@ class ProjectState(QObject):
         if "colormap" in changes and not str(changes["colormap"]).strip():
             raise ValueError("A channel colormap is required.")
         self.channels[position] = replace(current, **changes)
+        self.invalidate_normalization()
         self.channels_changed.emit(tuple(self.channels))
 
     @property

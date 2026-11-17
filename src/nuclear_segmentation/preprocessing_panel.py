@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
     QLabel,
@@ -16,6 +18,10 @@ from .collapsible_section import CollapsibleSection
 
 
 class PreprocessingPanel(QWidget):
+    normalization_calculate_requested = Signal(object)
+    normalization_apply_requested = Signal()
+    normalization_reset_requested = Signal()
+    normalization_settings_changed = Signal()
     generate_requested = Signal(int, str)
     draw_requested = Signal(str)
     edit_requested = Signal()
@@ -31,6 +37,78 @@ class PreprocessingPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
+
+        normalization = CollapsibleSection("normalization", "Normalization")
+        normalization_form = QFormLayout()
+        normalization_form.setContentsMargins(10, 8, 10, 10)
+        self.normalization_channel_combo = QComboBox()
+        self.normalization_mode_combo = QComboBox()
+        self.normalization_mode_combo.addItem(
+            "Cellpose default normalization", "cellpose_default"
+        )
+        self.normalization_mode_combo.addItem(
+            "Percentile-based normalization", "percentile"
+        )
+        self.normalization_mode_combo.addItem(
+            "ROI-derived fixed limits", "roi_fixed"
+        )
+        self.normalization_mode_combo.addItem("Disabled normalization", "disabled")
+        self.normalization_lower = QDoubleSpinBox()
+        self.normalization_upper = QDoubleSpinBox()
+        for widget, value in (
+            (self.normalization_lower, 1.0),
+            (self.normalization_upper, 99.0),
+        ):
+            widget.setRange(0.0, 100.0)
+            widget.setDecimals(3)
+            widget.setValue(value)
+        self.normalization_norm3d = QCheckBox("Normalize across Z (norm3D)")
+        self.normalization_norm3d.setChecked(True)
+        normalization_form.addRow(
+            "Source channel", self.normalization_channel_combo
+        )
+        normalization_form.addRow("Mode", self.normalization_mode_combo)
+        normalization_form.addRow("Lower percentile", self.normalization_lower)
+        normalization_form.addRow("Upper percentile", self.normalization_upper)
+        normalization_form.addRow("norm3D", self.normalization_norm3d)
+        norm3d_note = QLabel(
+            "norm3D controls whether Cellpose computes normalization statistics "
+            "across the image volume. It does not run Cellpose in this preview."
+        )
+        norm3d_note.setWordWrap(True)
+        normalization_form.addRow(norm3d_note)
+        self.normalization_calculate_button = QPushButton("Calculate and Preview")
+        self.normalization_apply_button = QPushButton("Apply Normalization")
+        self.normalization_reset_button = QPushButton("Reset Normalization")
+        self.normalization_apply_button.setEnabled(False)
+        normalization_form.addRow(self.normalization_calculate_button)
+        normalization_form.addRow(self.normalization_apply_button)
+        normalization_form.addRow(self.normalization_reset_button)
+        self.normalization_status = QLabel(
+            "Load a project image to configure normalization."
+        )
+        self.normalization_status.setWordWrap(True)
+        normalization_form.addRow(self.normalization_status)
+        normalization.set_content_layout(normalization_form)
+        layout.addWidget(normalization)
+
+        self.normalization_calculate_button.clicked.connect(
+            self._request_normalization_calculation
+        )
+        self.normalization_apply_button.clicked.connect(
+            self.normalization_apply_requested
+        )
+        self.normalization_reset_button.clicked.connect(
+            self.normalization_reset_requested
+        )
+        for signal in (
+            self.normalization_channel_combo.currentIndexChanged,
+            self.normalization_mode_combo.currentIndexChanged,
+            self.normalization_lower.valueChanged,
+            self.normalization_upper.valueChanged,
+            self.normalization_norm3d.toggled,
+        ):
+            signal.connect(self._normalization_setting_changed)
 
         projection = CollapsibleSection("projection", "XY Projection")
         projection_form = QFormLayout()
@@ -95,16 +173,81 @@ class PreprocessingPanel(QWidget):
 
     def set_channels(self, channels) -> None:
         selected = self.channel_combo.currentData()
+        normalization_selected = self.normalization_channel_combo.currentData()
         self.channel_combo.blockSignals(True)
+        self.normalization_channel_combo.blockSignals(True)
         self.channel_combo.clear()
+        self.normalization_channel_combo.clear()
         for channel in channels:
             self.channel_combo.addItem(f"{channel.index}: {channel.name}", channel.index)
+            self.normalization_channel_combo.addItem(channel.name, channel.index)
         if selected is not None:
             index = self.channel_combo.findData(selected)
             if index >= 0:
                 self.channel_combo.setCurrentIndex(index)
+        if normalization_selected is None:
+            normalization_selected = self.project_state.segmentation_channel_index
+        index = self.normalization_channel_combo.findData(normalization_selected)
+        if index >= 0:
+            self.normalization_channel_combo.setCurrentIndex(index)
         self.channel_combo.blockSignals(False)
+        self.normalization_channel_combo.blockSignals(False)
         self.generate_button.setEnabled(bool(channels))
+        self.normalization_calculate_button.setEnabled(bool(channels))
+        if not channels:
+            self.normalization_apply_button.setEnabled(False)
+            self.normalization_status.setText(
+                "Load a project image to configure normalization."
+            )
+
+    def normalization_options(self) -> dict:
+        lower = float(self.normalization_lower.value())
+        upper = float(self.normalization_upper.value())
+        if not 0 <= lower < upper <= 100:
+            raise ValueError("Percentiles must satisfy 0 <= lower < upper <= 100.")
+        channel_index = self.normalization_channel_combo.currentData()
+        if channel_index is None:
+            raise ValueError("Select a normalization source channel.")
+        return {
+            "channel_index": int(channel_index),
+            "mode": str(self.normalization_mode_combo.currentData()),
+            "lower": lower,
+            "upper": upper,
+            "norm3D": bool(self.normalization_norm3d.isChecked()),
+        }
+
+    def _request_normalization_calculation(self) -> None:
+        try:
+            options = self.normalization_options()
+        except ValueError as error:
+            self.set_normalization_status(str(error), preview_ready=False)
+            return
+        self.normalization_calculate_requested.emit(options)
+
+    def _normalization_setting_changed(self, *args) -> None:
+        self.normalization_apply_button.setEnabled(False)
+        if self.project_state.dataset_ready:
+            self.normalization_status.setText(
+                "Normalization settings changed. Recalculate the preview before applying."
+            )
+        self.normalization_settings_changed.emit()
+
+    def set_normalization_status(self, message: str, *, preview_ready=False) -> None:
+        self.normalization_status.setText(str(message))
+        self.normalization_apply_button.setEnabled(bool(preview_ready))
+
+    def reset_normalization_controls(self) -> None:
+        self.normalization_mode_combo.setCurrentIndex(
+            self.normalization_mode_combo.findData("cellpose_default")
+        )
+        self.normalization_lower.setValue(1.0)
+        self.normalization_upper.setValue(99.0)
+        self.normalization_norm3d.setChecked(True)
+        self.set_channels(self.project_state.channels)
+        self.set_normalization_status(
+            "Cellpose default normalization selected. Calculate a preview to inspect intensities.",
+            preview_ready=False,
+        )
 
     def _request_projection(self) -> None:
         if self.channel_combo.currentData() is not None:

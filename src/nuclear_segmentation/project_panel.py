@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
 
 from .channel_panel import ChannelConfigurationPanel
 from .collapsible_section import CollapsibleSection
+from .ui_icons import icon
 
 
 class ProjectPanel(QWidget):
@@ -26,6 +27,8 @@ class ProjectPanel(QWidget):
     analysis_mode_changed = Signal(str)
     calibration_requested = Signal(object)
     section_state_changed = Signal(str, bool)
+    close_requested = Signal()
+    availability_changed = Signal(bool)
 
     def __init__(self, project_state, parent=None):
         super().__init__(parent)
@@ -119,9 +122,17 @@ class ProjectPanel(QWidget):
         self.load_button = QPushButton("Load Selected File")
         self.load_button.setEnabled(False)
         self.load_button.clicked.connect(self.load_pending_requested)
+        self.close_button = QPushButton("Close Project")
+        self.close_button.setIcon(icon("close"))
+        self.close_button.setToolTip(
+            "Close the current project and return to an empty workspace."
+        )
+        self.close_button.setEnabled(False)
+        self.close_button.clicked.connect(self.close_requested)
         buttons.addWidget(self.open_button)
         buttons.addWidget(self.load_button)
         layout.addLayout(buttons)
+        layout.addWidget(self.close_button)
         self.status_label = QLabel("No image loaded")
         self.status_label.setObjectName("importStatus")
         self.status_label.setWordWrap(True)
@@ -207,6 +218,8 @@ class ProjectPanel(QWidget):
     def set_pending(self, enabled: bool) -> None:
         self._pending = bool(enabled)
         self.load_button.setEnabled(self._pending)
+        self.close_button.setEnabled(self._pending or self.project_state.dataset_ready)
+        self.availability_changed.emit(self.close_button.isEnabled())
 
     def set_loading(self, loading: bool) -> None:
         self.open_button.setEnabled(not loading)
@@ -263,6 +276,9 @@ class ProjectPanel(QWidget):
         self._spacing_manually_edited = True
 
     def set_dataset(self, dataset) -> None:
+        if dataset is None:
+            self.clear_project()
+            return
         values = self.provenance_values
         values["filename"].setText(dataset.source_filename)
         values["path"].setText(str(dataset.source_path))
@@ -279,3 +295,22 @@ class ProjectPanel(QWidget):
             field.setText(f"{value:g}")
         self.calibration_source.setText(dataset.calibration_source)
         self.set_pending(False)
+        self.close_button.setEnabled(True)
+        self.availability_changed.emit(True)
+
+    def clear_project(self) -> None:
+        for value in self.provenance_values.values():
+            value.setText("Not loaded")
+            value.setToolTip("")
+        self.axes_override.clear()
+        self.time_index.setValue(0)
+        for field in self.spacing_fields:
+            field.clear()
+        self.calibration_source.setText("Not loaded")
+        self._metadata_spacing_available = False
+        self._spacing_manually_edited = False
+        self._pending = False
+        self.load_button.setEnabled(False)
+        self.close_button.setEnabled(False)
+        self.status_label.setText("No image loaded")
+        self.availability_changed.emit(False)

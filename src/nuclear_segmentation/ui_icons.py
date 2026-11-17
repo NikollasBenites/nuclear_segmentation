@@ -192,6 +192,11 @@ class _IconEngine(QIconEngine):
         if name == "chevron_down":
             _polyline(painter, 5, 8, 12, 15, 19, 8)
             return
+        if name == "close":
+            painter.drawRoundedRect(QRectF(4, 4, 16, 16), 3, 3)
+            _line(painter, 8, 8, 16, 16)
+            _line(painter, 16, 8, 8, 16)
+            return
         if name == "focus":
             for points in (
                 (9, 4, 4, 4, 4, 9),
