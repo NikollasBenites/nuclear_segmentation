@@ -1,6 +1,7 @@
 import json
 import os
 import xml.etree.ElementTree as ET
+from types import SimpleNamespace
 from time import monotonic, sleep
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,6 +12,7 @@ from qtpy.QtCore import QSettings, Qt
 from qtpy.QtWidgets import QApplication, QWidget
 
 from nuclear_segmentation.desktop_window import DesktopWindow
+from nuclear_segmentation.image_export_panel import ImageExportPanel
 
 
 class FakeQtViewer(QWidget):
@@ -168,12 +170,66 @@ def test_export_panel_channel_selection_and_order_controls(tmp_path):
     qapp = QApplication.instance() or QApplication([])
     window, _, _ = _window(qapp, tmp_path)
     panel = window.context_panel.export_page
+    assert panel.selection_counter.text() == "3 of 3 channels selected"
+    assert panel.export_button.isEnabled()
+    initial_states = [panel.channels.item(row).checkState() for row in range(3)]
+    panel.channels.setCurrentRow(2)
+    assert [panel.channels.item(row).checkState() for row in range(3)] == initial_states
     panel._set_all_checked(False)
     assert panel.selected_channel_order() == []
+    assert panel.selection_counter.text() == "0 of 3 channels selected"
+    assert not panel.export_button.isEnabled()
+    unchecked_icon_key = panel.channels.item(1).icon().cacheKey()
+    assert not panel.channels.item(1).icon().isNull()
+    assert panel.channels.item(1).toolTip() == "Excluded from TIFF export"
     panel.channels.item(1).setCheckState(Qt.CheckState.Checked)
     assert panel.selected_channel_order() == [1]
+    assert panel.selection_counter.text() == "1 of 3 channels selected"
+    assert panel.export_button.isEnabled()
+    assert panel.channels.item(1).icon().cacheKey() != unchecked_icon_key
+    assert panel.channels.item(1).toolTip() == "Included in TIFF export"
     panel._set_all_checked(True)
+    assert panel.selection_counter.text() == "3 of 3 channels selected"
     panel.channels.setCurrentRow(0)
     panel._move_current(1)
     assert panel.selected_channel_order() == [1, 0, 2]
+    assert panel.selection_counter.text() == "3 of 3 channels selected"
+    panel.set_busy(True)
+    assert not panel.export_button.isEnabled()
+    panel.set_busy(False)
+    assert panel.export_button.isEnabled()
     window.close()
+
+
+def test_export_panel_four_visible_vector_checkboxes_and_live_counter():
+    qapp = QApplication.instance() or QApplication([])
+    panel = ImageExportPanel()
+    channels = [SimpleNamespace(index=index, name=f"Channel {index + 1}") for index in range(4)]
+    provenance = {
+        index: {"channel_name": channel.name, "route_label": "Original working image"}
+        for index, channel in enumerate(channels)
+    }
+    panel.set_prepared_channels(channels, provenance)
+    assert panel.selection_counter.text() == "4 of 4 channels selected"
+    checked_keys = []
+    for row in range(4):
+        item = panel.channels.item(row)
+        assert item.checkState() == Qt.CheckState.Checked
+        assert not item.icon().isNull()
+        pixmap = item.icon().pixmap(44, 44)
+        assert not pixmap.isNull()
+        assert any(
+            pixmap.toImage().pixelColor(x, y).alpha() > 0
+            for x in range(pixmap.width())
+            for y in range(pixmap.height())
+        )
+        checked_keys.append(item.icon().cacheKey())
+    panel._set_all_checked(False)
+    assert panel.selection_counter.text() == "0 of 4 channels selected"
+    assert not panel.export_button.isEnabled()
+    assert all(
+        panel.channels.item(row).icon().cacheKey() != checked_keys[row]
+        for row in range(4)
+    )
+    panel.deleteLater()
+    qapp.processEvents()
