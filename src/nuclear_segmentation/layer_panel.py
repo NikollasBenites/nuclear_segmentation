@@ -44,6 +44,9 @@ class LayerTreeModel(QStandardItemModel):
                 "nucytoseg_crop_selection",
                 "nucytoseg_crop_preview",
                 "nucytoseg_normalization_preview",
+                "nucytoseg_normalization_roi_projection",
+                "nucytoseg_normalization_roi",
+                "nucytoseg_z_correction_preview",
             )
         ):
             return "Annotations & Overlays"

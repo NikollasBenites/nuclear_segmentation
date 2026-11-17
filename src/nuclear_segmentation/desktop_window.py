@@ -39,6 +39,7 @@ from .workspace_settings import (
     geometry_intersects_screen,
     move_to_available_screen,
 )
+from .z_correction_workspace import ZCorrectionController
 
 
 class DesktopWindow(QMainWindow):
@@ -109,6 +110,14 @@ class DesktopWindow(QMainWindow):
             self,
         )
         self.normalization.status_changed.connect(self.statusBar().showMessage)
+        self.z_correction = ZCorrectionController(
+            self.embedding.viewer,
+            self.project_state,
+            self.context_panel.preprocessing_page.z_correction_panel,
+            self,
+        )
+        self.z_correction.status_changed.connect(self.statusBar().showMessage)
+        self.z_correction.correction_applied.connect(self.normalization.invalidate)
         self.project_state.channels_changed.connect(
             lambda channels: self.normalization.invalidate()
         )
@@ -117,6 +126,9 @@ class DesktopWindow(QMainWindow):
         )
         self.crop_workspace.working_dataset_changed.connect(
             lambda dataset: self.normalization.invalidate()
+        )
+        self.crop_workspace.working_dataset_changed.connect(
+            lambda dataset: self.z_correction.invalidate_all()
         )
 
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -412,7 +424,7 @@ class DesktopWindow(QMainWindow):
                 6000,
             )
             return False
-        if self.crop_workspace.busy or self.normalization.busy:
+        if self.crop_workspace.busy or self.normalization.busy or self.z_correction.busy:
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before "
                 "closing the project.",
@@ -426,6 +438,7 @@ class DesktopWindow(QMainWindow):
         self.mask_selection.clear_selection()
         self.selected_mask_panel.set_selection(None, None)
         self.normalization.clear_project()
+        self.z_correction.clear_project()
         self.crop_workspace.clear_workspace_for_new_project()
         self._disconnect_channel_layers()
         self.embedding.viewer.layers.clear()
@@ -645,6 +658,8 @@ class DesktopWindow(QMainWindow):
                     viewer.layers.remove(layer)
             self._show_import_error(f"Could not create image layers: {error}")
             return
+        self.normalization.clear_project()
+        self.z_correction.clear_project()
         for layer in old_layers:
             if layer in viewer.layers:
                 viewer.layers.remove(layer)
@@ -986,7 +1001,7 @@ class DesktopWindow(QMainWindow):
             )
             event.ignore()
             return
-        if self.normalization.busy or self.crop_workspace.busy:
+        if self.normalization.busy or self.crop_workspace.busy or self.z_correction.busy:
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before exiting."
             )
@@ -999,6 +1014,7 @@ class DesktopWindow(QMainWindow):
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
             self.mask_selection.dispose()
             self.normalization.dispose()
+            self.z_correction.dispose()
             self.crop_workspace.dispose()
             self._disconnect_channel_layers()
             self.context_panel.project_page.channel_panel.dispose()

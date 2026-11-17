@@ -66,6 +66,8 @@ class ProjectState(QObject):
     channels_changed = Signal(object)
     calibration_changed = Signal(object, str)
     normalization_changed = Signal(object, bool)
+    normalization_roi_changed = Signal(object)
+    z_correction_changed = Signal(object)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -84,6 +86,12 @@ class ProjectState(QObject):
         self.normalization_configuration: dict[str, Any] | None = None
         self.normalization_preview: dict[str, Any] | None = None
         self.normalization_is_current = False
+        self.normalization_roi_mask_yx: np.ndarray | None = None
+        self.normalization_roi_vertices_yx: tuple[tuple[float, float], ...] = ()
+        self.normalization_roi_provenance: dict[str, Any] | None = None
+        self.z_correction_options: dict[int, dict[str, Any]] = {}
+        self.z_correction_reports: dict[int, dict[str, Any]] = {}
+        self.z_correction_applied: set[int] = set()
 
     @property
     def dataset_ready(self) -> bool:
@@ -112,6 +120,8 @@ class ProjectState(QObject):
             self.channels[0].index if self.channels else None,
         )
         self.reset_normalization(emit=False)
+        self.clear_normalization_roi(emit=False)
+        self.reset_all_z_corrections(emit=False)
         self.set_import_status("Dataset ready")
         self.changed.emit(dataset)
         self.channels_changed.emit(tuple(self.channels))
@@ -189,6 +199,7 @@ class ProjectState(QObject):
         self.crop_provenance = provenance
         self.roi_mask_yx = np.array(roi_mask, copy=True)
         self.invalidate_normalization()
+        self.invalidate_z_corrections()
         return self.working_dataset
 
     def reset_crop(self) -> ImportedDataset:
@@ -200,6 +211,7 @@ class ProjectState(QObject):
         self.roi_mask_yx = None
         self.working_offset_yx = (0, 0)
         self.invalidate_normalization()
+        self.invalidate_z_corrections()
         return self.original_dataset
 
     def set_normalization_preview(self, report: dict[str, Any]) -> None:
@@ -229,6 +241,86 @@ class ProjectState(QObject):
         if emit:
             self.normalization_changed.emit(self.normalization_configuration, False)
 
+    def set_normalization_roi(
+        self, mask_yx, vertices_yx, provenance: dict[str, Any]
+    ) -> None:
+        if self.original_dataset is None:
+            raise ValueError("Load a dataset before defining a normalization ROI.")
+        mask = np.asarray(mask_yx, dtype=bool)
+        expected = self.original_dataset.data_czyx.shape[-2:]
+        if mask.shape != expected or not mask.any():
+            raise ValueError(
+                f"Normalization ROI mask must be nonempty with shape {expected}."
+            )
+        self.normalization_roi_mask_yx = np.array(mask, copy=True)
+        self.normalization_roi_vertices_yx = tuple(
+            (float(y), float(x)) for y, x in vertices_yx
+        )
+        self.normalization_roi_provenance = dict(provenance)
+        self.invalidate_normalization()
+        self.normalization_roi_changed.emit(self.normalization_roi_provenance)
+
+    def clear_normalization_roi(self, *, emit: bool = True) -> None:
+        self.normalization_roi_mask_yx = None
+        self.normalization_roi_vertices_yx = ()
+        self.normalization_roi_provenance = None
+        self.invalidate_normalization()
+        if emit:
+            self.normalization_roi_changed.emit(None)
+
+    def set_z_correction_preview(
+        self, channel_index: int, options: dict[str, Any], report: dict[str, Any]
+    ) -> None:
+        index = int(channel_index)
+        self.z_correction_options[index] = dict(options)
+        self.z_correction_reports[index] = dict(report)
+        self.z_correction_applied.discard(index)
+        self.z_correction_changed.emit(index)
+
+    def apply_z_corrections(self, channel_indexes) -> None:
+        indexes = {int(index) for index in channel_indexes}
+        if not indexes or not indexes.issubset(self.z_correction_reports):
+            raise ValueError("Calculate current Z-correction previews before applying.")
+        self.z_correction_applied.update(indexes)
+        self.z_correction_changed.emit(tuple(sorted(indexes)))
+
+    def reset_z_corrections(self, channel_indexes, *, emit: bool = True) -> None:
+        for index in tuple(int(value) for value in channel_indexes):
+            self.z_correction_options.pop(index, None)
+            self.z_correction_reports.pop(index, None)
+            self.z_correction_applied.discard(index)
+        if emit:
+            self.z_correction_changed.emit(None)
+
+    def reset_all_z_corrections(self, *, emit: bool = True) -> None:
+        self.z_correction_options = {}
+        self.z_correction_reports = {}
+        self.z_correction_applied = set()
+        if emit:
+            self.z_correction_changed.emit(None)
+
+    def invalidate_z_corrections(self) -> None:
+        if not self.z_correction_reports and not self.z_correction_applied:
+            return
+        self.z_correction_reports = {}
+        self.z_correction_applied = set()
+        self.z_correction_changed.emit(None)
+
+    def invalidate_z_correction(self, channel_index: int) -> None:
+        index = int(channel_index)
+        self.z_correction_reports.pop(index, None)
+        self.z_correction_applied.discard(index)
+        self.z_correction_changed.emit(index)
+
+    def legacy_z_corrections(self) -> dict[str, dict[str, Any]]:
+        """Resolve stable channel indexes to the legacy name-keyed contract."""
+        records = {}
+        for index in sorted(self.z_correction_applied):
+            channel = next((item for item in self.channels if item.index == index), None)
+            if channel is not None and index in self.z_correction_options:
+                records[channel.name] = dict(self.z_correction_options[index])
+        return records
+
     def clear_project(self) -> None:
         self.dataset = None
         self.original_dataset = None
@@ -243,9 +335,15 @@ class ProjectState(QObject):
         self.normalization_configuration = None
         self.normalization_preview = None
         self.normalization_is_current = False
+        self.normalization_roi_mask_yx = None
+        self.normalization_roi_vertices_yx = ()
+        self.normalization_roi_provenance = None
+        self.reset_all_z_corrections(emit=False)
         self.set_import_status("No image loaded")
         self.channels_changed.emit(())
         self.normalization_changed.emit(None, False)
+        self.normalization_roi_changed.emit(None)
+        self.z_correction_changed.emit(None)
         self.changed.emit(None)
 
     def set_calibration(self, spacing, source: str = "manual override") -> None:

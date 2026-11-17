@@ -88,6 +88,9 @@ def test_polygon_normalization_reuses_legacy_math_and_excludes_fill_zeros(
     vertices = np.array([[1, 2], [1, 7], [6, 2]], dtype=float)
     bbox, mask = polygon_roi_mask(vertices, dataset.standardized_shape[-2:])
     state.apply_crop(bbox, vertices, mask, "polygon")
+    full_roi = np.zeros(dataset.standardized_shape[-2:], dtype=bool)
+    full_roi[bbox[0] : bbox[1], bbox[2] : bbox[3]] = mask
+    state.set_normalization_roi(full_roi, vertices, {"source": "test"})
     options = {
         "channel_index": 0,
         "mode": "roi_fixed",

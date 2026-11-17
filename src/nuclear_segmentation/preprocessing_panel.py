@@ -15,6 +15,8 @@ from qtpy.QtWidgets import (
 )
 
 from .collapsible_section import CollapsibleSection
+from .results_panel import ScientificResultsSection
+from .z_correction_panel import ZCorrectionPanel
 
 
 class PreprocessingPanel(QWidget):
@@ -22,6 +24,11 @@ class PreprocessingPanel(QWidget):
     normalization_apply_requested = Signal()
     normalization_reset_requested = Signal()
     normalization_settings_changed = Signal()
+    normalization_roi_draw_requested = Signal()
+    normalization_roi_edit_requested = Signal()
+    normalization_roi_clear_requested = Signal()
+    normalization_roi_visibility_requested = Signal(bool)
+    normalization_roi_reuse_crop_requested = Signal()
     generate_requested = Signal(int, str)
     draw_requested = Signal(str)
     edit_requested = Signal()
@@ -92,6 +99,42 @@ class PreprocessingPanel(QWidget):
         normalization.set_content_layout(normalization_form)
         layout.addWidget(normalization)
 
+        roi_section = CollapsibleSection("normalization_roi", "Normalization ROI")
+        roi_layout = QGridLayout()
+        roi_layout.setContentsMargins(10, 8, 10, 10)
+        self.normalization_roi_draw_button = QPushButton("Draw Polygon ROI")
+        self.normalization_roi_edit_button = QPushButton("Edit ROI")
+        self.normalization_roi_clear_button = QPushButton("Clear ROI")
+        self.normalization_roi_visibility_button = QPushButton("Hide ROI Mask")
+        self.normalization_roi_visibility_button.setCheckable(True)
+        self.normalization_roi_visibility_button.setChecked(True)
+        self.normalization_roi_reuse_crop_button = QPushButton("Use Crop Polygon")
+        for index, button in enumerate(
+            (
+                self.normalization_roi_draw_button,
+                self.normalization_roi_edit_button,
+                self.normalization_roi_clear_button,
+                self.normalization_roi_visibility_button,
+            )
+        ):
+            roi_layout.addWidget(button, index // 2, index % 2)
+        roi_layout.addWidget(self.normalization_roi_reuse_crop_button, 2, 0, 1, 2)
+        self.normalization_roi_status = QLabel(
+            "No normalization ROI. ROI-derived fixed limits require one polygon."
+        )
+        self.normalization_roi_status.setWordWrap(True)
+        roi_layout.addWidget(self.normalization_roi_status, 3, 0, 1, 2)
+        roi_section.set_content_layout(roi_layout)
+        layout.addWidget(roi_section)
+
+        self.normalization_results = ScientificResultsSection(
+            "normalization_results", "Normalization Results"
+        )
+        layout.addWidget(self.normalization_results)
+
+        self.z_correction_panel = ZCorrectionPanel(project_state)
+        layout.addWidget(self.z_correction_panel)
+
         self.normalization_calculate_button.clicked.connect(
             self._request_normalization_calculation
         )
@@ -100,6 +143,21 @@ class PreprocessingPanel(QWidget):
         )
         self.normalization_reset_button.clicked.connect(
             self.normalization_reset_requested
+        )
+        self.normalization_roi_draw_button.clicked.connect(
+            self.normalization_roi_draw_requested
+        )
+        self.normalization_roi_edit_button.clicked.connect(
+            self.normalization_roi_edit_requested
+        )
+        self.normalization_roi_clear_button.clicked.connect(
+            self.normalization_roi_clear_requested
+        )
+        self.normalization_roi_visibility_button.toggled.connect(
+            self.normalization_roi_visibility_requested
+        )
+        self.normalization_roi_reuse_crop_button.clicked.connect(
+            self.normalization_roi_reuse_crop_requested
         )
         for signal in (
             self.normalization_channel_combo.currentIndexChanged,
@@ -233,8 +291,14 @@ class PreprocessingPanel(QWidget):
         self.normalization_settings_changed.emit()
 
     def set_normalization_status(self, message: str, *, preview_ready=False) -> None:
-        self.normalization_status.setText(str(message))
+        self.normalization_status.setText(str(message).splitlines()[0])
         self.normalization_apply_button.setEnabled(bool(preview_ready))
+
+    def set_normalization_results(self, message: str) -> None:
+        self.normalization_results.set_results(message)
+
+    def set_normalization_roi_status(self, message: str) -> None:
+        self.normalization_roi_status.setText(str(message))
 
     def reset_normalization_controls(self) -> None:
         self.normalization_mode_combo.setCurrentIndex(
@@ -260,3 +324,4 @@ class PreprocessingPanel(QWidget):
 
     def dispose(self) -> None:
         self.project_state.channels_changed.disconnect(self.set_channels)
+        self.z_correction_panel.dispose()
