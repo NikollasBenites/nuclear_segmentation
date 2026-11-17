@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 from qtpy.QtCore import QObject, QThread, Signal, Slot
+from qtpy.QtWidgets import QMessageBox
 
 from .projection_crop import (
     generate_xy_projection,
@@ -56,6 +57,7 @@ class CropWorkspaceController(QObject):
         self._worker = None
         self._disposed = False
         panel.generate_requested.connect(self.generate_projection)
+        panel.clear_projection_requested.connect(self.clear_projection)
         panel.draw_requested.connect(self.start_drawing)
         panel.edit_requested.connect(self.edit_selection)
         panel.clear_requested.connect(self.clear_selection)
@@ -63,6 +65,7 @@ class CropWorkspaceController(QObject):
         panel.confirm_requested.connect(self.confirm_crop)
         panel.cancel_requested.connect(self.cancel_preview)
         panel.reset_requested.connect(self.reset_crop)
+        self.viewer.layers.events.removed.connect(self._layer_removed)
 
     @property
     def busy(self) -> bool:
@@ -119,6 +122,7 @@ class CropWorkspaceController(QObject):
         )
         self.viewer.dims.ndisplay = 2
         self.viewer.layers.selection.active = self.projection_layer
+        self.panel.clear_projection_button.setEnabled(True)
         self._status(
             f"Projection ready: {data.shape[0]} × {data.shape[1]} pixels. Draw a crop selection."
         )
@@ -126,6 +130,58 @@ class CropWorkspaceController(QObject):
     def _projection_finished(self) -> None:
         self._thread = None
         self._worker = None
+
+    def clear_projection(self, *, confirm: bool = True) -> bool:
+        """Remove only temporary projection-dependent state, never a confirmed crop."""
+        if self.busy:
+            self._status("Wait for projection generation to finish before clearing it.")
+            return False
+        has_selection = (
+            self.selection_layer is not None
+            and self.selection_layer in self.viewer.layers
+            and len(self.selection_layer.data) > 0
+        )
+        has_preview = bool(self.preview_layers)
+        if confirm and (has_selection or has_preview):
+            answer = QMessageBox.question(
+                self.panel,
+                "Clear Projection?",
+                "Clearing the projection will discard the unfinished crop selection "
+                "and crop preview. Confirmed crops are not affected.",
+                QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Discard:
+                return False
+        self.cancel_preview()
+        self._remove_layer(self.selection_layer)
+        self._remove_layer(self.projection_layer)
+        self.selection_layer = None
+        self.projection_layer = None
+        self.panel.clear_projection_button.setEnabled(False)
+        source = next(
+            (
+                layer for layer in self.viewer.layers
+                if (getattr(layer, "metadata", {}) or {}).get("nucytoseg_imported")
+            ),
+            None,
+        )
+        if source is not None:
+            self.viewer.layers.selection.active = source
+        self._status("XY projection cleared. The working image and confirmed crop are unchanged.")
+        return True
+
+    def _layer_removed(self, event=None) -> None:
+        """Drop stale references when an owned temporary layer is removed externally."""
+        if self.projection_layer is not None and self.projection_layer not in self.viewer.layers:
+            self.projection_layer = None
+            self.panel.clear_projection_button.setEnabled(False)
+        if self.selection_layer is not None and self.selection_layer not in self.viewer.layers:
+            self.selection_layer = None
+        self.preview_layers[:] = [
+            layer for layer in self.preview_layers if layer in self.viewer.layers
+        ]
 
     def _ensure_selection_layer(self):
         if self.projection_layer is None or self.projection_layer not in self.viewer.layers:
@@ -282,6 +338,7 @@ class CropWorkspaceController(QObject):
         self._remove_layer(self.selection_layer)
         self.projection_layer = None
         self.selection_layer = None
+        self.panel.clear_projection_button.setEnabled(False)
         self._status(f"Crop applied: CZYX {dataset.standardized_shape}")
         return True
 
@@ -296,6 +353,7 @@ class CropWorkspaceController(QObject):
         self._remove_layer(self.selection_layer)
         self.projection_layer = None
         self.selection_layer = None
+        self.panel.clear_projection_button.setEnabled(False)
         self._status("Original uncropped dataset restored.")
         return True
 
@@ -313,6 +371,7 @@ class CropWorkspaceController(QObject):
         self._remove_layer(self.selection_layer)
         self.projection_layer = None
         self.selection_layer = None
+        self.panel.clear_projection_button.setEnabled(False)
         self._preview_bbox_original = None
         self._preview_vertices_original = None
         self._preview_roi_mask = None
@@ -326,3 +385,4 @@ class CropWorkspaceController(QObject):
             self._thread.quit()
             self._thread.wait()
         self.clear_workspace_for_new_project()
+        self.viewer.layers.events.removed.disconnect(self._layer_removed)

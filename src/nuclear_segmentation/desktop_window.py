@@ -21,6 +21,7 @@ from qtpy.QtWidgets import (
 from .context_panel import ContextPanel
 from .crop_workspace import CropWorkspaceController
 from .image_import import TiffImportWorker, inspect_tiff
+from .image_display_panel import ImageDisplayPanel
 from .import_loading import ImportLoadingDialog
 from .layer_panel import LayerPanel
 from .lif_import import LifEnumerationWorker, LifImportWorker
@@ -223,6 +224,10 @@ class DesktopWindow(QMainWindow):
         layout.addWidget(layer_title)
         self.layer_panel = LayerPanel(self.embedding.viewer)
         layout.addWidget(self.layer_panel, 1)
+        self.image_display_panel = ImageDisplayPanel(
+            self.embedding.viewer, self.project_state
+        )
+        layout.addWidget(self.image_display_panel)
         self.selected_mask_panel = SelectedMaskPanel()
         layout.addWidget(self.selected_mask_panel)
         return container
@@ -1020,6 +1025,7 @@ class DesktopWindow(QMainWindow):
             self.context_panel.project_page.channel_panel.dispose()
             self.context_panel.preprocessing_page.dispose()
             self.layer_panel.dispose()
+            self.image_display_panel.dispose()
             self.viewer_toolbar.dispose()
             self.embedding.shutdown()
         event.accept()

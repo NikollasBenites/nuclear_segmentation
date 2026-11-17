@@ -216,6 +216,19 @@ def test_desktop_projection_preview_apply_reset_and_review_isolation(qapp, tmp_p
     assert projection.data.dtype == np.float64
     assert tuple(projection.scale) == (0.5, 0.25)
     assert projection.metadata["nucytoseg_projection"]
+    assert window.context_panel.preprocessing_page.clear_projection_button.isEnabled()
+    temporary_overlay = window.embedding.viewer.add_image(
+        np.ones((4, 12, 14), dtype=np.float32),
+        name="Unrelated preprocessing preview",
+        metadata={"nucytoseg_normalization_preview": True},
+    )
+    assert window.crop_workspace.clear_projection(confirm=False)
+    assert window.crop_workspace.projection_layer is None
+    assert temporary_overlay in window.embedding.viewer.layers
+    assert not window.context_panel.preprocessing_page.clear_projection_button.isEnabled()
+    np.testing.assert_array_equal(source_identity, source_copy)
+    assert window.crop_workspace.generate_projection(1, "mean")
+    _wait(qapp, lambda: window.crop_workspace._thread is None)
 
     assert window.crop_workspace.start_drawing("rectangle")
     selection = window.crop_workspace.selection_layer
@@ -253,6 +266,15 @@ def test_desktop_projection_preview_apply_reset_and_review_isolation(qapp, tmp_p
     assert all(tuple(layer.translate) == (0.0, 1.0, 0.75) for layer in imported)
     assert not any(layer.metadata.get("nucytoseg_crop_preview") for layer in window.embedding.viewer.layers)
     np.testing.assert_array_equal(source_identity, source_copy)
+    confirmed_shape = window.project_state.working_dataset.standardized_shape
+    assert window.crop_workspace.generate_projection(0, "maximum")
+    _wait(qapp, lambda: window.crop_workspace._thread is None)
+    external_projection = window.crop_workspace.projection_layer
+    window.embedding.viewer.layers.remove(external_projection)
+    qapp.processEvents()
+    assert window.crop_workspace.projection_layer is None
+    assert not window.context_panel.preprocessing_page.clear_projection_button.isEnabled()
+    assert window.project_state.working_dataset.standardized_shape == confirmed_shape
 
     labels_data = np.zeros((4, 7, 7), dtype=np.uint16)
     labels_data[:, 2:4, 2:4] = 1
