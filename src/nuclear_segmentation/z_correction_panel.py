@@ -57,7 +57,7 @@ class ZCorrectionPanel(QWidget):
         self.channel_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
-        self.channel_list.setMinimumHeight(90)
+        self.channel_list.setFixedHeight(88)
         layout.addWidget(self.channel_list)
         selection_buttons = QGridLayout()
         self.select_all_button = QPushButton("Select All")
@@ -128,11 +128,35 @@ class ZCorrectionPanel(QWidget):
         section.set_content_layout(layout)
         outer.addWidget(section)
 
-        self.results_channel_combo = QComboBox()
-        outer.addWidget(self.results_channel_combo)
         self.results = ScientificResultsSection(
             "z_correction_results", "Z-Correction Results"
         )
+        results_selector = QWidget()
+        results_selector_layout = QFormLayout(results_selector)
+        results_selector_layout.setContentsMargins(0, 0, 0, 0)
+        self.results_channel_combo = QComboBox()
+        results_selector_layout.addRow("Results channel", self.results_channel_combo)
+        self.results.insert_widget(0, results_selector)
+
+        from matplotlib.backends.backend_qtagg import (
+            FigureCanvasQTAgg,
+            NavigationToolbar2QT,
+        )
+        from matplotlib.figure import Figure
+
+        self.profile_figure = Figure(figsize=(5.0, 7.5))
+        self.profile_canvas = FigureCanvasQTAgg(self.profile_figure)
+        self.profile_canvas.setMinimumHeight(620)
+        self.profile_toolbar = NavigationToolbar2QT(self.profile_canvas, self.results)
+        self.profile_note = QLabel(
+            "The horizontal axis uses calibrated Z positions. Artificial "
+            "polygon-crop fill is excluded."
+        )
+        self.profile_note.setWordWrap(True)
+        self.results.insert_widget(2, self.profile_toolbar)
+        self.results.insert_widget(3, self.profile_canvas)
+        self.results.insert_widget(4, self.profile_note)
+        self.clear_profiles()
         outer.addWidget(self.results)
 
         self.select_all_button.clicked.connect(self.channel_list.selectAll)
@@ -253,6 +277,8 @@ class ZCorrectionPanel(QWidget):
         self._loading = False
 
     def _emit_inspected(self, *args) -> None:
+        if self._loading:
+            return
         index = self.current_index()
         if index is not None:
             self.inspected_channel_changed.emit(index)
@@ -282,6 +308,8 @@ class ZCorrectionPanel(QWidget):
             )
 
     def _results_channel_changed(self, *args) -> None:
+        if self._loading:
+            return
         value = self.results_channel_combo.currentData()
         if value is not None:
             self.results_channel_changed.emit(int(value))
@@ -305,6 +333,44 @@ class ZCorrectionPanel(QWidget):
             self.results_channel_combo.setCurrentIndex(position)
         self.results.set_results(text)
 
+    def set_profiles(self, channel_name: str, report: dict, spacing_z: float) -> None:
+        """Render current diagnostic plots inside Z-Correction Results."""
+        import numpy as np
+
+        self.profile_figure.clear()
+        axes = self.profile_figure.subplots(4, 1, sharex=True)
+        z = np.arange(len(report["gain"]), dtype=float) * float(spacing_z)
+        profiles = report["intensity_profiles"]
+        axes[0].plot(z, profiles["original"]["p99"], label="Original")
+        axes[0].plot(z, profiles["corrected"]["p99"], label="Corrected")
+        axes[0].set_ylabel("P99")
+        axes[1].plot(z, profiles["original"]["mean"], label="Original")
+        axes[1].plot(z, profiles["corrected"]["mean"], label="Corrected")
+        axes[1].set_ylabel("Mean")
+        axes[2].plot(z, report["observed_profile"], label="Observed reference")
+        axes[2].plot(z, report["smoothed_profile"], label="Smoothed reference")
+        axes[2].set_ylabel(f"P{report['options']['percentile']:g}")
+        axes[3].plot(z, report["gain"], label="Multiplicative gain")
+        axes[3].set_ylabel("Gain")
+        axes[3].set_xlabel("Z position (µm)")
+        for axis in axes:
+            axis.grid(alpha=0.25)
+            axis.legend(fontsize="small")
+        self.profile_figure.suptitle(
+            f"{channel_name}\n{report['diagnostic_scope']}; P99 diagnostics "
+            "are distinct from the correction reference percentile",
+            fontsize="medium",
+        )
+        self.profile_figure.tight_layout()
+        for widget in (self.profile_toolbar, self.profile_canvas, self.profile_note):
+            widget.show()
+        self.profile_canvas.draw_idle()
+
+    def clear_profiles(self) -> None:
+        self.profile_figure.clear()
+        for widget in (self.profile_toolbar, self.profile_canvas, self.profile_note):
+            widget.hide()
+
     def reset_controls(self) -> None:
         self._settings = {
             channel.index: deepcopy(DEFAULTS) for channel in self.project_state.channels
@@ -317,6 +383,7 @@ class ZCorrectionPanel(QWidget):
         self._load_current_settings()
         self.status.setText("No Z correction applied.")
         self.results.set_results("No results calculated.")
+        self.clear_profiles()
 
     def reset_channel_controls(self, channel_indexes) -> None:
         for index in channel_indexes:

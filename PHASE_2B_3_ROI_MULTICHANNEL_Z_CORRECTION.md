@@ -69,10 +69,12 @@ gain limits, segmentation-routing flag, and measurement-routing flag. Batch
 processing is sequential and independent; no common interchannel gain is
 calculated.
 
-Only the inspected channel's corrected volume is retained as a napari preview.
-Other batch outputs are released after compact profiles and reports are stored.
-Changing inspected channel removes a mismatched image preview and asks for a
-recalculation. Failed batches do not replace previously valid reports.
+Every channel selected in a completed batch receives an independent napari
+preview layer. The layers use additive blending, retain channel colormaps and
+physical calibration, and remain available while the user changes the inspected
+channel or toggles source-layer visibility. Recalculation replaces the prior
+batch previews; reset, crop invalidation, and project closure release them.
+Failed batches do not replace previously valid reports or previews.
 
 Applied configuration remains project-owned for future segmentation/export
 integration. The designated segmentation channel is never changed by a batch.
@@ -89,7 +91,8 @@ Outdated status. Reports include parameters, Z-plane count, observed and
 smoothed reference summaries, actual gain range, duration, diagnostic sampling
 scope, preview/application state, and routing.
 
-The resizable Matplotlib viewer contains:
+The channel selector, report text, and embedded Matplotlib viewer all live
+inside the Z-Correction Results collapsible section. The viewer contains:
 
 - original and corrected P99 versus calibrated Z position;
 - original and corrected mean versus calibrated Z position;
@@ -108,7 +111,7 @@ choices as outdated settings. Normalization ROI changes do not affect Z
 correction. Applying Z correction invalidates a normalization preview that no
 longer represents future processing order. Close Project removes ROI drawing
 layers, projections, normalization and Z previews, reports, configurations,
-profile dialogs, and worker references without recreating napari or resetting
+embedded profile plots and worker references without recreating napari or resetting
 workspace preferences.
 
 Import, project replacement/closure, and application shutdown are blocked while
@@ -132,7 +135,8 @@ reuse, crop intersection, anisotropic alignment, genuine/artificial zeros,
 invalid polygons, overlay visibility, original immutability, legacy
 normalization parity, Z-correction parity, defaults, parameters, empty planes,
 gain/smoothing behavior, multichannel independence, stable indexes, routing,
-failure preservation, profile sampling, results copying/collapse, reset,
+failure preservation, multichannel preview retention, source-layer visibility
+isolation, embedded profile sampling, results copying/collapse, reset,
 worker blocking, and project closure.
 
 ```bash

@@ -174,23 +174,24 @@ def test_z_correction_batch_parity_independence_profiles_and_failures():
     }
     mask = np.ones((4, 5), dtype=bool)
     mask[:, -1] = False
-    reports, preview = calculate_z_corrections(
+    reports, previews = calculate_z_corrections(
         sources, options, 1, mask, include_zeros=True
     )
-    repeated_reports, repeated_preview = calculate_z_corrections(
+    repeated_reports, repeated_previews = calculate_z_corrections(
         sources, options, 1, mask, include_zeros=True
     )
-    np.testing.assert_allclose(repeated_preview, preview)
+    assert set(previews) == {0, 1}
+    np.testing.assert_allclose(repeated_previews[1], previews[1])
     np.testing.assert_allclose(repeated_reports[1]["gain"], reports[1]["gain"])
     expected, expected_report = correct_z(second, options[1])
-    np.testing.assert_allclose(preview, expected)
+    np.testing.assert_allclose(previews[1], expected)
     np.testing.assert_allclose(reports[1]["gain"], expected_report["gain"])
     assert reports[0]["options"]["percentile"] == 99
     assert reports[1]["options"]["percentile"] == 98
     assert reports[1]["options"]["measurement"] is True
     assert reports[0]["output_dtype"] == "float32"
     assert reports[0]["observed_profile"][2] is None
-    assert np.all(preview[second == 0] == 0)
+    assert np.all(previews[1][second == 0] == 0)
     np.testing.assert_array_equal(sources[0], first)
     np.testing.assert_array_equal(sources[1], second)
     profiles = diagnostic_profiles(second, expected, mask, include_zeros=True)
@@ -232,7 +233,8 @@ def test_multichannel_z_ui_apply_routing_profiles_reset_and_close(
             layer for layer in window.embedding.viewer.layers
             if layer.metadata.get("nucytoseg_z_correction_preview")
         ]
-    ) == 1
+    ) == 3
+    assert set(window.z_correction.preview_layers) == {0, 1, 2}
     assert "Reference percentile: 98" in panel.results.text.toPlainText()
     import nuclear_segmentation.z_correction_workspace as z_workspace
 
@@ -253,9 +255,20 @@ def test_multichannel_z_ui_apply_routing_profiles_reset_and_close(
     assert not panel.results.expanded
     panel.results.set_expanded(True)
     assert window.z_correction.show_profiles(1, True)
-    assert window.z_correction._dialogs
-    window.z_correction._dialogs[-1].close()
+    assert len(panel.profile_figure.axes) == 4
+    assert not panel.profile_canvas.isHidden()
     qapp.processEvents()
+
+    preview_layers = dict(window.z_correction.preview_layers)
+    source_layer = next(
+        layer for layer in window.embedding.viewer.layers
+        if layer.metadata.get("channel_index") == 0
+        and not layer.metadata.get("nucytoseg_z_correction_preview")
+    )
+    source_layer.visible = not source_layer.visible
+    qapp.processEvents()
+    assert window.z_correction.preview_layers == preview_layers
+    assert all(layer in window.embedding.viewer.layers for layer in preview_layers.values())
 
     roi = np.ones(original.shape[-2:], dtype=bool)
     window.project_state.set_normalization_roi(

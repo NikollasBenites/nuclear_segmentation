@@ -6,7 +6,6 @@ from time import perf_counter
 
 import numpy as np
 from qtpy.QtCore import QObject, QThread, Signal, Slot
-from qtpy.QtWidgets import QDialog, QLabel, QVBoxLayout
 
 from .normalization import mask_digest
 from .z_correction import correct_z, validate_options
@@ -58,7 +57,7 @@ def calculate_z_corrections(
     progress=None,
 ):
     reports = {}
-    preview = None
+    previews = {}
     total = len(options_by_index)
     for position, (index, options) in enumerate(options_by_index.items(), start=1):
         if index not in data_by_index:
@@ -85,13 +84,12 @@ def calculate_z_corrections(
             ),
         )
         reports[int(index)] = report
-        if int(index) == int(preview_index):
-            preview = corrected
+        previews[int(index)] = corrected
         if progress is not None:
             progress(position, total, int(index))
-    if preview is None:
+    if int(preview_index) not in previews:
         raise ValueError("The inspected channel was not included in the correction batch.")
-    return reports, preview
+    return reports, previews
 
 
 class ZCorrectionWorker(QObject):
@@ -119,7 +117,7 @@ class ZCorrectionWorker(QObject):
     @Slot()
     def run(self):
         try:
-            reports, preview = calculate_z_corrections(
+            reports, previews = calculate_z_corrections(
                 self.data_by_index,
                 self.options_by_index,
                 self.preview_index,
@@ -132,56 +130,9 @@ class ZCorrectionWorker(QObject):
         except Exception as error:
             self.failed.emit(str(error))
         else:
-            self.succeeded.emit(reports, preview, self.preview_index)
+            self.succeeded.emit(reports, previews, self.preview_index)
         finally:
             self.finished.emit()
-
-
-class ZProfileDialog(QDialog):
-    def __init__(self, channel_name, report, spacing_z, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"{channel_name} — Z-intensity profiles")
-        self.resize(980, 820)
-        layout = QVBoxLayout(self)
-        from matplotlib.backends.backend_qtagg import (
-            FigureCanvasQTAgg,
-            NavigationToolbar2QT,
-        )
-        from matplotlib.figure import Figure
-
-        figure = Figure(figsize=(9, 8))
-        axes = figure.subplots(4, 1, sharex=True)
-        z = np.arange(len(report["gain"]), dtype=float) * float(spacing_z)
-        profiles = report["intensity_profiles"]
-        axes[0].plot(z, profiles["original"]["p99"], label="Original")
-        axes[0].plot(z, profiles["corrected"]["p99"], label="Corrected")
-        axes[0].set_ylabel("P99")
-        axes[1].plot(z, profiles["original"]["mean"], label="Original")
-        axes[1].plot(z, profiles["corrected"]["mean"], label="Corrected")
-        axes[1].set_ylabel("Mean")
-        axes[2].plot(z, report["observed_profile"], label="Observed reference")
-        axes[2].plot(z, report["smoothed_profile"], label="Smoothed reference")
-        axes[2].set_ylabel(f"P{report['options']['percentile']:g}")
-        axes[3].plot(z, report["gain"], label="Multiplicative gain")
-        axes[3].set_ylabel("Gain")
-        axes[3].set_xlabel("Z position (µm)")
-        for axis in axes:
-            axis.grid(alpha=0.25)
-            axis.legend()
-        figure.suptitle(
-            f"{channel_name}\n{report['diagnostic_scope']}; "
-            "P99 diagnostics are distinct from the correction reference percentile"
-        )
-        figure.tight_layout()
-        canvas = FigureCanvasQTAgg(figure)
-        layout.addWidget(NavigationToolbar2QT(canvas, self))
-        layout.addWidget(canvas)
-        note = QLabel(
-            "Plane indexes are retained in the report; the horizontal axis uses "
-            "calibrated Z positions. Artificial polygon-crop fill is excluded."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
 
 
 class ZCorrectionController(QObject):
@@ -195,10 +146,10 @@ class ZCorrectionController(QObject):
         self.panel = panel
         self.preview_layer = None
         self.preview_channel_index = None
+        self.preview_layers = {}
         self._thread = None
         self._worker = None
         self._job_fingerprint = None
-        self._dialogs = []
         panel.calculate_requested.connect(self.calculate)
         panel.apply_requested.connect(self.apply)
         panel.reset_selected_requested.connect(self.reset_selected)
@@ -255,7 +206,7 @@ class ZCorrectionController(QObject):
         channel = self._channel(channel_index)
         self._status(f"Z correction {done}/{total}: {channel.name}")
 
-    def _calculation_succeeded(self, reports, preview, preview_index: int) -> None:
+    def _calculation_succeeded(self, reports, previews, preview_index: int) -> None:
         options = {index: report["options"] for index, report in reports.items()}
         if self._job_fingerprint != self._fingerprint(options):
             self._calculation_failed(
@@ -281,30 +232,34 @@ class ZCorrectionController(QObject):
                 index, report["options"], report
             )
             self.panel.set_channel_state(index, "Preview ready")
-        self._set_preview(preview_index, preview)
+        self._set_previews(previews, preview_index)
         self.show_results(preview_index)
         self._status(
             f"Z-correction preview ready for {len(reports)} channel(s)."
         )
 
-    def _set_preview(self, channel_index: int, data) -> None:
+    def _set_previews(self, previews: dict[int, np.ndarray], inspected_index: int) -> None:
         self.remove_preview()
-        channel = self._channel(channel_index)
         spacing = tuple(self.project_state.voxel_spacing_zyx_um)
         offset_y, offset_x = self.project_state.working_offset_yx
-        self.preview_layer = self.viewer.add_image(
-            data,
-            name=f"Z-corrected preview · {channel.name}",
-            colormap=channel.colormap,
-            scale=spacing,
-            translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
-            units=("µm", "µm", "µm"),
-            metadata={
-                "nucytoseg_z_correction_preview": True,
-                "channel_index": int(channel_index),
-            },
-        )
-        self.preview_channel_index = int(channel_index)
+        for channel_index, data in previews.items():
+            channel = self._channel(channel_index)
+            layer = self.viewer.add_image(
+                data,
+                name=f"Z-corrected preview · {channel.name}",
+                colormap=channel.colormap,
+                blending="additive",
+                scale=spacing,
+                translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
+                units=("µm", "µm", "µm"),
+                metadata={
+                    "nucytoseg_z_correction_preview": True,
+                    "channel_index": int(channel_index),
+                },
+            )
+            self.preview_layers[int(channel_index)] = layer
+        self.preview_channel_index = int(inspected_index)
+        self.preview_layer = self.preview_layers.get(self.preview_channel_index)
 
     def _calculation_failed(self, message: str) -> None:
         self._status(f"Z correction failed: {message}")
@@ -356,8 +311,7 @@ class ZCorrectionController(QObject):
         if index in self.project_state.z_correction_reports:
             self.project_state.invalidate_z_correction(index)
             self.panel.set_channel_state(index, "Outdated settings")
-            if self.preview_channel_index == index:
-                self.remove_preview()
+            self.remove_preview(index)
             self._status(
                 f"{self._channel(index).name} settings changed; recalculate its preview."
             )
@@ -376,8 +330,8 @@ class ZCorrectionController(QObject):
         self.panel.reset_channel_controls(indexes)
         for index in indexes:
             self.panel.set_channel_state(index, "No correction")
-        if self.preview_channel_index in indexes:
-            self.remove_preview()
+        for index in indexes:
+            self.remove_preview(index)
         self._status("Selected Z corrections reset.")
         self._refresh_results()
 
@@ -394,6 +348,7 @@ class ZCorrectionController(QObject):
             self.panel.results.set_results(
                 f"{self._channel(index).name}: no current correction report."
             )
+            self.panel.clear_profiles()
             return
         options = report["options"]
         observed = np.asarray(
@@ -426,12 +381,19 @@ class ZCorrectionController(QObject):
             )
         )
         self.panel.set_results(index, text)
+        self.panel.set_profiles(
+            self._channel(index).name,
+            report,
+            self.project_state.voxel_spacing_zyx_um[0],
+        )
 
     def inspect_channel(self, channel_index: int) -> None:
         index = int(channel_index)
         self.show_results(index)
-        if self.preview_channel_index is not None and self.preview_channel_index != index:
-            self.remove_preview()
+        if index in self.preview_layers:
+            self.preview_channel_index = index
+            self.preview_layer = self.preview_layers[index]
+        elif self.preview_layers:
             self._status(
                 f"Inspecting {self._channel(index).name}. Recalculate to create its "
                 "corrected image preview."
@@ -453,30 +415,31 @@ class ZCorrectionController(QObject):
                 "The diagnostic zero-pixel option changed. Recalculate before plotting."
             )
             return False
-        dialog = ZProfileDialog(
+        self.panel.set_profiles(
             self._channel(index).name,
             report,
             self.project_state.voxel_spacing_zyx_um[0],
-            self.panel,
         )
-        self._dialogs.append(dialog)
-        dialog.finished.connect(
-            lambda *_: self._dialogs.remove(dialog) if dialog in self._dialogs else None
-        )
-        dialog.show()
+        self.panel.results.set_expanded(True)
         return True
 
-    def remove_preview(self) -> None:
-        if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
-            self.viewer.layers.remove(self.preview_layer)
-        self.preview_layer = None
-        self.preview_channel_index = None
+    def remove_preview(self, channel_index: int | None = None) -> None:
+        indexes = (
+            tuple(self.preview_layers)
+            if channel_index is None
+            else (int(channel_index),)
+        )
+        for index in indexes:
+            layer = self.preview_layers.pop(index, None)
+            if layer is not None and layer in self.viewer.layers:
+                self.viewer.layers.remove(layer)
+        if self.preview_channel_index not in self.preview_layers:
+            self.preview_channel_index = next(iter(self.preview_layers), None)
+        self.preview_layer = self.preview_layers.get(self.preview_channel_index)
 
     def clear_project(self) -> None:
         self.remove_preview()
-        for dialog in tuple(self._dialogs):
-            dialog.close()
-        self._dialogs.clear()
+        self.panel.clear_profiles()
         self.panel.reset_controls()
 
     def _channel(self, index: int):
