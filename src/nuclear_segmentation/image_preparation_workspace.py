@@ -57,6 +57,7 @@ class ImagePreparationWorker(QObject):
 
 class ImagePreparationController(QObject):
     status_changed = Signal(str)
+    prepared_changed = Signal(object)
 
     def __init__(self, viewer, project_state, panel, parent=None):
         super().__init__(parent)
@@ -69,10 +70,12 @@ class ImagePreparationController(QObject):
         self._thread = None
         self._worker = None
         self._job_fingerprint = None
+        self.fingerprint = None
         panel.prepare_requested.connect(self.prepare)
         panel.clear_requested.connect(self.clear_previews)
         panel.settings_changed.connect(self.invalidate)
         project_state.channels_changed.connect(self._sync_channel_names)
+        project_state.calibration_changed.connect(self.invalidate)
 
     @property
     def busy(self) -> bool:
@@ -155,6 +158,7 @@ class ImagePreparationController(QObject):
         spacing = tuple(self.project_state.voxel_spacing_zyx_um)
         offset_y, offset_x = self.project_state.working_offset_yx
         self.prepared_channels = payload["prepared"]
+        self.fingerprint = deepcopy(fingerprint)
         self.provenance = {}
         result_lines = []
         for index, data in self.prepared_channels.items():
@@ -206,6 +210,7 @@ class ImagePreparationController(QObject):
             )
         self.panel.set_results("\n".join(result_lines))
         self.panel.set_preview_available(True)
+        self.prepared_changed.emit(tuple(self.prepared_channels))
         self._status(f"Prepared previews ready for {len(self.prepared_channels)} channel(s).")
 
     def _failed(self, message: str) -> None:
@@ -225,8 +230,10 @@ class ImagePreparationController(QObject):
         self.preview_layers.clear()
         self.prepared_channels.clear()
         self.provenance.clear()
+        self.fingerprint = None
         self.panel.set_preview_available(False)
         self.panel.set_results("No prepared channels.")
+        self.prepared_changed.emit(())
         if status:
             self._status("Prepared image previews cleared.")
 
@@ -238,6 +245,15 @@ class ImagePreparationController(QObject):
     def clear_project(self) -> None:
         self.clear_previews(status=False)
         self.panel.reset_controls()
+
+    def is_current(self) -> bool:
+        if self.fingerprint is None or not self.prepared_channels:
+            return False
+        return self.fingerprint == preparation_fingerprint(
+            self.project_state,
+            self.fingerprint["routes"],
+            self.fingerprint["options"],
+        )
 
     def _sync_channel_names(self, channels) -> None:
         """Keep stable-index previews/provenance aligned with channel renaming."""
@@ -268,3 +284,4 @@ class ImagePreparationController(QObject):
         self.panel.clear_requested.disconnect(self.clear_previews)
         self.panel.settings_changed.disconnect(self.invalidate)
         self.project_state.channels_changed.disconnect(self._sync_channel_names)
+        self.project_state.calibration_changed.disconnect(self.invalidate)

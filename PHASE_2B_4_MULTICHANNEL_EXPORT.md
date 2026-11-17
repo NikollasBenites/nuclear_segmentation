@@ -92,13 +92,54 @@ ends Shapes editing and selects a compatible 3D Image before a 3D transition,
 and validates that crop/ROI vertices are strictly `N×2`. No napari internals,
 stored vertices, ROI rasterization, or crop mathematics were changed.
 
+## Stage 2B.4.3 — calibrated TIFF export integration
+
+The Export workflow now contains an application-owned **Multichannel TIFF
+Export** page instead of a placeholder. It consumes only current prepared-channel
+arrays and their Stage 2B.4.2 provenance. Channels can be checked independently
+and reordered by drag-and-drop or Move Up/Down controls. The selected row order
+is the TIFF channel order.
+
+The defaults are OME-TIFF and uint16 for SyGlass/proofreading workflows. ImageJ
+TIFF and float32 remain explicit alternatives. The adapter calls the existing
+`image_export.export_images()` implementation without changing its mathematics:
+
+- uint16 uses one zero-anchored mapping from zero to the whole-volume maximum
+  per channel, never a per-plane scale;
+- all-zero channels remain zero;
+- negative uint16 inputs are rejected;
+- float32 retains the selected prepared intensity scale;
+- OME is written as calibrated CZYX and ImageJ as calibrated ZCYX;
+- planes are generated incrementally instead of allocating a second converted
+  multichannel array;
+- standard TIFF versus BigTIFF and ImageJ size limits retain existing behavior.
+
+The export runs outside the GUI thread. Project replacement, project closure,
+application shutdown, and conflicting preprocessing controls are blocked while
+the writer owns the prepared arrays. Success is reported only after the TIFF and
+JSON sidecar are complete. Existing-file and original-source overwrite
+protection are preserved.
+
+Preparation fingerprints now include source/series identity, working shape and
+offset, ROI digest, routes, correction options, normalization options, and voxel
+spacing. Missing or outdated preparation is rejected before export. Calibration
+changes invalidate prepared layers. Channel names are resolved from stable
+indexes at export time.
+
+The JSON channel records preserve processing order, original/working shapes,
+crop and ROI identity, Z-correction report, normalization limits and clipping,
+input/output ranges, calibration, requested channel position, output type/format,
+and UTC request timestamp. The exporter continues recording its validated TIFF
+axes, conversion formula, channel names, and `display_settings_applied: false`.
+Brightness, contrast, gamma, opacity, visibility, and colormap never affect the
+arrays supplied to the writer.
+
 ## Pending stages
 
-- Stage 2B.4.3: calibrated OME/ImageJ TIFF export adapter and JSON provenance.
 - Stage 2B.4.4: final regression, memory review, and complete native checklist.
 
 No Cellpose inference, LIF reader change, segmentation-result schema change, or
-SyGlass compatibility claim is part of Stages 2B.4.1–2B.4.2.
+SyGlass compatibility claim is part of Stages 2B.4.1–2B.4.3.
 
 ## Automated validation
 
@@ -143,3 +184,24 @@ validation have not been performed by the automated headless environment.
 9. Rename a channel and confirm its prepared preview remains associated with the
    same index.
 10. Clear prepared previews and confirm Z-correction and source layers remain.
+
+## Native macOS and SyGlass check for Stage 2B.4.3
+
+1. Prepare at least four channels with mixed processing routes.
+2. Open Export and verify OME-TIFF and Uint16 are the defaults.
+3. Reorder the channels and exclude one channel.
+4. Export OME-TIFF/uint16 and inspect it in napari or Fiji.
+5. Confirm channel order, Z order, XY orientation, and Z/Y/X calibration.
+6. Confirm an all-zero channel remains zero when included.
+7. Export OME-TIFF/float32 and compare prepared pixel ranges.
+8. Export ImageJ TIFF and inspect its composite channel order and calibration.
+9. Change preview contrast, gamma, opacity, visibility, and colormap; export again
+   and confirm grayscale TIFF pixel values are unchanged.
+10. Inspect the JSON sidecar for channel routes, limits, correction records,
+    output order, conversion method, and `display_settings_applied: false`.
+11. Attempt to select the original source path and confirm overwrite is refused.
+12. Change preparation settings and confirm stale prepared data cannot be exported.
+13. Open the uint16 OME-TIFF in SyGlass and assess proofreading behavior.
+
+Native SyGlass compatibility is not claimed until this checklist is completed by
+the user on macOS.

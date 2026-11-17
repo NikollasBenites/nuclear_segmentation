@@ -7,6 +7,7 @@ from qtpy.QtWidgets import QLabel, QScrollArea, QStackedWidget, QVBoxLayout, QWi
 from .workflow_navigation import WORKFLOWS
 from .project_panel import ProjectPanel
 from .preprocessing_panel import PreprocessingPanel
+from .image_export_panel import ImageExportPanel
 
 
 SECTIONS = {
@@ -54,6 +55,14 @@ class ContextPanel(QWidget):
                 self._indexes[workflow.key] = self.stack.addWidget(
                     preprocessing_scroll
                 )
+                continue
+            if workflow.key == "export":
+                self.export_page = ImageExportPanel()
+                export_scroll = QScrollArea()
+                export_scroll.setWidgetResizable(True)
+                export_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                export_scroll.setWidget(self.export_page)
+                self._indexes[workflow.key] = self.stack.addWidget(export_scroll)
                 continue
             page = QWidget()
             page_layout = QVBoxLayout(page)

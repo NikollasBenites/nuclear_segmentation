@@ -23,6 +23,7 @@ from .crop_workspace import CropWorkspaceController
 from .image_import import TiffImportWorker, inspect_tiff
 from .image_display_panel import ImageDisplayPanel
 from .image_preparation_workspace import ImagePreparationController
+from .image_export_workspace import ImageExportController
 from .import_loading import ImportLoadingDialog
 from .layer_panel import LayerPanel
 from .lif_import import LifEnumerationWorker, LifImportWorker
@@ -126,6 +127,14 @@ class DesktopWindow(QMainWindow):
             self,
         )
         self.image_preparation.status_changed.connect(self.statusBar().showMessage)
+        self.image_export = ImageExportController(
+            self.project_state,
+            self.image_preparation,
+            self.context_panel.export_page,
+            self.context_panel.preprocessing_page,
+            self,
+        )
+        self.image_export.status_changed.connect(self.statusBar().showMessage)
         self.z_correction.correction_applied.connect(self.normalization.invalidate)
         self.project_state.channels_changed.connect(
             lambda channels: self.normalization.invalidate()
@@ -452,6 +461,7 @@ class DesktopWindow(QMainWindow):
             or self.normalization.busy
             or self.z_correction.busy
             or self.image_preparation.busy
+            or self.image_export.busy
         ):
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before "
@@ -468,6 +478,7 @@ class DesktopWindow(QMainWindow):
         self.normalization.clear_project()
         self.z_correction.clear_project()
         self.image_preparation.clear_project()
+        self.image_export.clear_project()
         self.crop_workspace.clear_workspace_for_new_project()
         self._disconnect_channel_layers()
         self.embedding.viewer.layers.clear()
@@ -487,9 +498,10 @@ class DesktopWindow(QMainWindow):
         if self._import_thread is not None:
             self.statusBar().showMessage("An image import is already running", 4000)
             return False
-        if self.crop_workspace.busy:
+        if self.crop_workspace.busy or self.image_export.busy:
             self.statusBar().showMessage(
-                "Wait for projection generation to finish before opening another image",
+                "Wait for active preprocessing or image export to finish before "
+                "opening another image",
                 5000,
             )
             return False
@@ -690,6 +702,7 @@ class DesktopWindow(QMainWindow):
         self.normalization.clear_project()
         self.z_correction.clear_project()
         self.image_preparation.clear_project()
+        self.image_export.clear_project()
         for layer in old_layers:
             if layer in viewer.layers:
                 viewer.layers.remove(layer)
@@ -1036,6 +1049,7 @@ class DesktopWindow(QMainWindow):
             or self.crop_workspace.busy
             or self.z_correction.busy
             or self.image_preparation.busy
+            or self.image_export.busy
         ):
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before exiting."
@@ -1051,6 +1065,7 @@ class DesktopWindow(QMainWindow):
             self.normalization.dispose()
             self.z_correction.dispose()
             self.image_preparation.dispose()
+            self.image_export.dispose()
             self.crop_workspace.dispose()
             self._disconnect_channel_layers()
             self.context_panel.project_page.channel_panel.dispose()

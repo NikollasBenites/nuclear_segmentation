@@ -158,6 +158,11 @@ def preparation_fingerprint(project_state, routes: dict[int, str], options: dict
         "series_index": None if source is None else int(source.series_index),
         "working_shape_czyx": None if working is None else list(working.standardized_shape),
         "working_offset_yx": list(project_state.working_offset_yx),
+        "voxel_spacing_zyx_um": (
+            None
+            if project_state.voxel_spacing_zyx_um is None
+            else list(project_state.voxel_spacing_zyx_um)
+        ),
         "valid_roi_sha256": roi_digest,
         "routes": {int(index): str(route) for index, route in routes.items()},
         "z_correction_options": {
