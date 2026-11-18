@@ -105,6 +105,9 @@ class DesktopWindow(QMainWindow):
         self.crop_workspace.working_dataset_changed.connect(
             self._display_working_dataset
         )
+        self.crop_workspace.working_dataset_changed.connect(
+            self.context_panel.segmentation_page.refresh
+        )
         self.crop_workspace.status_changed.connect(self.statusBar().showMessage)
         self.normalization = NormalizationController(
             self.embedding.viewer,
@@ -1070,6 +1073,7 @@ class DesktopWindow(QMainWindow):
             self._disconnect_channel_layers()
             self.context_panel.project_page.channel_panel.dispose()
             self.context_panel.preprocessing_page.dispose()
+            self.context_panel.segmentation_page.dispose()
             self.layer_panel.dispose()
             self.image_display_panel.dispose()
             self.viewer_toolbar.dispose()

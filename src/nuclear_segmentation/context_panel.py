@@ -8,6 +8,7 @@ from .workflow_navigation import WORKFLOWS
 from .project_panel import ProjectPanel
 from .preprocessing_panel import PreprocessingPanel
 from .image_export_panel import ImageExportPanel
+from .segmentation_panel import SegmentationPanel
 
 
 SECTIONS = {
@@ -54,6 +55,16 @@ class ContextPanel(QWidget):
                 preprocessing_scroll.setWidget(self.preprocessing_page)
                 self._indexes[workflow.key] = self.stack.addWidget(
                     preprocessing_scroll
+                )
+                continue
+            if workflow.key == "segmentation":
+                self.segmentation_page = SegmentationPanel(project_state)
+                segmentation_scroll = QScrollArea()
+                segmentation_scroll.setWidgetResizable(True)
+                segmentation_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                segmentation_scroll.setWidget(self.segmentation_page)
+                self._indexes[workflow.key] = self.stack.addWidget(
+                    segmentation_scroll
                 )
                 continue
             if workflow.key == "export":
