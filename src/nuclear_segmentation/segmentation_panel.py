@@ -202,6 +202,12 @@ class SegmentationPanel(QWidget):
             raise ValueError("Cell probability threshold must be finite.")
         return validate_config(config)
 
+    def prepare_scientific_input(self):
+        """Validate and route current in-memory data without running Cellpose."""
+        from .scientific_input import prepare_scientific_input
+
+        return prepare_scientific_input(self.project_state, self.scientific_config())
+
     def refresh(self, *args):
         state = self.project_state
         dataset = state.working_dataset
@@ -250,7 +256,11 @@ class SegmentationPanel(QWidget):
         if normalization.get("mode") not in {None, "cellpose_default", "disabled"} and not state.normalization_is_current:
             missing.append("apply current Cellpose normalization settings")
         try:
-            self.scientific_config()
+            config = self.scientific_config()
+            if dataset is not None:
+                from .scientific_input import validate_scientific_input
+
+                validate_scientific_input(state, config)
         except (TypeError, ValueError) as error:
             missing.append(str(error))
         if missing:
