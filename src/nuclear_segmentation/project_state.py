@@ -69,6 +69,7 @@ class ProjectState(QObject):
     normalization_roi_changed = Signal(object)
     z_correction_changed = Signal(object)
     segmentation_result_changed = Signal(object, bool)
+    filtering_result_changed = Signal(object, bool)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -95,6 +96,8 @@ class ProjectState(QObject):
         self.z_correction_applied: set[int] = set()
         self.segmentation_result: dict[str, Any] | None = None
         self.segmentation_is_current = False
+        self.filtering_result: dict[str, Any] | None = None
+        self.filtering_is_current = False
 
     @property
     def dataset_ready(self) -> bool:
@@ -425,6 +428,7 @@ class ProjectState(QObject):
         self.channels_changed.emit(tuple(self.channels))
 
     def set_segmentation_result(self, result: dict[str, Any]) -> None:
+        self.clear_filtering_result()
         masks = np.asarray(result.get("masks"))
         if masks.ndim != 3 or not masks.size or int(masks.max()) == 0:
             raise ValueError("Segmentation results require a nonempty ZYX label mask.")
@@ -439,13 +443,36 @@ class ProjectState(QObject):
         if self.segmentation_result is None or not self.segmentation_is_current:
             return
         self.segmentation_is_current = False
+        self.invalidate_filtering()
         self.segmentation_result_changed.emit(self.segmentation_result, False)
 
     def clear_segmentation_result(self, *, emit: bool = True) -> None:
+        self.clear_filtering_result(emit=emit)
         self.segmentation_result = None
         self.segmentation_is_current = False
         if emit:
             self.segmentation_result_changed.emit(None, False)
+
+    def set_filtering_result(self, result: dict[str, Any]) -> None:
+        stored = dict(result)
+        filtered = np.asarray(stored["filtered_masks"])
+        filtered.setflags(write=False)
+        stored["filtered_masks"] = filtered
+        self.filtering_result = stored
+        self.filtering_is_current = True
+        self.filtering_result_changed.emit(stored, True)
+
+    def invalidate_filtering(self) -> None:
+        if self.filtering_result is None or not self.filtering_is_current:
+            return
+        self.filtering_is_current = False
+        self.filtering_result_changed.emit(self.filtering_result, False)
+
+    def clear_filtering_result(self, *, emit: bool = True) -> None:
+        self.filtering_result = None
+        self.filtering_is_current = False
+        if emit:
+            self.filtering_result_changed.emit(None, False)
 
     @property
     def segmentation_channel(self) -> str | None:

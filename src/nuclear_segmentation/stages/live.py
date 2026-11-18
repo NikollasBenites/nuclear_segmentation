@@ -197,95 +197,29 @@ def current_filter_settings():
     }
 
 
+from nuclear_segmentation.filtering import (
+    apply_filter_settings as _apply_filter_settings,
+    calculate_perinuclear_filter_keep as _calculate_perinuclear_filter_keep,
+)
+
+
 def calculate_perinuclear_filter_keep(settings, properties=None):
-    properties = filter_properties if properties is None else properties
-    conditions = []
-    for marker_filter in settings["perinuclear_filters"].values():
-        conditions.append(
-            properties[marker_filter["column"]].fillna(0.0)
-            >= marker_filter["minimum_positive_fraction"]
-        )
-    if not conditions:
-        return pd.Series(True, index=properties.index)
-    condition_table = pd.concat(conditions, axis=1)
-    if settings["perinuclear_combination"] == "all":
-        return condition_table.all(axis=1)
-    if settings["perinuclear_combination"] == "any":
-        return condition_table.any(axis=1)
-    raise ValueError('Perinuclear combination must be "any" or "all".')
+    """Compatibility wrapper retained for the legacy export stage."""
+    return _calculate_perinuclear_filter_keep(
+        filter_properties if properties is None else properties,
+        settings,
+    )
 
 
 def apply_filter_settings(settings):
-    z_properties = calculate_z_guard_properties(
-        filter_properties,
-        first_tissue_z=settings["first_tissue_z"],
-        last_tissue_z=settings["last_tissue_z"],
-        guard_um=settings["z_guard_um"],
-        guard_mode=settings["z_guard_mode"],
-        z_spacing_um=z_spacing_um,
-        max_z_index=max_z_index,
+    global filter_properties
+    filter_properties, keep = _apply_filter_settings(
+        filter_properties, masks, mntb_roi, settings, z_spacing_um,
+        manual_review=manual_review,
     )
-    for column in z_properties.columns:
-        filter_properties[column] = z_properties[column]
-        mask_properties[column] = z_properties[column]
-
-    morphology_keep = (
-        (filter_properties["volume_um3"] >= settings["minimum_volume_um3"])
-        & (filter_properties["sphericity"] >= settings["minimum_sphericity"])
-        & (~filter_properties["excluded_by_z_guard"])
-    )
-    perinuclear_keep = calculate_perinuclear_filter_keep(settings)
-
-    intensity_conditions = []
-    for name, intensity_filter in settings["intensity_filters"].items():
-        if intensity_filter["minimum"] > intensity_filter["maximum"]:
-            raise ValueError(f"{name} minimum intensity exceeds its maximum.")
-        intensity_conditions.append(
-            filter_properties[intensity_filter["column"]].between(
-                intensity_filter["minimum"],
-                intensity_filter["maximum"],
-                inclusive="both",
-            )
-        )
-    if not intensity_conditions:
-        intensity_keep = pd.Series(True, index=filter_properties.index)
-    elif settings["intensity_combination"] == "all":
-        intensity_keep = pd.concat(intensity_conditions, axis=1).all(axis=1)
-    else:
-        intensity_keep = pd.concat(intensity_conditions, axis=1).any(axis=1)
-
-    inside, in_z, counting_z = sampling_membership(
-        filter_properties, mntb_roi, settings, z_spacing_um)
-    # Keep centroid diagnostics, but do not use centroid Z as a second gate.
-    _, sampling_z = density_z_planes(settings, masks.shape[0], z_spacing_um)
-    z_valid = (roi_centroid_z >= 0) & (roi_centroid_z < masks.shape[0])
-    centroid_in_z = np.zeros(len(filter_properties), dtype=bool)
-    centroid_in_z[z_valid] = sampling_z[roi_centroid_z[z_valid]]
-    filter_properties["centroid_in_mntb_roi"] = roi_inside
-    filter_properties["centroid_in_sampling_z"] = centroid_in_z
-    filter_properties["counting_z_px"] = counting_z
-    filter_properties["counting_point_in_roi"] = inside
-    filter_properties["counting_point_in_sampling_z"] = in_z
-    filter_properties["excluded_by_sampling_roi"] = ~(inside & in_z)
-    eligible = (~filter_properties['excluded_by_z_guard']) & inside & in_z
-    automatic = morphology_keep & perinuclear_keep & intensity_keep & eligible
-    filter_properties['automatic_keep'] = automatic
-    reasons = []
-    for label, row in filter_properties.iterrows():
-        failed = []
-        if not row['volume_um3'] >= settings['minimum_volume_um3']: failed.append('volume')
-        if not row['sphericity'] >= settings['minimum_sphericity']: failed.append('sphericity')
-        if not perinuclear_keep.loc[label]: failed.append('shell association')
-        if not intensity_keep.loc[label]: failed.append('intensity')
-        if row['excluded_by_z_guard']: failed.append('Z guard')
-        if row['excluded_by_sampling_roi']: failed.append('ROI / counting Z')
-        reasons.append('; '.join(failed))
-    filter_properties['automatic_failure_reasons'] = reasons
-    review = manual_review.decisions
-    filter_properties['manual_decision'] = [review.get(int(i), {}).get('decision', 'automatic') for i in filter_properties.index]
-    filter_properties['manual_reason'] = [review.get(int(i), {}).get('reason', '') for i in filter_properties.index]
-    filter_properties['excluded_manually'] = filter_properties['manual_decision'] == 'exclude'
-    return manual_review.apply(automatic, eligible)
+    for column in filter_properties.columns:
+        mask_properties[column] = filter_properties[column]
+    return keep
 
 
 def refresh_live_filter(*_):

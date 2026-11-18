@@ -34,6 +34,7 @@ from .selected_mask_panel import SelectedMaskPanel
 from .project_state import ProjectState
 from .series_browser import ImageSeriesBrowser
 from .segmentation_execution import SegmentationController
+from .filtering_workspace import FilteringController
 from .viewer_toolbar import ViewerToolbar
 from .workflow_navigation import WorkflowNavigation
 from .ui_icons import icon
@@ -158,6 +159,16 @@ class DesktopWindow(QMainWindow):
             parent=self,
         )
         self.segmentation.status_changed.connect(self.statusBar().showMessage)
+        self.filtering = FilteringController(
+            self.embedding.viewer,
+            self.project_state,
+            self.context_panel.mask_review_page,
+            self.context_panel.segmentation_page.scientific_config,
+            self,
+            conflict_operations=(self.segmentation,),
+        )
+        self.segmentation.conflict_operations += (self.filtering,)
+        self.filtering.status_changed.connect(self.statusBar().showMessage)
         self.z_correction.correction_applied.connect(self.normalization.invalidate)
         self.project_state.channels_changed.connect(
             lambda channels: self.normalization.invalidate()
@@ -488,6 +499,7 @@ class DesktopWindow(QMainWindow):
             or self.image_preparation.busy
             or self.image_export.busy
             or self.segmentation.busy
+            or self.filtering.busy
         ):
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before "
@@ -507,6 +519,7 @@ class DesktopWindow(QMainWindow):
         self.image_preparation.clear_project()
         self.image_export.clear_project()
         self.segmentation.clear_project()
+        self.filtering.clear_project()
         self.crop_workspace.clear_workspace_for_new_project()
         self._disconnect_channel_layers()
         self.embedding.viewer.layers.clear()
@@ -912,9 +925,10 @@ class DesktopWindow(QMainWindow):
     def _show_selected_review_mask(self) -> None:
         layer = self.mask_selection.selected_layer
         mask_id = self.mask_selection.selected_mask_id
-        if layer is None or mask_id is None or layer is not self.segmentation.result_layer:
+        valid_layers = (self.segmentation.result_layer, self.filtering.filtered_layer)
+        if layer is None or mask_id is None or layer not in valid_layers:
             self.context_panel.mask_review_page.set_visualization_status(
-                "Select a raw segmentation mask with Review / Select first."
+                "Select a raw or live filtered mask with Review / Select first."
             )
             return
         layer.selected_label = int(mask_id)
@@ -1115,6 +1129,7 @@ class DesktopWindow(QMainWindow):
             or self.image_preparation.busy
             or self.image_export.busy
             or self.segmentation.busy
+            or self.filtering.busy
         ):
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before exiting."
@@ -1132,6 +1147,7 @@ class DesktopWindow(QMainWindow):
             self.image_preparation.dispose()
             self.image_export.dispose()
             self.segmentation.dispose()
+            self.filtering.dispose()
             self.crop_workspace.dispose()
             self._disconnect_channel_layers()
             self.context_panel.project_page.channel_panel.dispose()
