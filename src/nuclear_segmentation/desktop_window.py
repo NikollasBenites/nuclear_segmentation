@@ -200,9 +200,11 @@ class DesktopWindow(QMainWindow):
             self.normalization.prepare_display_change
         )
         self.mask_selection.status_changed.connect(self.statusBar().showMessage)
-        self.mask_selection.selection_changed.connect(
-            self.selected_mask_panel.set_selection
-        )
+        self.mask_selection.selection_changed.connect(self._mask_selection_changed)
+        review_panel = self.context_panel.mask_review_page
+        review_panel.show_all_requested.connect(self._show_all_review_masks)
+        review_panel.show_selected_requested.connect(self._show_selected_review_mask)
+        review_panel.clear_selection_requested.connect(self._clear_review_selection)
         self.layer_panel.active_layer_changed.connect(self._update_active_layer_status)
         self.context_panel.project_page.open_requested.connect(self.open_image_dialog)
         self.context_panel.project_page.load_pending_requested.connect(
@@ -499,6 +501,7 @@ class DesktopWindow(QMainWindow):
             return False
         self.mask_selection.clear_selection()
         self.selected_mask_panel.set_selection(None, None)
+        self.context_panel.mask_review_page.set_selection(None, None)
         self.normalization.clear_project()
         self.z_correction.clear_project()
         self.image_preparation.clear_project()
@@ -889,6 +892,42 @@ class DesktopWindow(QMainWindow):
         steps = self.embedding.viewer.dims.current_step
         self.z_status.setText(f"Z: {steps[0]}" if steps else "Z: —")
 
+    def _mask_selection_changed(self, layer, mask_id) -> None:
+        self.selected_mask_panel.set_selection(layer, mask_id)
+        self.context_panel.mask_review_page.set_selection(layer, mask_id)
+
+    def _show_all_review_masks(self) -> None:
+        layer = self.segmentation.result_layer
+        if layer is None:
+            self.context_panel.mask_review_page.set_visualization_status(
+                "No segmentation mask layer is available."
+            )
+            return
+        layer.show_selected_label = False
+        layer.visible = True
+        self.context_panel.mask_review_page.set_visualization_status(
+            "Showing all raw segmentation masks."
+        )
+
+    def _show_selected_review_mask(self) -> None:
+        layer = self.mask_selection.selected_layer
+        mask_id = self.mask_selection.selected_mask_id
+        if layer is None or mask_id is None or layer is not self.segmentation.result_layer:
+            self.context_panel.mask_review_page.set_visualization_status(
+                "Select a raw segmentation mask with Review / Select first."
+            )
+            return
+        layer.selected_label = int(mask_id)
+        layer.show_selected_label = True
+        layer.visible = True
+        self.context_panel.mask_review_page.set_visualization_status(
+            f"Showing only Mask ID {int(mask_id)}."
+        )
+
+    def _clear_review_selection(self) -> None:
+        self.mask_selection.clear_selection()
+        self._show_all_review_masks()
+
     def set_workflow(self, key: str) -> None:
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
@@ -1098,6 +1137,7 @@ class DesktopWindow(QMainWindow):
             self.context_panel.project_page.channel_panel.dispose()
             self.context_panel.preprocessing_page.dispose()
             self.context_panel.segmentation_page.dispose()
+            self.context_panel.mask_review_page.dispose()
             self.layer_panel.dispose()
             self.image_display_panel.dispose()
             self.viewer_toolbar.dispose()

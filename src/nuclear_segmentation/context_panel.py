@@ -9,6 +9,7 @@ from .project_panel import ProjectPanel
 from .preprocessing_panel import PreprocessingPanel
 from .image_export_panel import ImageExportPanel
 from .segmentation_panel import SegmentationPanel
+from .mask_review_panel import MaskReviewPanel
 
 
 SECTIONS = {
@@ -69,6 +70,17 @@ class ContextPanel(QWidget):
                 self._indexes[workflow.key] = self.stack.addWidget(
                     segmentation_scroll
                 )
+                continue
+            if workflow.key == "mask_review":
+                self.mask_review_page = MaskReviewPanel(project_state)
+                review_scroll = QScrollArea()
+                review_scroll.setWidgetResizable(True)
+                review_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                review_scroll.setHorizontalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                )
+                review_scroll.setWidget(self.mask_review_page)
+                self._indexes[workflow.key] = self.stack.addWidget(review_scroll)
                 continue
             if workflow.key == "export":
                 self.export_page = ImageExportPanel()

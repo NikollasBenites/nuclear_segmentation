@@ -123,6 +123,11 @@ class SegmentationController(QObject):
     def busy(self) -> bool:
         return self._thread is not None
 
+    @property
+    def result_layer(self):
+        layer = self._result_layer
+        return layer if layer is not None and layer in self.viewer.layers else None
+
     def run(self) -> bool:
         if self.busy:
             self._status("Cellpose segmentation is already running.")
