@@ -126,6 +126,15 @@ spacing. Missing or outdated preparation is rejected before export. Calibration
 changes invalidate prepared layers. Channel names are resolved from stable
 indexes at export time.
 
+Changing a Multichannel Image Preparation processing setting now marks existing
+preview layers as **outdated** instead of deleting them. The unchanged preview
+pixels remain available for visual comparison, but the Export workflow is
+cleared and TIFF export remains blocked until preview regeneration succeeds.
+Successful regeneration replaces the outdated layers; failed regeneration
+leaves them visible and still ineligible for export. Explicit preview clearing,
+project closure, and spatially incompatible working-image changes continue to
+remove the layers.
+
 The JSON channel records preserve processing order, original/working shapes,
 crop and ROI identity, Z-correction report, normalization limits and clipping,
 input/output ranges, calibration, requested channel position, output type/format,
@@ -205,3 +214,23 @@ validation have not been performed by the automated headless environment.
 
 Native SyGlass compatibility is not claimed until this checklist is completed by
 the user on macOS.
+
+## Native macOS check for Stage 2B.4.5
+
+1. Open Export with four prepared channels and confirm that each row shows one,
+   and only one, clearly visible checkbox.
+2. Toggle every checkbox, including the first row, with the mouse and Space key;
+   confirm the counter and Export TIFF button follow the checked state.
+3. Select and reorder rows by drag-and-drop and Move Up/Down; confirm selection
+   highlighting does not toggle a checkbox and checked states follow their rows.
+4. Generate prepared previews, change one processing route, and confirm the old
+   layers remain visible with an `Outdated` prefix while Export becomes empty.
+5. Regenerate successfully and confirm the outdated layers are replaced once,
+   without duplicates, and Export becomes available again.
+6. Change settings again, provoke or cancel an unsuccessful regeneration if
+   practical, and confirm the outdated layers remain visible but not exportable.
+7. Use Clear Prepared Previews, change the working crop, and close the project;
+   confirm each operation still removes the relevant preview layers.
+
+The headless tests validate delegate interaction and state transitions, but do
+not claim native macOS Retina rendering or OpenGL validation.

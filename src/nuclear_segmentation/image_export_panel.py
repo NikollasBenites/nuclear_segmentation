@@ -1,8 +1,8 @@
 """Application-owned controls for calibrated prepared-channel TIFF export."""
 from __future__ import annotations
 
-from qtpy.QtCore import QLineF, QRectF, QSize, Qt, Signal
-from qtpy.QtGui import QColor, QIcon, QIconEngine, QPainter, QPen, QPixmap
+from qtpy.QtCore import QEvent, QLineF, QRect, QRectF, QSize, Qt, Signal
+from qtpy.QtGui import QColor, QPainter, QPen
 from qtpy.QtWidgets import (
     QComboBox,
     QGridLayout,
@@ -10,6 +10,8 @@ from qtpy.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -18,65 +20,84 @@ from .collapsible_section import CollapsibleSection
 from .results_panel import ScientificResultsSection
 
 
-class _ExportCheckIconEngine(QIconEngine):
-    """High-contrast vector checkbox that remains visible on selected rows."""
+class _ExportChannelDelegate(QStyledItemDelegate):
+    """Draw and operate one high-contrast checkbox per export channel."""
 
-    def __init__(self, checked: bool):
-        super().__init__()
-        self.checked = bool(checked)
+    _indicator_size = 18
+    _indicator_margin = 6
 
-    def clone(self):
-        return _ExportCheckIconEngine(self.checked)
+    def _indicator_rect(self, rect: QRect) -> QRect:
+        return QRect(
+            rect.left() + self._indicator_margin,
+            rect.top() + (rect.height() - self._indicator_size) // 2,
+            self._indicator_size,
+            self._indicator_size,
+        )
 
-    def pixmap(self, size, mode, state):
-        pixmap = QPixmap(size)
-        pixmap.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(pixmap)
-        self.paint(painter, pixmap.rect(), mode, state)
-        painter.end()
-        return pixmap
-
-    def paint(self, painter: QPainter, rect, mode, state) -> None:
+    def paint(self, painter: QPainter, option, index) -> None:
+        item_option = QStyleOptionViewItem(option)
+        self.initStyleOption(item_option, index)
+        item_option.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        item_option.rect = item_option.rect.adjusted(
+            self._indicator_size + 2 * self._indicator_margin, 0, 0, 0
+        )
+        super().paint(painter, item_option, index)
+        checked = index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked.value
+        box = QRectF(self._indicator_rect(option.rect)).adjusted(1.5, 1.5, -1.5, -1.5)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        side = min(rect.width(), rect.height()) - 4
-        box = QRectF(
-            rect.x() + (rect.width() - side) / 2,
-            rect.y() + (rect.height() - side) / 2,
-            side,
-            side,
-        )
-        border = QColor("#63d9d0" if self.checked else "#a8bbcc")
-        painter.setPen(QPen(border, max(1.5, side / 11)))
-        painter.setBrush(QColor("#2aa6b5") if self.checked else QColor("#08141e"))
-        painter.drawRoundedRect(box, side / 6, side / 6)
-        if self.checked:
+        border = QColor("#63d9d0" if checked else "#b8c8d6")
+        painter.setPen(QPen(border, 2.0))
+        painter.setBrush(QColor("#2aa6b5") if checked else QColor("#08141e"))
+        painter.drawRoundedRect(box, 3.0, 3.0)
+        if checked:
             painter.setPen(
                 QPen(
                     QColor("#06131c"),
-                    max(2.0, side / 7),
+                    2.2,
                     Qt.PenStyle.SolidLine,
                     Qt.PenCapStyle.RoundCap,
                     Qt.PenJoinStyle.RoundJoin,
                 )
             )
             painter.drawLine(QLineF(
-                box.left() + side * 0.22,
-                box.top() + side * 0.53,
-                box.left() + side * 0.43,
-                box.top() + side * 0.74,
+                box.left() + box.width() * 0.22,
+                box.top() + box.height() * 0.53,
+                box.left() + box.width() * 0.43,
+                box.top() + box.height() * 0.74,
             ))
             painter.drawLine(QLineF(
-                box.left() + side * 0.43,
-                box.top() + side * 0.74,
-                box.left() + side * 0.80,
-                box.top() + side * 0.27,
+                box.left() + box.width() * 0.43,
+                box.top() + box.height() * 0.74,
+                box.left() + box.width() * 0.80,
+                box.top() + box.height() * 0.27,
             ))
         painter.restore()
 
+    def editorEvent(self, event, model, option, index) -> bool:
+        if not (index.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return False
+        toggle = (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._indicator_rect(option.rect).contains(event.position().toPoint())
+        ) or (
+            event.type() == QEvent.Type.KeyPress
+            and event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Select)
+        )
+        if not toggle:
+            return False
+        checked = index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked.value
+        return model.setData(
+            index,
+            Qt.CheckState.Unchecked.value if checked else Qt.CheckState.Checked.value,
+            Qt.ItemDataRole.CheckStateRole,
+        )
 
-def _check_icon(checked: bool) -> QIcon:
-    return QIcon(_ExportCheckIconEngine(checked))
+    def sizeHint(self, option, index) -> QSize:
+        size = super().sizeHint(option, index)
+        size.setHeight(max(size.height(), self._indicator_size + 8))
+        return size
 
 
 class ImageExportPanel(QWidget):
@@ -98,9 +119,10 @@ class ImageExportPanel(QWidget):
         note.setWordWrap(True)
         layout.addWidget(note)
         self.channels = QListWidget()
+        self.channels.setObjectName("exportChannelList")
+        self.channels.setItemDelegate(_ExportChannelDelegate(self.channels))
         self.channels.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self.channels.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.channels.setIconSize(QSize(22, 22))
         self.channels.setMinimumHeight(150)
         layout.addWidget(self.channels)
         self.selection_counter = QLabel("0 of 0 channels selected")
@@ -239,7 +261,6 @@ class ImageExportPanel(QWidget):
             current = self.channels.item(row)
             included = current.checkState() == Qt.CheckState.Checked
             checked += int(included)
-            current.setIcon(_check_icon(included))
             current.setToolTip(
                 "Included in TIFF export" if included else "Excluded from TIFF export"
             )

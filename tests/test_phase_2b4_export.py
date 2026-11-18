@@ -8,7 +8,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import tifffile
-from qtpy.QtCore import QSettings, Qt
+from qtpy.QtCore import QModelIndex, QPoint, QSettings, Qt
+from qtpy.QtTest import QTest
 from qtpy.QtWidgets import QApplication, QWidget
 
 from nuclear_segmentation.desktop_window import DesktopWindow
@@ -179,14 +180,12 @@ def test_export_panel_channel_selection_and_order_controls(tmp_path):
     assert panel.selected_channel_order() == []
     assert panel.selection_counter.text() == "0 of 3 channels selected"
     assert not panel.export_button.isEnabled()
-    unchecked_icon_key = panel.channels.item(1).icon().cacheKey()
-    assert not panel.channels.item(1).icon().isNull()
+    assert panel.channels.item(1).icon().isNull()
     assert panel.channels.item(1).toolTip() == "Excluded from TIFF export"
     panel.channels.item(1).setCheckState(Qt.CheckState.Checked)
     assert panel.selected_channel_order() == [1]
     assert panel.selection_counter.text() == "1 of 3 channels selected"
     assert panel.export_button.isEnabled()
-    assert panel.channels.item(1).icon().cacheKey() != unchecked_icon_key
     assert panel.channels.item(1).toolTip() == "Included in TIFF export"
     panel._set_all_checked(True)
     assert panel.selection_counter.text() == "3 of 3 channels selected"
@@ -201,7 +200,7 @@ def test_export_panel_channel_selection_and_order_controls(tmp_path):
     window.close()
 
 
-def test_export_panel_four_visible_vector_checkboxes_and_live_counter():
+def test_export_panel_single_checkbox_mouse_keyboard_and_live_counter():
     qapp = QApplication.instance() or QApplication([])
     panel = ImageExportPanel()
     channels = [SimpleNamespace(index=index, name=f"Channel {index + 1}") for index in range(4)]
@@ -210,26 +209,69 @@ def test_export_panel_four_visible_vector_checkboxes_and_live_counter():
         for index, channel in enumerate(channels)
     }
     panel.set_prepared_channels(channels, provenance)
+    panel.resize(520, 500)
+    panel.show()
+    qapp.processEvents()
     assert panel.selection_counter.text() == "4 of 4 channels selected"
-    checked_keys = []
     for row in range(4):
         item = panel.channels.item(row)
         assert item.checkState() == Qt.CheckState.Checked
-        assert not item.icon().isNull()
-        pixmap = item.icon().pixmap(44, 44)
-        assert not pixmap.isNull()
-        assert any(
-            pixmap.toImage().pixelColor(x, y).alpha() > 0
-            for x in range(pixmap.width())
-            for y in range(pixmap.height())
+        assert item.icon().isNull()
+        rect = panel.channels.visualItemRect(item)
+        indicator = panel.channels.itemDelegate()._indicator_rect(rect)
+        QTest.mouseClick(
+            panel.channels.viewport(), Qt.MouseButton.LeftButton, pos=indicator.center()
         )
-        checked_keys.append(item.icon().cacheKey())
+        assert item.checkState() == Qt.CheckState.Unchecked
+        QTest.mouseClick(
+            panel.channels.viewport(), Qt.MouseButton.LeftButton, pos=indicator.center()
+        )
+        assert item.checkState() == Qt.CheckState.Checked
+    assert panel.selection_counter.text() == "4 of 4 channels selected"
+
+    first = panel.channels.item(0)
+    first_state = first.checkState()
+    first_rect = panel.channels.visualItemRect(first)
+    QTest.mouseClick(
+        panel.channels.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(first_rect.right() - 4, first_rect.center().y()),
+    )
+    assert first.checkState() == first_state
+    panel.channels.setCurrentRow(0)
+    panel.channels.setFocus()
+    QTest.keyClick(panel.channels, Qt.Key.Key_Space)
+    assert first.checkState() == Qt.CheckState.Unchecked
+    QTest.keyClick(panel.channels, Qt.Key.Key_Space)
+    assert first.checkState() == Qt.CheckState.Checked
+
+    states = {
+        int(panel.channels.item(row).data(Qt.ItemDataRole.UserRole)):
+        panel.channels.item(row).checkState()
+        for row in range(4)
+    }
+    assert panel.channels.model().moveRow(QModelIndex(), 0, QModelIndex(), 4)
+    assert {
+        int(panel.channels.item(row).data(Qt.ItemDataRole.UserRole)):
+        panel.channels.item(row).checkState()
+        for row in range(4)
+    } == states
+    panel.channels.setCurrentRow(0)
+    panel._move_current(1)
+    assert {
+        int(panel.channels.item(row).data(Qt.ItemDataRole.UserRole)):
+        panel.channels.item(row).checkState()
+        for row in range(4)
+    } == states
     panel._set_all_checked(False)
     assert panel.selection_counter.text() == "0 of 4 channels selected"
     assert not panel.export_button.isEnabled()
-    assert all(
-        panel.channels.item(row).icon().cacheKey() != checked_keys[row]
-        for row in range(4)
-    )
+    panel._set_all_checked(True)
+    assert panel.selection_counter.text() == "4 of 4 channels selected"
+    panel.set_busy(True)
+    assert not panel.export_button.isEnabled()
+    panel.set_busy(False)
+    assert panel.export_button.isEnabled()
+    panel.hide()
     panel.deleteLater()
     qapp.processEvents()

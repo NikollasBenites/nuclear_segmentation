@@ -145,7 +145,7 @@ def test_z_corrected_normalized_order_is_repeatable_and_non_cumulative():
 
 
 def test_multichannel_preparation_preview_provenance_cleanup_and_display_isolation(
-    qapp, tmp_path
+    qapp, tmp_path, monkeypatch
 ):
     window, original = _window(qapp, tmp_path)
     panel = window.context_panel.preprocessing_page.image_preparation_panel
@@ -184,14 +184,78 @@ def test_multichannel_preparation_preview_provenance_cleanup_and_display_isolati
     window.project_state.update_channel(2, name="Marker B renamed")
     assert "Marker B renamed" in window.image_preparation.preview_layers[2].name
     assert window.image_preparation.provenance[2]["channel_name"] == "Marker B renamed"
+    visible_layer = window.image_preparation.preview_layers[0]
+    visible_layer.visible = False
+    qapp.processEvents()
+    assert visible_layer in window.embedding.viewer.layers
+
+    old_layers = dict(window.image_preparation.preview_layers)
+    old_arrays = {
+        index: np.array(data, copy=True)
+        for index, data in window.image_preparation.prepared_channels.items()
+    }
+    panel.lower.setValue(2.0)
+    qapp.processEvents()
+    assert window.image_preparation.outdated
+    assert not window.image_preparation.is_current()
+    assert window.image_preparation.preview_layers == old_layers
+    assert all(layer in window.embedding.viewer.layers for layer in old_layers.values())
+    assert all(layer.name.startswith("Outdated · ") for layer in old_layers.values())
+    assert all(
+        layer.metadata["nucytoseg_preparation_outdated"]
+        for layer in old_layers.values()
+    )
+    assert "remain visible but are outdated" in panel.status.text()
+    export_panel = window.context_panel.export_page
+    assert export_panel.channels.count() == 0
+    assert not export_panel.export_button.isEnabled()
+    assert not window.image_export.export(
+        tmp_path / "outdated-preparation.ome.tif", [0], "ome", "uint16"
+    )
+    for index, expected in old_arrays.items():
+        np.testing.assert_array_equal(
+            window.image_preparation.prepared_channels[index], expected
+        )
+
+    def fail_preparation(*args, **kwargs):
+        raise ValueError("synthetic regeneration failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "nuclear_segmentation.image_preparation_workspace.prepare_channel",
+            fail_preparation,
+        )
+        assert window.image_preparation.prepare(panel.selected_routes(), panel.options())
+        _wait(qapp, lambda: not window.image_preparation.busy)
+    assert "failed" in panel.status.text().lower()
+    assert window.image_preparation.preview_layers == old_layers
+    assert window.image_preparation.outdated
+
+    assert window.image_preparation.prepare(panel.selected_routes(), panel.options())
+    _wait(qapp, lambda: not window.image_preparation.busy)
+    assert window.image_preparation.is_current()
+    assert not window.image_preparation.outdated
+    assert all(layer not in window.embedding.viewer.layers for layer in old_layers.values())
+    assert len(window.image_preparation.preview_layers) == 3
+    assert all(
+        not layer.metadata["nucytoseg_preparation_outdated"]
+        for layer in window.image_preparation.preview_layers.values()
+    )
+    assert export_panel.channels.count() == 3
+    assert export_panel.export_button.isEnabled()
+
     window.image_preparation.clear_previews()
     assert not window.image_preparation.prepared_channels
     assert not window.image_preparation.preview_layers
     assert 2 in window.project_state.z_correction_reports
     assert window.image_preparation.prepare(panel.selected_routes(), panel.options())
     _wait(qapp, lambda: not window.image_preparation.busy)
-    panel.lower.setValue(2.0)
-    qapp.processEvents()
+    window.image_preparation.invalidate()
+    assert not window.image_preparation.prepared_channels
+    assert not window.image_preparation.preview_layers
+    assert window.image_preparation.prepare(panel.selected_routes(), panel.options())
+    _wait(qapp, lambda: not window.image_preparation.busy)
+    assert window.close_project(confirm=False)
     assert not window.image_preparation.prepared_channels
     assert not window.image_preparation.preview_layers
     window.close()

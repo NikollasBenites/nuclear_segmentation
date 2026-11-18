@@ -76,7 +76,7 @@ class ImageExportController(QObject):
     def refresh_channels(self, *args) -> None:
         self.panel.set_prepared_channels(
             self.project_state.channels,
-            self.preparation.provenance,
+            self.preparation.provenance if self.preparation.is_current() else {},
         )
 
     def choose_path(self, channel_order, file_format: str, pixel_type: str) -> bool:

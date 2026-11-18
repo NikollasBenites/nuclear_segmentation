@@ -71,9 +71,10 @@ class ImagePreparationController(QObject):
         self._worker = None
         self._job_fingerprint = None
         self.fingerprint = None
+        self.outdated = False
         panel.prepare_requested.connect(self.prepare)
         panel.clear_requested.connect(self.clear_previews)
-        panel.settings_changed.connect(self.invalidate)
+        panel.settings_changed.connect(self.invalidate_settings)
         project_state.channels_changed.connect(self._sync_channel_names)
         project_state.calibration_changed.connect(self.invalidate)
 
@@ -122,7 +123,8 @@ class ImagePreparationController(QObject):
         except ValueError as error:
             self._status(str(error))
             return False
-        self.clear_previews(status=False)
+        if self.prepared_channels and fingerprint != self.fingerprint:
+            self._mark_outdated()
         data = {index: dataset.data_czyx[index] for index in routes}
         worker = ImagePreparationWorker(data, plans, options, valid_mask, fingerprint)
         thread = QThread(self)
@@ -157,9 +159,14 @@ class ImagePreparationController(QObject):
         source = self.project_state.original_dataset
         spacing = tuple(self.project_state.voxel_spacing_zyx_um)
         offset_y, offset_x = self.project_state.working_offset_yx
+        for layer in tuple(self.preview_layers.values()):
+            if layer in self.viewer.layers:
+                self.viewer.layers.remove(layer)
+        self.preview_layers.clear()
         self.prepared_channels = payload["prepared"]
         self.fingerprint = deepcopy(fingerprint)
         self.provenance = {}
+        self.outdated = False
         result_lines = []
         for index, data in self.prepared_channels.items():
             channel = self._channel(index)
@@ -193,6 +200,7 @@ class ImagePreparationController(QObject):
                 units=("µm", "µm", "µm"),
                 metadata={
                     "nucytoseg_preparation_preview": True,
+                    "nucytoseg_preparation_outdated": False,
                     "channel_index": int(index),
                     "processing_route": report["route"],
                 },
@@ -214,7 +222,6 @@ class ImagePreparationController(QObject):
         self._status(f"Prepared previews ready for {len(self.prepared_channels)} channel(s).")
 
     def _failed(self, message: str) -> None:
-        self.clear_previews(status=False)
         self._status(f"Image preparation failed: {message}")
 
     def _finished(self) -> None:
@@ -231,6 +238,7 @@ class ImagePreparationController(QObject):
         self.prepared_channels.clear()
         self.provenance.clear()
         self.fingerprint = None
+        self.outdated = False
         self.panel.set_preview_available(False)
         self.panel.set_results("No prepared channels.")
         self.prepared_changed.emit(())
@@ -242,12 +250,30 @@ class ImagePreparationController(QObject):
             self.clear_previews(status=False)
             self._status("Image preparation settings changed. Generate new previews.")
 
+    def invalidate_settings(self, *args) -> None:
+        if self.prepared_channels:
+            self._mark_outdated()
+            self._status(
+                "Preparation settings changed. Existing previews remain visible but are "
+                "outdated. Generate new previews before exporting."
+            )
+
+    def _mark_outdated(self) -> None:
+        self.outdated = True
+        for layer in self.preview_layers.values():
+            metadata = dict(getattr(layer, "metadata", {}) or {})
+            metadata["nucytoseg_preparation_outdated"] = True
+            layer.metadata = metadata
+            if not layer.name.startswith("Outdated · "):
+                layer.name = f"Outdated · {layer.name}"
+        self.prepared_changed.emit(())
+
     def clear_project(self) -> None:
         self.clear_previews(status=False)
         self.panel.reset_controls()
 
     def is_current(self) -> bool:
-        if self.fingerprint is None or not self.prepared_channels:
+        if self.outdated or self.fingerprint is None or not self.prepared_channels:
             return False
         return self.fingerprint == preparation_fingerprint(
             self.project_state,
@@ -263,7 +289,10 @@ class ImagePreparationController(QObject):
             report = self.provenance.get(index)
             if channel is not None and report is not None:
                 report["channel_name"] = channel.name
-                layer.name = f"Prepared · {channel.name} · {report['route_label']}"
+                prefix = "Outdated · " if self.outdated else ""
+                layer.name = (
+                    f"{prefix}Prepared · {channel.name} · {report['route_label']}"
+                )
 
     def _channel(self, index: int):
         channel = next(
@@ -282,6 +311,6 @@ class ImagePreparationController(QObject):
         self.clear_project()
         self.panel.prepare_requested.disconnect(self.prepare)
         self.panel.clear_requested.disconnect(self.clear_previews)
-        self.panel.settings_changed.disconnect(self.invalidate)
+        self.panel.settings_changed.disconnect(self.invalidate_settings)
         self.project_state.channels_changed.disconnect(self._sync_channel_names)
         self.project_state.calibration_changed.disconnect(self.invalidate)
