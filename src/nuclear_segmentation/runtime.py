@@ -11,6 +11,17 @@ import numpy as np
 from .config import validate_config, find_saved_roi
 
 
+def execute_stage(namespace, name):
+    """Execute one authoritative bundled stage in an existing namespace."""
+    source = files('nuclear_segmentation').joinpath(
+        'stages', name + '.py'
+    ).read_text(encoding='utf-8')
+    exec(
+        compile(source, 'nuclear_segmentation/stages/' + name + '.py', 'exec'),
+        namespace,
+    )
+
+
 def validate_roi_geometry(layer, spacing, shape):
     if tuple(layer.data.shape) != tuple(shape):
         raise ValueError('ROI shape differs from the original image grid.')
@@ -40,8 +51,7 @@ class AnalysisSession:
         self.collector = LayerCollector()
 
     def stage(self, name):
-        source = files('nuclear_segmentation').joinpath('stages', name + '.py').read_text(encoding='utf-8')
-        exec(compile(source, 'nuclear_segmentation/stages/' + name + '.py', 'exec'), self.ns)
+        execute_stage(self.ns, name)
 
     def prepare(self, preview_only=False):
         """Heavy operations, no GUI calls. Safe to run in a worker."""

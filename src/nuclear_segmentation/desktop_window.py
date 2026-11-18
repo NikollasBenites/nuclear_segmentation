@@ -33,6 +33,7 @@ from .normalization_workspace import NormalizationController
 from .selected_mask_panel import SelectedMaskPanel
 from .project_state import ProjectState
 from .series_browser import ImageSeriesBrowser
+from .segmentation_execution import SegmentationController
 from .viewer_toolbar import ViewerToolbar
 from .workflow_navigation import WorkflowNavigation
 from .ui_icons import icon
@@ -138,6 +139,25 @@ class DesktopWindow(QMainWindow):
             self,
         )
         self.image_export.status_changed.connect(self.statusBar().showMessage)
+        self.segmentation = SegmentationController(
+            self.embedding.viewer,
+            self.project_state,
+            self.context_panel.segmentation_page,
+            conflict_widgets=(
+                self.context_panel.project_page,
+                self.context_panel.preprocessing_page,
+                self.context_panel.export_page,
+            ),
+            conflict_operations=(
+                self.crop_workspace,
+                self.normalization,
+                self.z_correction,
+                self.image_preparation,
+                self.image_export,
+            ),
+            parent=self,
+        )
+        self.segmentation.status_changed.connect(self.statusBar().showMessage)
         self.z_correction.correction_applied.connect(self.normalization.invalidate)
         self.project_state.channels_changed.connect(
             lambda channels: self.normalization.invalidate()
@@ -465,6 +485,7 @@ class DesktopWindow(QMainWindow):
             or self.z_correction.busy
             or self.image_preparation.busy
             or self.image_export.busy
+            or self.segmentation.busy
         ):
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before "
@@ -482,6 +503,7 @@ class DesktopWindow(QMainWindow):
         self.z_correction.clear_project()
         self.image_preparation.clear_project()
         self.image_export.clear_project()
+        self.segmentation.clear_project()
         self.crop_workspace.clear_workspace_for_new_project()
         self._disconnect_channel_layers()
         self.embedding.viewer.layers.clear()
@@ -501,7 +523,7 @@ class DesktopWindow(QMainWindow):
         if self._import_thread is not None:
             self.statusBar().showMessage("An image import is already running", 4000)
             return False
-        if self.crop_workspace.busy or self.image_export.busy:
+        if self.crop_workspace.busy or self.image_export.busy or self.segmentation.busy:
             self.statusBar().showMessage(
                 "Wait for active preprocessing or image export to finish before "
                 "opening another image",
@@ -1053,6 +1075,7 @@ class DesktopWindow(QMainWindow):
             or self.z_correction.busy
             or self.image_preparation.busy
             or self.image_export.busy
+            or self.segmentation.busy
         ):
             self.statusBar().showMessage(
                 "Wait for the active preprocessing calculation to finish before exiting."
@@ -1069,6 +1092,7 @@ class DesktopWindow(QMainWindow):
             self.z_correction.dispose()
             self.image_preparation.dispose()
             self.image_export.dispose()
+            self.segmentation.dispose()
             self.crop_workspace.dispose()
             self._disconnect_channel_layers()
             self.context_panel.project_page.channel_panel.dispose()

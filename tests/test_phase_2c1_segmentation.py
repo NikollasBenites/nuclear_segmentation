@@ -79,8 +79,8 @@ def test_defaults_validation_editing_modes_and_disabled_execution(qapp, tmp_path
     ):
         assert config[key] == expected[key]
     assert config["PROCESSING_DEVICE"] == "auto"
-    assert not panel.execute_button.isEnabled()
-    assert "has not run" in panel.readiness.text()
+    assert panel.execute_button.isEnabled()
+    assert "ready" in panel.readiness.text().lower()
 
     panel.model_name.setText("/models/local-cpsam")
     panel.device.setCurrentIndex(panel.device.findData("cpu"))
@@ -190,6 +190,12 @@ def test_project_close_and_replacement_clear_stale_input(qapp, tmp_path):
     window, _ = _open(qapp, tmp_path, "first.ome.tif")
     panel = window.context_panel.segmentation_page
     assert panel.input_values["source"].text() == "first.ome.tif"
+    window.segmentation._thread = object()
+    assert not window.close_project(confirm=False)
+    assert not window.prepare_image_import(
+        tmp_path / "blocked.ome.tif", confirm_replacement=False
+    )
+    window.segmentation._thread = None
     assert window.close_project(confirm=False)
     assert panel.input_values["source"].text() == "—"
     assert "load a dataset" in panel.readiness.text()

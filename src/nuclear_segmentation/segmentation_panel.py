@@ -4,10 +4,11 @@ from __future__ import annotations
 from copy import deepcopy
 import math
 
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QLineEdit, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox, QVBoxLayout,
+    QWidget,
 )
 
 from .collapsible_section import CollapsibleSection
@@ -16,6 +17,9 @@ from .config import defaults, validate_config
 
 class SegmentationPanel(QWidget):
     """Edit the existing scientific configuration without loading Cellpose."""
+
+    run_requested = Signal()
+    configuration_changed = Signal()
 
     def __init__(self, project_state, parent=None):
         super().__init__(parent)
@@ -122,9 +126,22 @@ class SegmentationPanel(QWidget):
         self.readiness.setObjectName("segmentationReadiness")
         self.readiness.setWordWrap(True)
         content.addWidget(self.readiness)
+        self.execution_summary = QLabel("No segmentation has run.")
+        self.execution_summary.setWordWrap(True)
+        content.addWidget(self.execution_summary)
+        self.execution_progress = QProgressBar()
+        self.execution_progress.setRange(0, 0)
+        self.execution_progress.setTextVisible(False)
+        self.execution_progress.hide()
+        content.addWidget(self.execution_progress)
+        self.execution_log = QPlainTextEdit()
+        self.execution_log.setReadOnly(True)
+        self.execution_log.setMaximumHeight(130)
+        self.execution_log.hide()
+        content.addWidget(self.execution_log)
         self.execute_button = QPushButton("Run Segmentation")
         self.execute_button.setEnabled(False)
-        self.execute_button.setToolTip("Cellpose execution will be integrated in Phase 2C.2.")
+        self.execute_button.setToolTip("Run the existing Cellpose pipeline on the current working image.")
         content.addWidget(self.execute_button)
         section.set_content_layout(content)
         root.addWidget(section)
@@ -142,13 +159,21 @@ class SegmentationPanel(QWidget):
             self.diameter_enabled.toggled, self.diameter.valueChanged,
             *(field.valueChanged for field in self.flow_smooth),
         ):
-            signal.connect(self.refresh)
+            signal.connect(self._configuration_edited)
         project_state.changed.connect(self.refresh)
         project_state.channels_changed.connect(self.refresh)
         project_state.calibration_changed.connect(self.refresh)
         project_state.normalization_changed.connect(self.refresh)
         project_state.z_correction_changed.connect(self.refresh)
+        project_state.segmentation_result_changed.connect(self._result_changed)
+        self.execute_button.clicked.connect(self.run_requested)
+        self._busy = False
+        self._external_busy = False
         self._mode_changed()
+
+    def _configuration_edited(self, *args):
+        self.configuration_changed.emit()
+        self.refresh()
 
     def _set_input_text(self, key: str, text: str) -> None:
         value = str(text)
@@ -263,11 +288,59 @@ class SegmentationPanel(QWidget):
                 validate_scientific_input(state, config)
         except (TypeError, ValueError) as error:
             missing.append(str(error))
-        if missing:
+        if self._busy:
+            self.readiness.setText("Cellpose segmentation is running. Project inputs are locked.")
+        elif self._external_busy:
+            self.readiness.setText("Wait for the active project operation to finish.")
+        elif missing:
             self.readiness.setText("Not ready: " + "; ".join(dict.fromkeys(missing)) + ".")
         else:
-            self.readiness.setText("Configuration ready for Phase 2C.2 integration. Cellpose has not run.")
-        self.execute_button.setEnabled(False)
+            self.readiness.setText("Scientific input is valid and ready for Cellpose execution.")
+        self.execute_button.setEnabled(
+            not self._busy and not self._external_busy and not missing
+        )
+
+    def set_external_busy(self, busy: bool) -> None:
+        busy = bool(busy)
+        if busy == self._external_busy:
+            return
+        self._external_busy = busy
+        self.refresh()
+
+    def set_execution_running(self, running: bool) -> None:
+        self._busy = bool(running)
+        for widget in (
+            self.model_name, self.device, self.mode, self.cellprob, self.min_size,
+            self.stitch, self.batch_size, self.resample, self.rescale_enabled,
+            self.rescale, self.diameter_enabled, self.diameter, *self.flow_smooth,
+        ):
+            widget.setEnabled(not running)
+        self.execution_progress.setVisible(running)
+        self.execution_log.setVisible(running or bool(self.execution_log.toPlainText()))
+        self.refresh()
+
+    def set_execution_status(self, message: str, *, append: bool = True) -> None:
+        self.execution_summary.setText(str(message))
+        if append:
+            self.execution_log.appendPlainText(str(message))
+
+    def set_elapsed(self, seconds: float) -> None:
+        self.execution_progress.setFormat(f"Elapsed: {seconds:.1f} s")
+        self.execution_progress.setTextVisible(True)
+
+    def _result_changed(self, result, current: bool) -> None:
+        if result is None:
+            self.execution_summary.setText("No segmentation has run.")
+        elif current:
+            self.execution_summary.setText(
+                f"Completed — {result['object_count']:,} objects; "
+                f"mask shape {tuple(result['mask_shape'])}; device {result['device']}."
+            )
+        else:
+            self.execution_summary.setText(
+                "Previous segmentation remains available but is outdated for the current settings."
+            )
+        self.refresh()
 
     def dispose(self):
         state = self.project_state
@@ -276,3 +349,4 @@ class SegmentationPanel(QWidget):
         state.calibration_changed.disconnect(self.refresh)
         state.normalization_changed.disconnect(self.refresh)
         state.z_correction_changed.disconnect(self.refresh)
+        state.segmentation_result_changed.disconnect(self._result_changed)

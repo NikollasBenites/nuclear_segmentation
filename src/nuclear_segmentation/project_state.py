@@ -68,6 +68,7 @@ class ProjectState(QObject):
     normalization_changed = Signal(object, bool)
     normalization_roi_changed = Signal(object)
     z_correction_changed = Signal(object)
+    segmentation_result_changed = Signal(object, bool)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -92,6 +93,8 @@ class ProjectState(QObject):
         self.z_correction_options: dict[int, dict[str, Any]] = {}
         self.z_correction_reports: dict[int, dict[str, Any]] = {}
         self.z_correction_applied: set[int] = set()
+        self.segmentation_result: dict[str, Any] | None = None
+        self.segmentation_is_current = False
 
     @property
     def dataset_ready(self) -> bool:
@@ -102,6 +105,7 @@ class ProjectState(QObject):
         self.import_status_changed.emit(self.import_status)
 
     def set_dataset(self, dataset: ImportedDataset) -> None:
+        self.clear_segmentation_result()
         self.dataset = dataset
         self.original_dataset = dataset
         self.working_dataset = dataset
@@ -198,6 +202,7 @@ class ProjectState(QObject):
         self.working_offset_yx = (y0, x0)
         self.crop_provenance = provenance
         self.roi_mask_yx = np.array(roi_mask, copy=True)
+        self.invalidate_segmentation()
         self.invalidate_normalization()
         self.invalidate_z_corrections()
         return self.working_dataset
@@ -210,6 +215,7 @@ class ProjectState(QObject):
         self.crop_provenance = None
         self.roi_mask_yx = None
         self.working_offset_yx = (0, 0)
+        self.invalidate_segmentation()
         self.invalidate_normalization()
         self.invalidate_z_corrections()
         return self.original_dataset
@@ -222,6 +228,7 @@ class ProjectState(QObject):
     def apply_normalization(self, configuration: dict[str, Any]) -> None:
         self.normalization_configuration = dict(configuration)
         self.normalization_is_current = True
+        self.invalidate_segmentation()
         self.normalization_changed.emit(self.normalization_configuration, True)
 
     def invalidate_normalization(self) -> None:
@@ -238,6 +245,7 @@ class ProjectState(QObject):
         }
         self.normalization_preview = None
         self.normalization_is_current = False
+        self.invalidate_segmentation()
         if emit:
             self.normalization_changed.emit(self.normalization_configuration, False)
 
@@ -275,6 +283,7 @@ class ProjectState(QObject):
         self.z_correction_options[index] = dict(options)
         self.z_correction_reports[index] = dict(report)
         self.z_correction_applied.discard(index)
+        self.invalidate_segmentation()
         self.z_correction_changed.emit(index)
 
     def apply_z_corrections(self, channel_indexes) -> None:
@@ -282,6 +291,7 @@ class ProjectState(QObject):
         if not indexes or not indexes.issubset(self.z_correction_reports):
             raise ValueError("Calculate current Z-correction previews before applying.")
         self.z_correction_applied.update(indexes)
+        self.invalidate_segmentation()
         self.z_correction_changed.emit(tuple(sorted(indexes)))
 
     def reset_z_corrections(self, channel_indexes, *, emit: bool = True) -> None:
@@ -289,6 +299,7 @@ class ProjectState(QObject):
             self.z_correction_options.pop(index, None)
             self.z_correction_reports.pop(index, None)
             self.z_correction_applied.discard(index)
+        self.invalidate_segmentation()
         if emit:
             self.z_correction_changed.emit(None)
 
@@ -296,6 +307,7 @@ class ProjectState(QObject):
         self.z_correction_options = {}
         self.z_correction_reports = {}
         self.z_correction_applied = set()
+        self.invalidate_segmentation()
         if emit:
             self.z_correction_changed.emit(None)
 
@@ -304,12 +316,14 @@ class ProjectState(QObject):
             return
         self.z_correction_reports = {}
         self.z_correction_applied = set()
+        self.invalidate_segmentation()
         self.z_correction_changed.emit(None)
 
     def invalidate_z_correction(self, channel_index: int) -> None:
         index = int(channel_index)
         self.z_correction_reports.pop(index, None)
         self.z_correction_applied.discard(index)
+        self.invalidate_segmentation()
         self.z_correction_changed.emit(index)
 
     def legacy_z_corrections(self) -> dict[str, dict[str, Any]]:
@@ -322,6 +336,7 @@ class ProjectState(QObject):
         return records
 
     def clear_project(self) -> None:
+        self.clear_segmentation_result(emit=False)
         self.dataset = None
         self.original_dataset = None
         self.working_dataset = None
@@ -344,6 +359,7 @@ class ProjectState(QObject):
         self.normalization_changed.emit(None, False)
         self.normalization_roi_changed.emit(None)
         self.z_correction_changed.emit(None)
+        self.segmentation_result_changed.emit(None, False)
         self.changed.emit(None)
 
     def set_calibration(self, spacing, source: str = "manual override") -> None:
@@ -354,6 +370,7 @@ class ProjectState(QObject):
             raise ValueError("Calibration must contain positive finite Z/Y/X values.")
         self.voxel_spacing_zyx_um = values
         self.calibration_source = str(source)
+        self.invalidate_segmentation()
         self.calibration_changed.emit(values, self.calibration_source)
 
     def update_channel(self, index: int, **changes) -> None:
@@ -402,8 +419,33 @@ class ProjectState(QObject):
         if "colormap" in changes and not str(changes["colormap"]).strip():
             raise ValueError("A channel colormap is required.")
         self.channels[position] = replace(current, **changes)
+        if {"name", "role"}.intersection(changes):
+            self.invalidate_segmentation()
         self.invalidate_normalization()
         self.channels_changed.emit(tuple(self.channels))
+
+    def set_segmentation_result(self, result: dict[str, Any]) -> None:
+        masks = np.asarray(result.get("masks"))
+        if masks.ndim != 3 or not masks.size or int(masks.max()) == 0:
+            raise ValueError("Segmentation results require a nonempty ZYX label mask.")
+        masks.setflags(write=False)
+        stored = dict(result)
+        stored["masks"] = masks
+        self.segmentation_result = stored
+        self.segmentation_is_current = True
+        self.segmentation_result_changed.emit(stored, True)
+
+    def invalidate_segmentation(self) -> None:
+        if self.segmentation_result is None or not self.segmentation_is_current:
+            return
+        self.segmentation_is_current = False
+        self.segmentation_result_changed.emit(self.segmentation_result, False)
+
+    def clear_segmentation_result(self, *, emit: bool = True) -> None:
+        self.segmentation_result = None
+        self.segmentation_is_current = False
+        if emit:
+            self.segmentation_result_changed.emit(None, False)
 
     @property
     def segmentation_channel(self) -> str | None:
