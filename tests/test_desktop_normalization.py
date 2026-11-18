@@ -11,7 +11,11 @@ from qtpy.QtCore import QSettings
 from qtpy.QtWidgets import QApplication, QWidget
 
 from nuclear_segmentation.desktop_window import DesktopWindow
-from nuclear_segmentation.normalization import compare_percentiles, normalize_preview
+from nuclear_segmentation.normalization import (
+    compare_percentiles,
+    mask_digest,
+    normalize_preview,
+)
 from nuclear_segmentation.normalization_workspace import (
     calculate_normalization,
     cellpose_configuration,
@@ -25,6 +29,7 @@ from nuclear_segmentation.project_state import (
     ProjectState,
 )
 from nuclear_segmentation.projection_crop import polygon_roi_mask
+from nuclear_segmentation.z_correction import DEFAULTS as Z_DEFAULTS, correct_z
 
 
 class FakeQtViewer(QWidget):
@@ -152,6 +157,50 @@ def test_normalization_validation_identity_and_channel_rename(tmp_path):
     }
 
 
+def test_z_corrected_normalization_crop_roi_domain_and_zeros(tmp_path):
+    source = tmp_path / "corrected-source.tif"
+    source.write_bytes(b"identity")
+    state = ProjectState()
+    state.set_dataset(_dataset(source))
+    vertices = np.array([[1, 1], [1, 7], [6, 1]], dtype=float)
+    bbox, crop_mask = polygon_roi_mask(vertices, (8, 9))
+    state.apply_crop(bbox, vertices, crop_mask, "polygon")
+    full_roi = np.zeros((8, 9), dtype=bool)
+    full_roi[bbox[0]:bbox[1], bbox[2]:bbox[3]] = crop_mask
+    state.set_normalization_roi(full_roi, vertices, {"source": "test"})
+    state.set_z_correction_preview(
+        0,
+        Z_DEFAULTS,
+        {
+            "options": dict(Z_DEFAULTS),
+            "source_path": str(source),
+            "series_index": 0,
+            "series_identifier": "0",
+            "valid_xy_sha256": mask_digest(crop_mask),
+        },
+    )
+    state.apply_z_corrections([0])
+    options = {
+        "channel_index": 0,
+        "mode": "cellpose_default",
+        "lower": 1.0,
+        "upper": 99.0,
+        "norm3D": True,
+        "input_source": "z_corrected",
+    }
+    report, preview = calculate_normalization(state, options)
+    corrected, _ = correct_z(state.working_dataset.data_czyx[0], Z_DEFAULTS)
+    expected_limits = np.percentile(corrected[:, crop_mask], [1, 99])
+    np.testing.assert_allclose(report["full_lowhigh"], expected_limits)
+    assert report["input_source"] == "z_corrected"
+    assert report["z_correction_provenance"]["options"] == Z_DEFAULTS
+    assert report["roi_voxels"] == int(crop_mask.sum()) * corrected.shape[0]
+    assert report["roi_zero_fraction"] > 0
+    assert report["outside_fraction"] == pytest.approx(0.0)
+    assert np.all(preview[:, ~crop_mask] == 0)
+    assert tuple(preview.shape) == tuple(state.working_dataset.data_czyx[0].shape)
+
+
 def _write_ome(path):
     data = np.arange(2 * 3 * 8 * 9, dtype=np.uint16).reshape(2, 3, 8, 9)
     data[0, :, 2, 2] = 0
@@ -241,6 +290,65 @@ def test_desktop_preview_apply_invalidate_repeat_reset_and_cleanup(qapp, tmp_pat
     assert window.project_state.crop_provenance is crop_provenance
     np.testing.assert_array_equal(window.project_state.original_dataset.data_czyx, source_copy)
     assert source.exists()
+    window.close()
+
+
+def test_applied_z_preview_source_cellpose_default_and_invalidation(
+    qapp, tmp_path, monkeypatch
+):
+    window, _, _ = _window_with_tiff(qapp, tmp_path)
+    preprocessing = window.context_panel.preprocessing_page
+    z_panel = preprocessing.z_correction_panel
+    z_panel.channel_list.item(0).setSelected(True)
+    z_panel._request_calculate()
+    _wait(qapp, lambda: not window.z_correction.busy)
+    temporary = window.z_correction.preview_layers[0]
+    assert window.z_correction.apply([0])
+    assert temporary not in window.embedding.viewer.layers
+    assert 0 not in window.z_correction.preview_layers
+    assert 0 in window.project_state.z_correction_reports
+    assert 0 in window.project_state.z_correction_options
+    assert 0 in window.project_state.z_correction_applied
+    assert preprocessing.normalization_input_combo.currentData() == "z_corrected"
+    original_position = preprocessing.normalization_input_combo.findData(
+        "working_original"
+    )
+    assert original_position >= 0
+    preprocessing.normalization_input_combo.setCurrentIndex(original_position)
+    assert preprocessing.normalization_options()["input_source"] == "working_original"
+    preprocessing.normalization_input_combo.setCurrentIndex(
+        preprocessing.normalization_input_combo.findData("z_corrected")
+    )
+
+    import nuclear_segmentation.normalization_workspace as workspace
+    calls = []
+    original_correct_z = workspace.correct_z
+    def tracked(volume, options):
+        calls.append((volume, options))
+        return original_correct_z(volume, options)
+    monkeypatch.setattr(workspace, "correct_z", tracked)
+    options = preprocessing.normalization_options()
+    assert options["mode"] == "cellpose_default"
+    assert window.normalization.calculate(options)
+    _wait(qapp, lambda: not window.normalization.busy)
+    assert len(calls) == 1
+    corrected, _ = correct_z(
+        window.project_state.working_dataset.data_czyx[0],
+        window.project_state.z_correction_options[0],
+    )
+    limits = np.percentile(corrected, [1, 99])
+    expected = normalize_preview(corrected, limits)
+    np.testing.assert_allclose(window.normalization.preview_layer.data, expected)
+    assert window.normalization.preview_layer.metadata["normalization_input_source"] == "z_corrected"
+    assert window.normalization.apply()
+    assert window.project_state.normalization_configuration["cellpose_normalize"] is True
+    assert window.project_state.normalization_configuration["provenance"]["input_source"] == "z_corrected"
+
+    z_panel.fields["percentile"].setValue(98.0)
+    qapp.processEvents()
+    assert window.normalization.preview_layer is None
+    assert not window.project_state.normalization_is_current
+    assert preprocessing.normalization_input_combo.currentData() == "working_original"
     window.close()
 
 

@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pytest
 import tifffile
-from qtpy.QtCore import QSettings
+from qtpy.QtCore import QSettings, Qt
 from qtpy.QtWidgets import QApplication, QWidget
 
 from nuclear_segmentation.config import defaults, validate_config
@@ -64,6 +64,10 @@ def _open(qapp, tmp_path, name="segmentation.ome.tif"):
 def test_defaults_validation_editing_modes_and_disabled_execution(qapp, tmp_path):
     window, _ = _open(qapp, tmp_path)
     panel = window.context_panel.segmentation_page
+    scroll = window.context_panel.stack.widget(
+        window.context_panel._indexes["segmentation"]
+    )
+    assert scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     expected = defaults()
     config = panel.scientific_config()
     assert config["RUN_MODE"] == "segment"
@@ -125,6 +129,10 @@ def test_input_channel_crop_preprocessing_and_array_immutability(qapp, tmp_path,
     assert panel.input_values["shape"].text() == "4 × 6 × 8"
     assert panel.input_values["spacing"].text() == "2 × 0.5 × 0.25 µm"
     assert panel.input_values["anisotropy"].text().startswith("5.33333")
+    for value in panel.input_values.values():
+        assert value.wordWrap()
+        assert value.minimumWidth() == 0
+        assert value.toolTip() == value.text()
     window.project_state.set_calibration((3.0, 0.6, 0.3))
     assert panel.input_values["spacing"].text() == "3 × 0.6 × 0.3 µm"
     assert panel.scientific_config()["VOXEL_SPACING_OVERRIDE_UM"] == [3.0, 0.6, 0.3]

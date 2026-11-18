@@ -301,6 +301,7 @@ class ZCorrectionController(QObject):
         for index in indexes:
             self.panel.set_channel_state(index, "Applied")
             self.show_results(index)
+            self.remove_preview(index)
         self._status(
             "Z correction applied as project configuration. No Cellpose model has run."
         )

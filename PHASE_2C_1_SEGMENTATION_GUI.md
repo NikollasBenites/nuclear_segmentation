@@ -70,6 +70,27 @@ configuration. Applied corrections are mapped through `legacy_z_corrections()`;
 the correction algorithm is not called and no corrected volume is copied merely
 to populate the panel.
 
+Phase 2C.1.1 adds a preview-input selector to the existing Normalization section.
+It offers the original working channel and, only when that channel has a current
+applied correction, an applied Z-corrected input. The corrected volume is
+regenerated in the existing normalization worker with `correct_z()` and the
+stored applied options; it does not depend on a temporary napari preview layer.
+The existing `compare_percentiles()` and `normalize_preview()` functions remain
+the statistical and display transformations. Polygon exterior fill is excluded
+from corrected-domain statistics while genuine zero-valued voxels inside the
+valid region remain included.
+
+The preview fingerprint records the selected input domain and correction
+provenance. Changing or resetting that correction invalidates a dependent
+normalization preview. Cellpose Default still maps to
+`CELLPOSE_NORMALIZE=True`; the displayed preview is explicitly a visual
+reference rather than an exact replay or an additional model-input
+normalization step. TIFF/SyGlass image preparation remains independent.
+
+After Apply Z Correction, only temporary preview layers for the applied channels
+are removed. Applied options, reports, diagnostic plots, provenance, and previews
+for channels not included in Apply remain available.
+
 The current independent desktop ROI-fixed normalization provenance is not yet a
 drop-in replacement for the legacy path-based `CELLPOSE_ROI_NORMALIZATION`
 record. Phase 2C.1 therefore does not claim execution support for that boundary;
@@ -147,5 +168,15 @@ source-array immutability, and absence of a Cellpose import from panel actions.
 8. Confirm Run Segmentation remains disabled.
 9. Close the project and open a different TIFF; verify no source, channel, crop,
    or preprocessing status leaks from the previous project.
+10. Calculate and apply Z correction for the segmentation channel; confirm its
+    temporary corrected layer disappears while its report remains available.
+11. In Normalization, switch between Original working image and Z-corrected image,
+    calculate Cellpose Default previews, and compare both through Z.
+12. Change a Z-correction setting and confirm a dependent normalization preview
+    disappears and corrected input becomes unavailable until recalculated and
+    applied.
+13. Narrow the Context Panel and confirm long source names, spacing, crop/ROI,
+    and preprocessing summaries wrap vertically, remain selectable, and expose
+    their complete value in a tooltip without horizontal scrolling.
 
 Native macOS rendering is not claimed until this checklist is completed.

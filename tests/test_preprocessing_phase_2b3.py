@@ -288,8 +288,16 @@ def test_multichannel_z_ui_apply_routing_profiles_reset_and_close(
     assert not window.z_correction.apply([0, 1, 2])
     assert "Reset normalization" in panel.status.text()
     window.normalization.reset()
-    assert window.z_correction.apply([0, 1, 2])
+    assert window.z_correction.apply([0, 1])
+    assert set(window.z_correction.preview_layers) == {2}
+    assert preview_layers[2] in window.embedding.viewer.layers
+    assert window.z_correction.apply([2])
     assert window.project_state.z_correction_applied == {0, 1, 2}
+    assert not window.z_correction.preview_layers
+    assert all(
+        layer not in window.embedding.viewer.layers
+        for layer in preview_layers.values()
+    )
     assert all(
         "Applied" in panel.channel_list.item(row).text()
         for row in range(panel.channel_list.count())

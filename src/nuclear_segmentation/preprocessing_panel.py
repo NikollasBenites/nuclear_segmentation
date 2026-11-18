@@ -43,6 +43,8 @@ class PreprocessingPanel(QWidget):
     def __init__(self, project_state, parent=None):
         super().__init__(parent)
         self.project_state = project_state
+        self._normalization_input_channel = None
+        self._normalization_corrected_available = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
@@ -51,6 +53,7 @@ class PreprocessingPanel(QWidget):
         normalization_form = QFormLayout()
         normalization_form.setContentsMargins(10, 8, 10, 10)
         self.normalization_channel_combo = QComboBox()
+        self.normalization_input_combo = QComboBox()
         self.normalization_mode_combo = QComboBox()
         self.normalization_mode_combo.addItem(
             "Cellpose default normalization", "cellpose_default"
@@ -76,13 +79,18 @@ class PreprocessingPanel(QWidget):
         normalization_form.addRow(
             "Source channel", self.normalization_channel_combo
         )
+        normalization_form.addRow(
+            "Normalization preview input", self.normalization_input_combo
+        )
         normalization_form.addRow("Mode", self.normalization_mode_combo)
         normalization_form.addRow("Lower percentile", self.normalization_lower)
         normalization_form.addRow("Upper percentile", self.normalization_upper)
         normalization_form.addRow("norm3D", self.normalization_norm3d)
         norm3d_note = QLabel(
             "norm3D controls whether Cellpose computes normalization statistics "
-            "across the image volume. It does not run Cellpose in this preview."
+            "across the image volume. The displayed preview uses the existing "
+            "preview transform as a visual reference; it is not an exact replay "
+            "of Cellpose's internal normalization."
         )
         norm3d_note.setWordWrap(True)
         normalization_form.addRow(norm3d_note)
@@ -163,8 +171,12 @@ class PreprocessingPanel(QWidget):
         self.normalization_roi_reuse_crop_button.clicked.connect(
             self.normalization_roi_reuse_crop_requested
         )
+        self.normalization_channel_combo.currentIndexChanged.connect(
+            self.refresh_normalization_inputs
+        )
         for signal in (
             self.normalization_channel_combo.currentIndexChanged,
+            self.normalization_input_combo.currentIndexChanged,
             self.normalization_mode_combo.currentIndexChanged,
             self.normalization_lower.valueChanged,
             self.normalization_upper.valueChanged,
@@ -235,6 +247,7 @@ class PreprocessingPanel(QWidget):
         layout.addWidget(self.status_label)
         layout.addStretch(1)
         project_state.channels_changed.connect(self.set_channels)
+        project_state.z_correction_changed.connect(self._z_correction_changed)
         self.set_channels(project_state.channels)
 
     def set_channels(self, channels) -> None:
@@ -258,6 +271,7 @@ class PreprocessingPanel(QWidget):
             self.normalization_channel_combo.setCurrentIndex(index)
         self.channel_combo.blockSignals(False)
         self.normalization_channel_combo.blockSignals(False)
+        self.refresh_normalization_inputs()
         self.generate_button.setEnabled(bool(channels))
         self.normalization_calculate_button.setEnabled(bool(channels))
         if not channels:
@@ -280,7 +294,54 @@ class PreprocessingPanel(QWidget):
             "lower": lower,
             "upper": upper,
             "norm3D": bool(self.normalization_norm3d.isChecked()),
+            "input_source": str(self.normalization_input_combo.currentData()),
         }
+
+    def refresh_normalization_inputs(self, *args, prefer_effective=False) -> None:
+        previous = self.normalization_input_combo.currentData()
+        channel_index = self.normalization_channel_combo.currentData()
+        previous_channel = self._normalization_input_channel
+        previously_corrected = self._normalization_corrected_available
+        corrected = (
+            channel_index is not None
+            and int(channel_index) in self.project_state.z_correction_applied
+            and int(channel_index) in self.project_state.z_correction_options
+            and int(channel_index) in self.project_state.z_correction_reports
+            and self.project_state.z_correction_reports[int(channel_index)].get(
+                "options"
+            ) == self.project_state.z_correction_options[int(channel_index)]
+        )
+        self.normalization_input_combo.blockSignals(True)
+        self.normalization_input_combo.clear()
+        self.normalization_input_combo.addItem(
+            "Original working image", "working_original"
+        )
+        if corrected:
+            self.normalization_input_combo.addItem(
+                "Z-corrected image (applied)", "z_corrected"
+            )
+        wanted = previous
+        newly_effective = corrected and (
+            not previously_corrected or previous_channel != int(channel_index)
+        )
+        if (
+            corrected
+            and int(channel_index) == self.project_state.segmentation_channel_index
+            and (newly_effective or prefer_effective and previous is None)
+        ):
+            wanted = "z_corrected"
+        position = self.normalization_input_combo.findData(wanted)
+        self.normalization_input_combo.setCurrentIndex(max(0, position))
+        self.normalization_input_combo.blockSignals(False)
+        self._normalization_input_channel = (
+            None if channel_index is None else int(channel_index)
+        )
+        self._normalization_corrected_available = bool(corrected)
+        if previous != self.normalization_input_combo.currentData():
+            self._normalization_setting_changed()
+
+    def _z_correction_changed(self, *args) -> None:
+        self.refresh_normalization_inputs(prefer_effective=True)
 
     def _request_normalization_calculation(self) -> None:
         try:
@@ -332,5 +393,8 @@ class PreprocessingPanel(QWidget):
 
     def dispose(self) -> None:
         self.project_state.channels_changed.disconnect(self.set_channels)
+        self.project_state.z_correction_changed.disconnect(
+            self._z_correction_changed
+        )
         self.z_correction_panel.dispose()
         self.image_preparation_panel.dispose()

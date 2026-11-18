@@ -10,6 +10,7 @@ from qtpy.QtCore import QObject, QThread, Signal, Slot
 
 from .normalization import compare_percentiles, mask_digest, normalize_preview
 from .projection_crop import generate_xy_projection, polygon_roi_mask
+from .z_correction import correct_z
 
 
 def validate_percentiles(lower: float, upper: float) -> tuple[float, float]:
@@ -98,6 +99,33 @@ def normalization_fingerprint(project_state, options: dict) -> dict:
     if channel is None:
         raise ValueError(f"Normalization channel index {channel_index} is unavailable.")
     lower, upper = validate_percentiles(options["lower"], options["upper"])
+    input_source = str(options.get("input_source", "working_original"))
+    if input_source not in {"working_original", "z_corrected"}:
+        raise ValueError("Select a supported normalization preview input.")
+    z_provenance = None
+    if input_source == "z_corrected":
+        if (
+            channel_index not in project_state.z_correction_applied
+            or channel_index not in project_state.z_correction_options
+            or channel_index not in project_state.z_correction_reports
+        ):
+            raise ValueError(
+                "Apply a current Z correction for this channel before using it "
+                "as normalization preview input."
+            )
+        report = project_state.z_correction_reports[channel_index]
+        if report.get("options") != project_state.z_correction_options[channel_index]:
+            raise ValueError(
+                "The applied Z-correction settings are outdated. Recalculate and "
+                "apply the correction before normalization preview."
+            )
+        z_provenance = {
+            "options": deepcopy(project_state.z_correction_options[channel_index]),
+            "source_path": report.get("source_path"),
+            "series_index": report.get("series_index"),
+            "series_identifier": report.get("series_identifier"),
+            "valid_xy_sha256": report.get("valid_xy_sha256"),
+        }
     return {
         "source": file_identity,
         "series_index": int(source.series_index),
@@ -113,6 +141,8 @@ def normalization_fingerprint(project_state, options: dict) -> dict:
         "mode": str(options["mode"]),
         "percentiles": [lower, upper],
         "norm3D": bool(options["norm3D"]),
+        "input_source": input_source,
+        "z_correction_provenance": z_provenance,
     }
 
 
@@ -127,29 +157,55 @@ def calculate_normalization(project_state, options: dict) -> tuple[dict, np.ndar
     working = np.asarray(project_state.working_dataset.data_czyx[channel_index])
     if not np.isfinite(original).all() or not np.isfinite(working).all():
         raise ValueError("The image contains NaN or infinite values.")
-    full_limits = np.percentile(original, [lower, upper]).tolist()
     polygon_roi = fingerprint["roi_sha256"] is not None
     comparison = None
-    if polygon_roi:
-        roi = normalization_roi_on_original_grid(project_state)
-        comparison = compare_percentiles(original, roi, lower, upper)
-        full_limits = comparison["full_lowhigh"]
-    elif mode == "roi_fixed":
-        raise ValueError("ROI-derived normalization requires a normalization ROI.")
+    input_source = fingerprint["input_source"]
+    if input_source == "z_corrected":
+        preview_input, _ = correct_z(
+            working, project_state.z_correction_options[channel_index]
+        )
+        valid_yx = np.ones(working.shape[-2:], dtype=bool)
+        provenance = project_state.crop_provenance
+        if provenance is not None and provenance.selection_type == "polygon":
+            valid_yx = np.asarray(project_state.roi_mask_yx, dtype=bool)
+        scoped = preview_input[:, valid_yx].reshape(preview_input.shape[0], -1, 1)
+        full_limits = np.percentile(scoped, [lower, upper]).tolist()
+        if polygon_roi:
+            roi_yx = normalization_roi_on_working_grid(project_state)
+            scoped_roi = np.broadcast_to(roi_yx, preview_input.shape)[:, valid_yx]
+            scoped_roi = scoped_roi.reshape(preview_input.shape[0], -1, 1)
+            comparison = compare_percentiles(scoped, scoped_roi, lower, upper)
+            full_limits = comparison["full_lowhigh"]
+        elif mode == "roi_fixed":
+            raise ValueError("ROI-derived normalization requires a normalization ROI.")
+    else:
+        preview_input = working
+        full_limits = np.percentile(original, [lower, upper]).tolist()
+        if polygon_roi:
+            roi = normalization_roi_on_original_grid(project_state)
+            comparison = compare_percentiles(original, roi, lower, upper)
+            full_limits = comparison["full_lowhigh"]
+        elif mode == "roi_fixed":
+            raise ValueError("ROI-derived normalization requires a normalization ROI.")
 
     if mode == "roi_fixed":
         effective_limits = comparison["roi_lowhigh"]
     else:
         effective_limits = full_limits
     if mode == "disabled":
-        preview = np.asarray(working, dtype=np.float32)
+        preview = np.array(preview_input, dtype=np.float32, copy=True)
     else:
-        preview = normalize_preview(working, effective_limits)
+        preview = normalize_preview(preview_input, effective_limits)
     if polygon_roi:
         local_mask = normalization_roi_on_working_grid(project_state)
         if local_mask.shape != preview.shape[-2:]:
             raise ValueError("The polygon ROI mask does not match the working image.")
         preview[:, ~local_mask] = 0.0
+    elif (
+        project_state.crop_provenance is not None
+        and project_state.crop_provenance.selection_type == "polygon"
+    ):
+        preview[:, ~np.asarray(project_state.roi_mask_yx, dtype=bool)] = 0.0
 
     full_span = float(full_limits[1] - full_limits[0])
     effective_span = float(effective_limits[1] - effective_limits[0])
@@ -167,6 +223,11 @@ def calculate_normalization(project_state, options: dict) -> tuple[dict, np.ndar
         "calculation_method": "exact_numpy_percentile_linear",
         "preview_transform": "legacy normalize_preview affine mapping; no clipping",
         "polygon_scope": "XY polygon extended through every Z plane" if polygon_roi else None,
+        "statistics_domain": (
+            "applied Z-corrected working image; artificial polygon exterior excluded"
+            if input_source == "z_corrected"
+            else "original source for limits; working image for preview"
+        ),
     }
     return report, preview
 
@@ -206,6 +267,7 @@ def _options_from_report(report: dict) -> dict:
         "lower": report["percentiles"][0],
         "upper": report["percentiles"][1],
         "norm3D": report["norm3D"],
+        "input_source": report.get("input_source", "working_original"),
     }
 
 
@@ -281,6 +343,7 @@ class NormalizationController(QObject):
         panel.normalization_roi_clear_requested.connect(self.clear_roi)
         panel.normalization_roi_visibility_requested.connect(self.set_roi_visible)
         panel.normalization_roi_reuse_crop_requested.connect(self.reuse_crop_roi)
+        project_state.z_correction_changed.connect(self._z_correction_changed)
 
     @property
     def busy(self) -> bool:
@@ -633,6 +696,7 @@ class NormalizationController(QObject):
             metadata={
                 "nucytoseg_normalization_preview": True,
                 "channel_index": channel.index,
+                "normalization_input_source": report["input_source"],
             },
         )
         self._report = deepcopy(report)
@@ -642,9 +706,19 @@ class NormalizationController(QObject):
         lines = [
             "Normalization Preview",
             f"Source channel: {report['channel_name']}",
+            "Preview input: "
+            + (
+                "Applied Z-corrected working image"
+                if report["input_source"] == "z_corrected"
+                else "Original working image"
+            ),
             f"Mode: {report['mode'].replace('_', ' ')}",
             f"Percentiles: {report['percentiles'][0]:g} → {report['percentiles'][1]:g}",
-            f"Original full-volume limits: {full_low:.6g} → {full_high:.6g}",
+            (
+                f"Z-corrected working-domain limits: {full_low:.6g} → {full_high:.6g}"
+                if report["input_source"] == "z_corrected"
+                else f"Original full-volume limits: {full_low:.6g} → {full_high:.6g}"
+            ),
         ]
         if report["roi_lowhigh"] is not None:
             roi_low, roi_high = report["roi_lowhigh"]
@@ -724,6 +798,13 @@ class NormalizationController(QObject):
                 "Normalization settings changed. Recalculate the preview before applying."
             )
 
+    def _z_correction_changed(self, *args) -> None:
+        report = self._report or (
+            (self.project_state.normalization_configuration or {}).get("provenance")
+        )
+        if report and report.get("input_source") == "z_corrected":
+            self.invalidate()
+
     def reset(self) -> None:
         self.remove_preview()
         self._report = None
@@ -765,4 +846,7 @@ class NormalizationController(QObject):
         )
         self.panel.normalization_roi_reuse_crop_requested.disconnect(
             self.reuse_crop_roi
+        )
+        self.project_state.z_correction_changed.disconnect(
+            self._z_correction_changed
         )

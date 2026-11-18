@@ -1,7 +1,7 @@
 """Workflow context pages for the independent NuCytoSeg interface."""
 from __future__ import annotations
 
-from qtpy.QtCore import Signal
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import QLabel, QScrollArea, QStackedWidget, QVBoxLayout, QWidget
 
 from .workflow_navigation import WORKFLOWS
@@ -62,6 +62,9 @@ class ContextPanel(QWidget):
                 segmentation_scroll = QScrollArea()
                 segmentation_scroll.setWidgetResizable(True)
                 segmentation_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                segmentation_scroll.setHorizontalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                )
                 segmentation_scroll.setWidget(self.segmentation_page)
                 self._indexes[workflow.key] = self.stack.addWidget(
                     segmentation_scroll

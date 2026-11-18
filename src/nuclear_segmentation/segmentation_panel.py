@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 import math
 
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QWidget,
@@ -26,6 +27,8 @@ class SegmentationPanel(QWidget):
         section = CollapsibleSection("segmentation_input", "Segmentation Input")
         form = QFormLayout()
         form.setContentsMargins(10, 8, 10, 10)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.input_values = {}
         for key, title in (
             ("source", "Source image"),
@@ -40,6 +43,11 @@ class SegmentationPanel(QWidget):
             value = QLabel("—")
             value.setObjectName(f"segmentation_{key}")
             value.setWordWrap(True)
+            value.setMinimumWidth(0)
+            value.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            )
             self.input_values[key] = value
             form.addRow(title, value)
         section.set_content_layout(form)
@@ -142,6 +150,11 @@ class SegmentationPanel(QWidget):
         project_state.z_correction_changed.connect(self.refresh)
         self._mode_changed()
 
+    def _set_input_text(self, key: str, text: str) -> None:
+        value = str(text)
+        self.input_values[key].setText(value)
+        self.input_values[key].setToolTip(value)
+
     @staticmethod
     def _double(minimum, maximum, value, decimals=3):
         field = QDoubleSpinBox()
@@ -194,8 +207,8 @@ class SegmentationPanel(QWidget):
         dataset = state.working_dataset
         channel = next((item for item in state.channels if item.index == state.segmentation_channel_index), None)
         if dataset is None:
-            for label in self.input_values.values():
-                label.setText("—")
+            for key in self.input_values:
+                self._set_input_text(key, "—")
         else:
             shape = dataset.data_czyx.shape[1:]
             spacing = tuple(float(value) for value in state.voxel_spacing_zyx_um)
@@ -205,25 +218,25 @@ class SegmentationPanel(QWidget):
             if crop is not None:
                 roi = "polygon ROI retained" if crop.selection_type == "polygon" else "rectangular crop"
                 crop_text = f"Applied — {roi}"
-            self.input_values["source"].setText(dataset.source_filename)
-            self.input_values["channel"].setText("Not designated" if channel is None else f"Index {channel.index}: {channel.name}")
-            self.input_values["shape"].setText(" × ".join(str(int(v)) for v in shape))
-            self.input_values["spacing"].setText(" × ".join(f"{v:.6g}" for v in spacing) + " µm")
-            self.input_values["anisotropy"].setText(f"{anisotropy:.6g} (Z / mean XY)")
-            self.input_values["crop"].setText(crop_text)
+            self._set_input_text("source", dataset.source_filename)
+            self._set_input_text("channel", "Not designated" if channel is None else f"Index {channel.index}: {channel.name}")
+            self._set_input_text("shape", " × ".join(str(int(v)) for v in shape))
+            self._set_input_text("spacing", " × ".join(f"{v:.6g}" for v in spacing) + " µm")
+            self._set_input_text("anisotropy", f"{anisotropy:.6g} (Z / mean XY)")
+            self._set_input_text("crop", crop_text)
             if channel is not None and channel.index in state.z_correction_applied:
                 z_text = "Applied for selected channel"
             elif channel is not None and channel.index in state.z_correction_reports:
                 z_text = "Preview calculated; not applied"
             else:
                 z_text = "Not applied"
-            self.input_values["z_correction"].setText(z_text)
+            self._set_input_text("z_correction", z_text)
             normalization = state.normalization_configuration or {}
             mode = normalization.get("mode", "cellpose_default")
             text = mode.replace("_", " ").title()
             if mode not in {"cellpose_default", "disabled"}:
                 text += " — applied" if state.normalization_is_current else " — outdated"
-            self.input_values["normalization"].setText(text)
+            self._set_input_text("normalization", text)
 
         missing = []
         if dataset is None:
