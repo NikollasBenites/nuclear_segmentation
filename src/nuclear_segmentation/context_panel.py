@@ -10,6 +10,7 @@ from .preprocessing_panel import PreprocessingPanel
 from .image_export_panel import ImageExportPanel
 from .segmentation_panel import SegmentationPanel
 from .mask_review_panel import MaskReviewPanel
+from .quantification_panel import QuantificationPanel
 
 
 SECTIONS = {
@@ -81,6 +82,19 @@ class ContextPanel(QWidget):
                 )
                 review_scroll.setWidget(self.mask_review_page)
                 self._indexes[workflow.key] = self.stack.addWidget(review_scroll)
+                continue
+            if workflow.key == "quantification":
+                self.quantification_page = QuantificationPanel(project_state)
+                quantification_scroll = QScrollArea()
+                quantification_scroll.setWidgetResizable(True)
+                quantification_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                quantification_scroll.setHorizontalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                )
+                quantification_scroll.setWidget(self.quantification_page)
+                self._indexes[workflow.key] = self.stack.addWidget(
+                    quantification_scroll
+                )
                 continue
             if workflow.key == "export":
                 self.export_page = ImageExportPanel()

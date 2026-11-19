@@ -72,6 +72,7 @@ class ProjectState(QObject):
     filtering_result_changed = Signal(object, bool)
     perinuclear_markers_changed = Signal(object)
     scientific_roi_changed = Signal(object, bool)
+    quantification_result_changed = Signal(object, bool)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -104,6 +105,8 @@ class ProjectState(QObject):
         self.scientific_roi: np.ndarray | None = None
         self.scientific_roi_reviewed = False
         self.scientific_roi_provenance: dict[str, Any] | None = None
+        self.quantification_result: dict[str, Any] | None = None
+        self.quantification_is_current = False
 
     @property
     def dataset_ready(self) -> bool:
@@ -388,6 +391,7 @@ class ProjectState(QObject):
         self.channels_changed.emit(())
         self.perinuclear_markers_changed.emit(())
         self.scientific_roi_changed.emit(None, False)
+        self.quantification_result_changed.emit(None, False)
         self.normalization_changed.emit(None, False)
         self.normalization_roi_changed.emit(None)
         self.z_correction_changed.emit(None)
@@ -486,6 +490,7 @@ class ProjectState(QObject):
             self.segmentation_result_changed.emit(None, False)
 
     def set_filtering_result(self, result: dict[str, Any]) -> None:
+        self.clear_quantification_result()
         stored = dict(result)
         filtered = np.asarray(stored["filtered_masks"])
         filtered.setflags(write=False)
@@ -498,13 +503,33 @@ class ProjectState(QObject):
         if self.filtering_result is None or not self.filtering_is_current:
             return
         self.filtering_is_current = False
+        self.invalidate_quantification()
         self.filtering_result_changed.emit(self.filtering_result, False)
 
     def clear_filtering_result(self, *, emit: bool = True) -> None:
+        self.clear_quantification_result(emit=emit)
         self.filtering_result = None
         self.filtering_is_current = False
         if emit:
             self.filtering_result_changed.emit(None, False)
+
+    def set_quantification_result(self, result: dict[str, Any]) -> None:
+        self.quantification_result = dict(result)
+        self.quantification_is_current = True
+        self.quantification_result_changed.emit(self.quantification_result, True)
+
+    def invalidate_quantification(self) -> None:
+        if self.quantification_result is None or not self.quantification_is_current:
+            return
+        self.quantification_is_current = False
+        self.quantification_result_changed.emit(self.quantification_result, False)
+
+    def clear_quantification_result(self, *, emit: bool = True) -> None:
+        had_result = self.quantification_result is not None
+        self.quantification_result = None
+        self.quantification_is_current = False
+        if emit and had_result:
+            self.quantification_result_changed.emit(None, False)
 
     def set_scientific_roi(self, mask, provenance, *, reviewed: bool) -> None:
         roi = np.asarray(mask, dtype=bool)
