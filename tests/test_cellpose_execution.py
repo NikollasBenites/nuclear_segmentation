@@ -157,6 +157,10 @@ def test_authoritative_stage_maps_parameters_without_preprocessing_again(
     assert result["mask_shape"] == source.shape[1:]
     assert result["object_count"] == 1
     assert result["cellpose_normalize"] is True
+    assert np.shares_memory(
+        result["model_input_volume"], scientific.namespace["model_input_volume"]
+    )
+    assert not result["model_input_volume"].flags.writeable
 
 
 class _Layer:

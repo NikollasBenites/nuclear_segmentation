@@ -233,29 +233,60 @@ class ZCorrectionController(QObject):
             )
             self.panel.set_channel_state(index, "Preview ready")
         self._set_previews(previews, preview_index)
+        outdated = []
+        for index in reports:
+            if report := self.project_state.z_correction_reports.get(index):
+                if report["options"] != self.panel.options_for(index):
+                    outdated.append(index)
+            self.invalidate_channel(index)
         self.show_results(preview_index)
-        self._status(
-            f"Z-correction preview ready for {len(reports)} channel(s)."
-        )
+        if outdated:
+            self._status(
+                "Z-correction calculation finished, but settings changed during "
+                "calculation. Previous-result previews are marked outdated."
+            )
+        else:
+            self._status(
+                f"Z-correction preview ready for {len(reports)} channel(s)."
+            )
 
     def _set_previews(self, previews: dict[int, np.ndarray], inspected_index: int) -> None:
-        self.remove_preview()
         spacing = tuple(self.project_state.voxel_spacing_zyx_um)
         offset_y, offset_x = self.project_state.working_offset_yx
         for channel_index, data in previews.items():
             channel = self._channel(channel_index)
-            layer = self.viewer.add_image(
-                data,
-                name=f"Z-corrected preview · {channel.name}",
-                colormap=channel.colormap,
-                blending="additive",
-                scale=spacing,
-                translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
-                units=("µm", "µm", "µm"),
-                metadata={
-                    "nucytoseg_z_correction_preview": True,
-                    "channel_index": int(channel_index),
-                },
+            report = self.project_state.z_correction_reports[int(channel_index)]
+            layer = self.preview_layers.get(int(channel_index))
+            if layer is None or layer not in self.viewer.layers:
+                layer = self.viewer.add_image(
+                    data,
+                    name=f"Z-corrected preview · {channel.name}",
+                    colormap=channel.colormap,
+                    blending="additive",
+                    scale=spacing,
+                    translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
+                    units=("µm", "µm", "µm"),
+                    metadata={
+                        "nucytoseg_z_correction_preview": True,
+                        "channel_index": int(channel_index),
+                    },
+                )
+            else:
+                # Replace only after successful calculation. Display choices such
+                # as visibility, colormap, opacity and blending remain untouched.
+                layer.data = data
+                layer.name = f"Z-corrected preview · {channel.name}"
+                layer.scale = spacing
+                layer.translate = (
+                    0.0, offset_y * spacing[1], offset_x * spacing[2]
+                )
+                layer.units = ("µm", "µm", "µm")
+            layer.metadata.update(
+                nucytoseg_z_correction_preview=True,
+                channel_index=int(channel_index),
+                z_correction_options=deepcopy(report["options"]),
+                z_correction_preview_status="current",
+                z_correction_applied=False,
             )
             self.preview_layers[int(channel_index)] = layer
         self.preview_channel_index = int(inspected_index)
@@ -301,7 +332,13 @@ class ZCorrectionController(QObject):
         for index in indexes:
             self.panel.set_channel_state(index, "Applied")
             self.show_results(index)
-            self.remove_preview(index)
+            layer = self.preview_layers.get(index)
+            if layer is not None and layer in self.viewer.layers:
+                layer.name = f"Z-corrected applied · {self._channel(index).name}"
+                layer.metadata.update(
+                    z_correction_preview_status="current",
+                    z_correction_applied=True,
+                )
         self._status(
             "Z correction applied as project configuration. No Cellpose model has run."
         )
@@ -309,12 +346,35 @@ class ZCorrectionController(QObject):
 
     def invalidate_channel(self, channel_index: int) -> None:
         index = int(channel_index)
-        if index in self.project_state.z_correction_reports:
-            self.project_state.invalidate_z_correction(index)
-            self.panel.set_channel_state(index, "Outdated settings")
-            self.remove_preview(index)
+        report = self.project_state.z_correction_reports.get(index)
+        if report is None:
+            return
+        current = self.panel.options_for(index)
+        matches = report["options"] == current
+        applied = index in self.project_state.z_correction_applied
+        self.panel.set_channel_state(
+            index,
+            "Applied" if matches and applied
+            else "Preview ready" if matches
+            else "Outdated settings",
+        )
+        layer = self.preview_layers.get(index)
+        if layer is not None and layer in self.viewer.layers:
+            layer.metadata["z_correction_preview_status"] = (
+                "current" if matches else "outdated"
+            )
+            if not matches:
+                layer.name = (
+                    f"Z-corrected preview (outdated) · {self._channel(index).name}"
+                )
+            elif applied:
+                layer.name = f"Z-corrected applied · {self._channel(index).name}"
+            else:
+                layer.name = f"Z-corrected preview · {self._channel(index).name}"
+        if not matches:
             self._status(
-                f"{self._channel(index).name} settings changed; recalculate its preview."
+                f"{self._channel(index).name} settings changed; the previous "
+                "preview remains visible but is outdated. Recalculate before applying."
             )
 
     def invalidate_all(self) -> None:
@@ -358,6 +418,7 @@ class ZCorrectionController(QObject):
         smooth = np.asarray(report["smoothed_profile"], dtype=float)
         gain = np.asarray(report["gain"], dtype=float)
         applied = index in self.project_state.z_correction_applied
+        current = report["options"] == self.panel.options_for(index)
         text = "\n".join(
             (
                 f"Channel: {self._channel(index).name} (index {index})",
@@ -370,7 +431,7 @@ class ZCorrectionController(QObject):
                 f"Applied gain: {np.nanmin(gain):.6g}–{np.nanmax(gain):.6g}",
                 f"Processing duration: {report['processing_seconds']:.3f} s",
                 f"Diagnostic sampling: {report['diagnostic_scope']}",
-                "Preview status: current",
+                f"Preview status: {'current' if current else 'outdated settings'}",
                 f"Applied configuration: {'yes' if applied else 'no'}",
                 "Segmentation routing: "
                 + (

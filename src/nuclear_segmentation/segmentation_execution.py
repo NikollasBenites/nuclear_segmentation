@@ -38,6 +38,8 @@ def execute_cellpose_stage(scientific_input, progress=print):
     progress("Validating segmentation results and finalizing application state…")
     masks = np.asarray(namespace["masks"])
     masks.setflags(write=False)
+    model_input = np.asarray(namespace["model_input_volume"]).view()
+    model_input.setflags(write=False)
     result = {
         "masks": masks,
         "mask_shape": tuple(int(value) for value in masks.shape),
@@ -55,6 +57,9 @@ def execute_cellpose_stage(scientific_input, progress=print):
         "evaluation_seconds": namespace["CELLPOSE_EVAL_SECONDS"],
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "raw_3d_probs": namespace.get("raw_3d_probs"),
+        # Retain the exact inference-domain view for QC without reloading or
+        # repeating Z correction. This is not a copy or display-adjusted data.
+        "model_input_volume": model_input,
     }
     for key in ("model", "flows", "styles"):
         namespace.pop(key, None)

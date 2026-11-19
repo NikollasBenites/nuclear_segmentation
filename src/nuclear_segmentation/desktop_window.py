@@ -1161,6 +1161,7 @@ class DesktopWindow(QMainWindow):
             self.context_panel.segmentation_page.dispose()
             self.context_panel.mask_review_page.dispose()
             self.context_panel.quantification_page.dispose()
+            self.context_panel.quality_control_page.dispose()
             self.layer_panel.dispose()
             self.image_display_panel.dispose()
             self.viewer_toolbar.dispose()

@@ -304,8 +304,10 @@ def test_applied_z_preview_source_cellpose_default_and_invalidation(
     _wait(qapp, lambda: not window.z_correction.busy)
     temporary = window.z_correction.preview_layers[0]
     assert window.z_correction.apply([0])
-    assert temporary not in window.embedding.viewer.layers
-    assert 0 not in window.z_correction.preview_layers
+    assert temporary in window.embedding.viewer.layers
+    assert window.z_correction.preview_layers[0] is temporary
+    assert temporary.metadata["z_correction_applied"] is True
+    assert "applied" in temporary.name.lower()
     assert 0 in window.project_state.z_correction_reports
     assert 0 in window.project_state.z_correction_options
     assert 0 in window.project_state.z_correction_applied
@@ -346,9 +348,11 @@ def test_applied_z_preview_source_cellpose_default_and_invalidation(
 
     z_panel.fields["percentile"].setValue(98.0)
     qapp.processEvents()
-    assert window.normalization.preview_layer is None
-    assert not window.project_state.normalization_is_current
-    assert preprocessing.normalization_input_combo.currentData() == "working_original"
+    assert window.normalization.preview_layer is not None
+    assert window.project_state.normalization_is_current
+    assert preprocessing.normalization_input_combo.currentData() == "z_corrected"
+    assert temporary.metadata["z_correction_preview_status"] == "outdated"
+    assert 0 in window.project_state.z_correction_applied
     window.close()
 
 

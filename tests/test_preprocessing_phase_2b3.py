@@ -250,11 +250,27 @@ def test_multichannel_z_ui_apply_routing_profiles_reset_and_close(
         "correct_z",
         lambda volume, options: (_ for _ in ()).throw(RuntimeError("synthetic failure")),
     )
+    before_failure = dict(window.z_correction.preview_layers)
     panel._request_calculate()
     _wait(qapp, lambda: not window.z_correction.busy)
     assert set(window.project_state.z_correction_reports) == {0, 1, 2}
     assert "failed" in panel.status.text().lower()
+    assert window.z_correction.preview_layers == before_failure
+    assert all(layer in window.embedding.viewer.layers for layer in before_failure.values())
     monkeypatch.setattr(z_workspace, "correct_z", original_correct_z)
+    preserved = window.z_correction.preview_layers[1]
+    preserved.visible = False
+    preserved.opacity = .37
+    panel._request_calculate()
+    _wait(qapp, lambda: not window.z_correction.busy)
+    assert window.z_correction.preview_layers[1] is preserved
+    assert preserved.visible is False
+    assert preserved.opacity == pytest.approx(.37)
+    assert len([
+        layer for layer in window.embedding.viewer.layers
+        if layer.metadata.get("nucytoseg_z_correction_preview")
+        and layer.metadata.get("channel_index") == 1
+    ]) == 1
     panel.results.copy_results()
     assert "Channel: MAP2" in QApplication.clipboard().text()
     panel.results.set_expanded(False)
@@ -289,13 +305,15 @@ def test_multichannel_z_ui_apply_routing_profiles_reset_and_close(
     assert "Reset normalization" in panel.status.text()
     window.normalization.reset()
     assert window.z_correction.apply([0, 1])
-    assert set(window.z_correction.preview_layers) == {2}
+    assert set(window.z_correction.preview_layers) == {0, 1, 2}
+    assert preview_layers[0].metadata["z_correction_applied"] is True
+    assert preview_layers[1].metadata["z_correction_applied"] is True
     assert preview_layers[2] in window.embedding.viewer.layers
     assert window.z_correction.apply([2])
     assert window.project_state.z_correction_applied == {0, 1, 2}
-    assert not window.z_correction.preview_layers
+    assert set(window.z_correction.preview_layers) == {0, 1, 2}
     assert all(
-        layer not in window.embedding.viewer.layers
+        layer in window.embedding.viewer.layers
         for layer in preview_layers.values()
     )
     assert all(
@@ -312,15 +330,21 @@ def test_multichannel_z_ui_apply_routing_profiles_reset_and_close(
     panel.inspect_combo.setCurrentIndex(panel.inspect_combo.findData(1))
     panel.fields["percentile"].setValue(97)
     qapp.processEvents()
+    assert not window.z_correction.busy
     assert "Outdated settings" in panel.channel_list.item(1).text()
-    assert 1 not in window.project_state.z_correction_reports
+    assert 1 in window.project_state.z_correction_reports
     assert 0 in window.project_state.z_correction_reports
+    assert window.z_correction.preview_layers[1] is preview_layers[1]
+    assert preview_layers[1] in window.embedding.viewer.layers
+    assert preview_layers[1].metadata["z_correction_preview_status"] == "outdated"
+    assert not window.z_correction.apply([1])
 
     panel.channel_list.clearSelection()
     panel.channel_list.item(1).setSelected(True)
     window.z_correction.reset_selected([1])
     assert 1 not in window.project_state.z_correction_reports
     assert 0 in window.project_state.z_correction_reports
+    assert 1 not in window.z_correction.preview_layers
     working = window.project_state.apply_crop(
         (1, 7, 1, 8),
         [[1, 1], [1, 8], [7, 8], [7, 1]],

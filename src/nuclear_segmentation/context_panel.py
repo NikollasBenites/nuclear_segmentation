@@ -11,6 +11,7 @@ from .image_export_panel import ImageExportPanel
 from .segmentation_panel import SegmentationPanel
 from .mask_review_panel import MaskReviewPanel
 from .quantification_panel import QuantificationPanel
+from .live_plots import ProjectLivePlots
 
 
 SECTIONS = {
@@ -95,6 +96,17 @@ class ContextPanel(QWidget):
                 self._indexes[workflow.key] = self.stack.addWidget(
                     quantification_scroll
                 )
+                continue
+            if workflow.key == "quality_control":
+                self.quality_control_page = ProjectLivePlots(project_state)
+                quality_scroll = QScrollArea()
+                quality_scroll.setWidgetResizable(True)
+                quality_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                quality_scroll.setHorizontalScrollBarPolicy(
+                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+                )
+                quality_scroll.setWidget(self.quality_control_page)
+                self._indexes[workflow.key] = self.stack.addWidget(quality_scroll)
                 continue
             if workflow.key == "export":
                 self.export_page = ImageExportPanel()

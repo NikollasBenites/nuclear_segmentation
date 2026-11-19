@@ -1,5 +1,6 @@
 """Embedded, debounced plots of measured objects and the current selection."""
 import numpy as np
+import pandas as pd
 from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import QWidget, QVBoxLayout, QComboBox, QLabel
 from matplotlib.figure import Figure
@@ -44,19 +45,30 @@ class LivePlots(QWidget):
         compact(self)
 
     def populate_columns(self, *_):
+        selected = self.column.currentData()
         self.column.blockSignals(True)
         self.column.clear()
         props = self.ns.get('filter_properties')
         kind = self.kind.currentText()
         if props is not None and kind == 'Intensity':
-            prefix = self.ns.get('intensity_column_prefix', 'mean_intensity_')
-            for name in props.columns:
-                if name.startswith(prefix):
-                    self.column.addItem(name[len(prefix):], name)
+            columns = self.ns.get('INTENSITY_COLUMNS')
+            if columns is not None:
+                for label, name in columns:
+                    if name in props:
+                        self.column.addItem(label, name)
+            else:
+                prefix = self.ns.get('intensity_column_prefix', 'mean_intensity_')
+                for name in props.columns:
+                    if name.startswith(prefix):
+                        self.column.addItem(name[len(prefix):], name)
         elif kind == 'Perinuclear':
             for name, info in self.ns.get('PERINUCLEAR_MARKER_RESULTS', {}).items():
                 self.column.addItem(name, info['fraction_column'])
         self.column.setVisible(kind in {'Intensity', 'Perinuclear'})
+        if selected is not None:
+            index = self.column.findData(selected)
+            if index >= 0:
+                self.column.setCurrentIndex(index)
         self.column.blockSignals(False)
         self.schedule()
 
@@ -114,10 +126,14 @@ class LivePlots(QWidget):
         self.render_count += 1
         ax = self.axes
         ax.clear()
+        self._apply_canvas_theme()
         props, keep = self.ns.get('filter_properties'), self.ns.get('current_keep')
         self.last_retained_ids = []
         if props is None or keep is None:
-            self.status.setText('Graphs unavailable: load an analysis or fix invalid filter settings.')
+            self.status.setText(self.ns.get(
+                'unavailable_message',
+                'Graphs unavailable: load an analysis or fix invalid filter settings.',
+            ))
             self.canvas.draw_idle()
             return
         selected = keep.reindex(props.index, fill_value=False).to_numpy(dtype=bool)
@@ -152,6 +168,8 @@ class LivePlots(QWidget):
             ax.set(xlabel='Mask volume (µm³)', ylabel='Sphericity', ylim=(0, 1.05))
             if 'minimum_sphericity' in settings:
                 ax.axhline(settings['minimum_sphericity'], color='darkorange', linestyle='--')
+            if 'minimum_volume_um3' in settings:
+                ax.axvline(settings['minimum_volume_um3'], color='darkorange', linestyle='--')
         else:
             column = 'volume_um3' if kind == 'Volume' else self.column.currentData()
             if not column or column not in props:
@@ -176,6 +194,14 @@ class LivePlots(QWidget):
                 threshold = record.get('minimum_positive_fraction')
             elif kind == 'Volume':
                 threshold = settings.get('minimum_volume_um3')
+            elif kind == 'Intensity':
+                record = settings.get('intensity_filters', {}).get(
+                    self.column.currentText(), {}
+                )
+                threshold = None
+                for value in (record.get('minimum'), record.get('maximum')):
+                    if value is not None:
+                        ax.axvline(value, color='darkorange', linestyle='--')
             else:
                 threshold = None
             if threshold is not None:
@@ -186,4 +212,141 @@ class LivePlots(QWidget):
         note = ' ROI pending review.' if self.ns.get('roi_reviewed') is False else ''
         self.status.setText(('Full stack profile (includes zeros). Z boundaries follow filters.'
                              if kind == 'Z profile' else f'Retained: {int(selected.sum())} / {len(props)}. Automatic update.') + note)
+        self._apply_canvas_theme()
         self.canvas.draw_idle()
+
+    def _apply_canvas_theme(self):
+        if not self.ns.get('dark_theme'):
+            return
+        background, foreground, grid = '#0f1923', '#dce7f1', '#607589'
+        self.figure.set_facecolor(background)
+        self.axes.set_facecolor(background)
+        self.axes.tick_params(colors=foreground)
+        self.axes.xaxis.label.set_color(foreground)
+        self.axes.yaxis.label.set_color(foreground)
+        self.axes.title.set_color(foreground)
+        for spine in self.axes.spines.values():
+            spine.set_color(grid)
+        legend = self.axes.get_legend()
+        if legend is not None:
+            legend.get_frame().set_facecolor(background)
+            legend.get_frame().set_edgecolor(grid)
+            for text in legend.get_texts():
+                text.set_color(foreground)
+
+
+class ProjectLivePlots(LivePlots):
+    """Bind the existing LivePlots widget to current desktop project state."""
+
+    def __init__(self, project_state):
+        self.project_state = project_state
+        self._measurement_identity = None
+        self._profile_identity = None
+        super().__init__({})
+        project_state.segmentation_result_changed.connect(self.sync)
+        project_state.filtering_result_changed.connect(self.sync)
+        project_state.scientific_roi_changed.connect(self.sync)
+        self.sync()
+
+    def _segmentation_volume(self, result):
+        volume = result.get('model_input_volume')
+        if volume is not None:
+            return volume
+        corrections = result.get('z_corrections') or {}
+        channel = result.get('segmentation_channel')
+        correction = corrections.get(channel, {})
+        if correction.get('segmentation'):
+            return None
+        state = self.project_state
+        descriptor = next(
+            (item for item in state.channels if item.name == channel), None
+        )
+        if state.working_dataset is None or descriptor is None:
+            return None
+        return state.working_dataset.data_czyx[descriptor.index]
+
+    def sync(self, *args):
+        if self.disposed:
+            return
+        state = self.project_state
+        segmentation = state.segmentation_result
+        filtering = state.filtering_result
+        self.ns.clear()
+        self.ns['dark_theme'] = True
+        if segmentation is None or not state.segmentation_is_current:
+            self.ns['unavailable_message'] = 'Graphs unavailable: no current segmentation.'
+            self._measurement_identity = None
+            self._set_profile_source(None, None)
+            self.populate_columns()
+            return
+
+        volume = self._segmentation_volume(segmentation)
+        profile_identity = (
+            segmentation.get('completed_at_utc'),
+            id(segmentation),
+            id(volume),
+        )
+        self._set_profile_source(volume, profile_identity)
+        if filtering is None:
+            self.ns['unavailable_message'] = (
+                'Graphs unavailable: calculate scientific measurements.'
+            )
+            self._measurement_identity = None
+            self.populate_columns()
+            return
+        if not state.filtering_is_current:
+            self.ns['unavailable_message'] = (
+                'Graphs unavailable: scientific measurements are outdated.'
+            )
+            self._measurement_identity = None
+            self.populate_columns()
+            return
+
+        properties = filtering['properties']
+        retained = set(int(value) for value in filtering['retained_ids'])
+        self.ns.update(
+            filter_properties=properties,
+            current_keep=pd.Series(
+                properties.index.isin(retained), index=properties.index
+            ),
+            current_filter_settings=lambda: filtering['settings'],
+            roi_reviewed=bool(state.scientific_roi_reviewed),
+            segmentation_volume=volume,
+            PERINUCLEAR_MARKER_RESULTS={
+                item['name']: {'fraction_column': item['column']}
+                for item in filtering.get('perinuclear_definitions', [])
+            },
+        )
+        intensity = filtering.get('intensity_definitions', [])
+        if intensity:
+            self.ns['INTENSITY_COLUMNS'] = [
+                (item['name'], item['column']) for item in intensity
+            ]
+            column = intensity[0]['column']
+            self.ns['INTENSITY_MODE'] = (
+                'background-corrected'
+                if column.startswith('background_corrected_mean_') else 'raw'
+            )
+        identity = id(filtering.get('properties'))
+        if identity != self._measurement_identity:
+            self._measurement_identity = identity
+            self.populate_columns()
+        else:
+            self.schedule()
+
+    def _set_profile_source(self, volume, identity):
+        self.ns['segmentation_volume'] = volume
+        if identity == self._profile_identity:
+            return
+        self._profile_identity = identity
+        self.z_timer.stop()
+        self.z_profile = []
+        self.z_error = None
+
+    def dispose(self):
+        if not self.disposed:
+            state = self.project_state
+            state.segmentation_result_changed.disconnect(self.sync)
+            state.filtering_result_changed.disconnect(self.sync)
+            state.scientific_roi_changed.disconnect(self.sync)
+        super().dispose()

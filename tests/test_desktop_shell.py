@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from qtpy.QtCore import QByteArray, QSettings, Qt
 from qtpy.QtWidgets import QApplication, QWidget
+from qtpy.QtTest import QTest
 
 from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.layer_panel import LAYER_ROLE
@@ -65,6 +66,21 @@ def test_main_window_initialization_and_navigation(window):
     assert window.context_panel.heading.text() == "Segmentation"
     assert window.header_workflow.text() == "SEGMENTATION"
     assert window.embedding.viewer is original_viewer
+
+
+def test_quality_control_uses_one_persistent_plot_widget(window, qapp):
+    plots = window.context_panel.quality_control_page
+    window.set_workflow("quality_control")
+    QTest.qWait(350)
+    assert window.context_panel.heading.text() == "Quality Control"
+    assert plots.isVisible()
+    assert "no current segmentation" in plots.status.text().lower()
+    canvas = plots.canvas
+    window.set_workflow("project")
+    window.set_workflow("quality_control")
+    qapp.processEvents()
+    assert window.context_panel.quality_control_page is plots
+    assert plots.canvas is canvas
 
 
 def test_panel_collapse_expansion_and_context_visibility(window, qapp):
