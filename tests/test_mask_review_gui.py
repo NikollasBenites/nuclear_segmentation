@@ -59,6 +59,7 @@ def review_window(qapp, tmp_path):
         "mask_shape": masks.shape,
         "object_count": 2,
         "device": "cpu",
+        "scientific_config": window.context_panel.segmentation_page.scientific_config(),
     }
     window.project_state.set_segmentation_result(result)
     yield window, masks
@@ -101,6 +102,27 @@ def test_filter_slider_is_debounced_without_requesting_measurement(review_window
     assert recalculated == []
 
 
+def test_pending_segmentation_parameters_preserve_masks_and_filtering(review_window):
+    window, masks = review_window
+    state = window.project_state
+    review = window.context_panel.mask_review_page
+    executed = state.segmentation_result["scientific_config"]
+    state.set_filtering_result({
+        "filtered_masks": np.array(masks, copy=True), "properties": pd.DataFrame(),
+        "retained_ids": (1, 2), "roi_reviewed": True,
+    })
+    window.context_panel.segmentation_page.cellprob.setValue(
+        executed["CELLPROB_THRESHOLD"] - .25
+    )
+    assert state.segmentation_is_current
+    assert state.filtering_is_current
+    assert review.calculate_button.isEnabled()
+    assert window.segmentation.result_layer.name == "Raw Cellpose masks"
+    config = window.filtering._measurement_config()
+    assert config["CELLPROB_THRESHOLD"] == executed["CELLPROB_THRESHOLD"]
+    np.testing.assert_array_equal(state.segmentation_result["masks"], masks)
+
+
 def test_measured_intensity_defines_slider_range(review_window):
     window, _ = review_window
     panel = window.context_panel.mask_review_page
@@ -121,6 +143,64 @@ def test_measured_intensity_defines_slider_range(review_window):
     assert low.editor.minimum() == -5.5
     assert high.editor.maximum() == 2048.75
     assert panel.minimum_volume.editor.maximum() == 81.0
+
+
+def test_optional_filter_controls_follow_active_counts(review_window):
+    window, _ = review_window
+    panel = window.context_panel.mask_review_page
+    base = {
+        "properties": pd.DataFrame({"volume_um3": [20.]}, index=[1]),
+        "raw_mask_shape": (4, 8, 9), "retained_ids": (1,),
+        "roi_reviewed": False,
+        "intensity_definitions": [
+            {"index": 0, "name": "A", "column": "mean_intensity_A",
+             "minimum": 0., "maximum": 100., "enabled": True},
+            {"index": 1, "name": "B", "column": "mean_intensity_B",
+             "minimum": 10., "maximum": 200., "enabled": True},
+        ],
+        "perinuclear_definitions": [],
+        "settings": {"intensity_filters": {}},
+    }
+    panel.configure_filtering(base)
+    assert not panel.intensity_master.isChecked()
+    assert panel.intensity_combination.isHidden()
+    assert all(group.isHidden() for group, *_ in panel.intensity_controls.values())
+    assert panel.perinuclear_combination.isHidden()
+
+    panel.intensity_master.setChecked(True)
+    assert all(not group.isHidden() for group, *_ in panel.intensity_controls.values())
+    assert panel.intensity_combination.isHidden()  # zero individually enabled
+    first = panel.intensity_controls[0]
+    first[1].setChecked(True)
+    assert panel.intensity_combination.isHidden()
+    second = panel.intensity_controls[1]
+    second[1].setChecked(True)
+    assert not panel.intensity_combination.isHidden()
+    first[2].setValue(23.456)
+    panel.intensity_master.setChecked(False)
+    disabled_settings = panel.filter_settings()
+    assert disabled_settings["intensity_filters"] == {}
+    assert disabled_settings["intensity_filtering_enabled"] is False
+    panel.intensity_master.setChecked(True)
+    assert panel.filter_settings()["intensity_filtering_enabled"] is True
+    assert first[2].value() == pytest.approx(23.456)
+
+    one_marker = dict(base, perinuclear_definitions=[{
+        "name": "Marker 1", "channel_index": 0,
+        "column": "marker_1_ring_positive_fraction",
+        "minimum_positive_fraction": .2,
+    }])
+    panel.configure_filtering(one_marker)
+    assert panel.perinuclear_combination.isHidden()
+    assert not next(iter(panel.perinuclear_controls.values()))[0].isHidden()
+    two_markers = dict(one_marker, perinuclear_definitions=[
+        *one_marker["perinuclear_definitions"],
+        {"name": "Marker 2", "channel_index": 1,
+         "column": "marker_2_ring_positive_fraction",
+         "minimum_positive_fraction": .3},
+    ])
+    panel.configure_filtering(two_markers)
+    assert not panel.perinuclear_combination.isHidden()
 
 
 def test_marker_configuration_is_owned_by_stable_channel_index(review_window):

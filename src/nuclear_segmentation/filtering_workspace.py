@@ -83,6 +83,9 @@ def calculate_filtering_prerequisites(project_state, config):
         "perinuclear_combination": str(ns["PERINUCLEAR_COMBINATION"]),
         "perinuclear_filters": {item["name"]: {"column": item["column"], "minimum_positive_fraction": item["minimum_positive_fraction"]} for item in perinuclear_definitions},
         "intensity_combination": str(ns["FILTER_COMBINATION"]),
+        "intensity_filtering_enabled": any(
+            item["enabled"] for item in intensity_definitions
+        ),
         "intensity_filters": {item["name"]: {"column": item["column"], "minimum": item["minimum"], "maximum": item["maximum"]} for item in intensity_definitions if item["enabled"]},
     }
     filtered_properties, keep = apply_filter_settings(
@@ -121,6 +124,7 @@ class FilteringController(QObject):
         self.config_provider = config_provider; self.conflict_operations = tuple(conflict_operations); self._thread = None; self._worker = None
         self.filtered_layer = None; self.roi_layer = None; self._roi_callback = None
         self._roi_transform = None
+        self._pending_filter_settings = None
         panel.calculate_measurements_requested.connect(self.calculate)
         panel.filters_changed.connect(self.apply_filters)
         panel.accept_roi_requested.connect(self.accept_roi)
@@ -130,21 +134,35 @@ class FilteringController(QObject):
     def busy(self): return self._thread is not None
     def calculate(self):
         if self.busy or any(item.busy for item in self.conflict_operations) or not self.state.segmentation_is_current: return False
-        try: config = self.config_provider()
+        try: config = self._measurement_config()
         except Exception as error: self.status_changed.emit(f"Measurements unavailable: {error}"); return False
+        self._pending_filter_settings = (
+            deepcopy(self.panel.filter_settings())
+            if self.state.filtering_result is not None else None
+        )
         worker = FilteringWorker(self.state, config); thread = QThread(self); worker.moveToThread(thread)
         thread.started.connect(worker.run); worker.succeeded.connect(self._calculated); worker.failed.connect(self._failed)
         worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater); thread.finished.connect(self._finished); thread.finished.connect(thread.deleteLater)
         self._worker, self._thread = worker, thread; self.panel.calculate_button.setEnabled(False)
         self.panel.measurement_status.setText("Calculating existing scientific measurements…")
         thread.start(); return True
+    def _measurement_config(self):
+        result = self.state.segmentation_result or {}
+        executed = result.get("scientific_config")
+        config = deepcopy(executed) if executed is not None else self.config_provider()
+        config["PERINUCLEAR_MARKERS"] = self.state.legacy_perinuclear_markers()
+        return config
     def _calculated(self, result):
+        if self._pending_filter_settings is not None:
+            result = self._result_with_settings(
+                result, self._pending_filter_settings, result["scientific_roi"]
+            )
         self.state.set_filtering_result(result); self._create_layers(result)
         self.panel.configure_filtering(result, True); self.status_changed.emit("Scientific measurements and preliminary filters are ready.")
     def _failed(self, text):
         message = str(text).strip().splitlines()[-1]; self.panel.measurement_status.setText("Measurement failed: " + message); self.status_changed.emit("Measurement failed: " + message)
     def _finished(self):
-        self._thread = None; self._worker = None; self.panel.calculate_button.setEnabled(self.state.segmentation_is_current)
+        self._thread = None; self._worker = None; self._pending_filter_settings = None; self.panel.calculate_button.setEnabled(self.state.segmentation_is_current)
     def _create_layers(self, result):
         spacing = tuple(self.state.voxel_spacing_zyx_um); oy, ox = self.state.working_offset_yx; translate = (0, oy * spacing[1], ox * spacing[2])
         self.clear_layers()
@@ -163,13 +181,34 @@ class FilteringController(QObject):
         if current is None or not self.state.filtering_is_current or self.busy: return
         try:
             settings = self.panel.filter_settings(); roi = np.asarray(self.roi_layer.data) > 0 if self.roi_layer is not None else current["scientific_roi"]
-            properties, keep = apply_filter_settings(current["properties"], self.state.segmentation_result["masks"], roi, settings, self.state.voxel_spacing_zyx_um[0])
-            retained = properties.index[keep].to_numpy(dtype=int); masks = self.state.segmentation_result["masks"]
-            updated = dict(current, properties=properties, settings=settings, retained_ids=tuple(int(v) for v in retained), retained_count=len(retained), filtered_masks=np.where(np.isin(masks, retained), masks, 0))
+            updated = self._result_with_settings(current, settings, roi)
             self.state.set_filtering_result(updated)
             if self.filtered_layer is not None: self.filtered_layer.data = updated["filtered_masks"]
             self.panel.update_filter_summary(updated, True); self.panel.update_selected_properties(self.panel._selected_id)
         except ValueError as error: self.panel.filter_summary.setText(f"Invalid filter settings: {error}")
+    def _result_with_settings(self, current, settings, roi):
+        settings = deepcopy(settings)
+        columns = set(current["properties"].columns)
+        settings["intensity_filters"] = {
+            name: item for name, item in settings["intensity_filters"].items()
+            if item["column"] in columns
+        }
+        settings["perinuclear_filters"] = {
+            name: item for name, item in settings["perinuclear_filters"].items()
+            if item["column"] in columns
+        }
+        masks = self.state.segmentation_result["masks"]
+        properties, keep = apply_filter_settings(
+            current["properties"], masks, roi, settings,
+            self.state.voxel_spacing_zyx_um[0],
+        )
+        retained = properties.index[keep].to_numpy(dtype=int)
+        return dict(
+            current, properties=properties, settings=settings,
+            retained_ids=tuple(int(value) for value in retained),
+            retained_count=len(retained),
+            filtered_masks=np.where(np.isin(masks, retained), masks, 0),
+        )
     def accept_roi(self):
         if self.roi_layer is None or self.state.filtering_result is None: return
         expected_scale, expected_translate = self._roi_transform
@@ -206,6 +245,7 @@ class FilteringController(QObject):
             self.panel.measurement_status.setText(str(error))
             return
         if measurement_changed:
+            self.panel.set_perinuclear_filter_defaults(records)
             message = "Perinuclear marker measurement configuration changed — recalculate measurements."
         else:
             self.panel.set_perinuclear_filter_defaults(records)

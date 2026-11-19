@@ -120,3 +120,49 @@ Additional native verification:
    rerunning Cellpose; recalculate and confirm new shell measurements appear.
 6. Change only minimum positive fraction and confirm live filtering updates
    without recalculating morphology or shells.
+
+## Phase 2C.3.2.2 result preservation and conditional controls
+
+The outdated-mask defect was caused by a direct connection from every Cellpose
+parameter edit to `ProjectState.invalidate_segmentation()`. Parameter edits now
+represent pending settings for the next explicit run. Existing masks,
+measurements, filtering results, and reviewed ROI state remain current, while a
+non-blocking message explains that another run is required to apply the pending
+settings.
+
+Every GUI execution result stores the validated scientific configuration used
+by its worker. Filtering starts from that executed snapshot, then overlays the
+current perinuclear measurement configuration. Consequently, an unexecuted
+model, device, threshold, or inference-option edit cannot alter measurement
+provenance. Existing ProjectState invalidation remains unchanged for image,
+crop, calibration, normalization, applied Z-correction, channel identity, and
+project lifecycle changes. Successful reruns replace results through the
+existing lifecycle; failed reruns leave compatible prior results intact.
+
+Optional filter controls are now conditional:
+
+- **Enable Intensity Filtering** controls whether cached intensity measurements
+  participate in exclusion. Turning it off hides channel thresholds and the
+  combination selector without deleting their values or measurements.
+- Intensity **all/any** is visible only when at least two individual channels
+  are enabled.
+- Perinuclear threshold controls appear only for enabled, successfully measured
+  markers, and **all/any** appears only when at least two are active.
+- Recalculation carries forward compatible cached filter settings, including a
+  disabled intensity master state, while discarding columns that no longer
+  exist after a measurement-configuration change.
+
+Native verification additions:
+
+1. Complete segmentation and measurement/filter review, then change several
+   Cellpose parameters. Confirm raw and live masks remain current and the
+   pending-settings message appears.
+2. Run again successfully and confirm the result and executed provenance are
+   replaced. Trigger a controlled failed rerun and confirm the prior result is
+   retained.
+3. Change crop or calibration and confirm the previous result is still marked
+   scientifically incompatible/outdated.
+4. Disable intensity filtering, confirm thresholds disappear and live masks
+   update from cached measurements, then re-enable it and confirm values return.
+5. Exercise zero, one, and two enabled intensity channels and markers; confirm
+   each **all/any** selector appears only for two or more active filters.

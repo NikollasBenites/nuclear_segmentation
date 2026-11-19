@@ -191,12 +191,16 @@ class MaskReviewPanel(QWidget):
         form.addRow("Z guard mode", self.z_guard_mode)
         layout.addLayout(form)
         self.intensity_combination = QComboBox(); self.intensity_combination.addItems(["all", "any"])
-        layout.addWidget(QLabel("Channel intensity filters (enabled channels combined by)"))
+        self.intensity_master = QCheckBox("Enable Intensity Filtering")
+        self.intensity_label = QLabel("Channel intensity filters (enabled channels combined by)")
+        layout.addWidget(self.intensity_master)
+        layout.addWidget(self.intensity_label)
         layout.addWidget(self.intensity_combination)
         self.intensity_layout = QVBoxLayout(); layout.addLayout(self.intensity_layout)
         self.intensity_controls = {}
         self.perinuclear_combination = QComboBox(); self.perinuclear_combination.addItems(["all", "any"])
-        layout.addWidget(QLabel("Perinuclear marker filters (combined by)"))
+        self.perinuclear_label = QLabel("Perinuclear marker filters (combined by)")
+        layout.addWidget(self.perinuclear_label)
         layout.addWidget(self.perinuclear_combination)
         self.perinuclear_layout = QVBoxLayout(); layout.addLayout(self.perinuclear_layout)
         self.perinuclear_controls = {}
@@ -238,6 +242,7 @@ class MaskReviewPanel(QWidget):
             widget.valueChanged.connect(self._schedule_filters)
         for widget in (self.z_guard_mode, self.intensity_combination, self.perinuclear_combination):
             widget.currentTextChanged.connect(self._schedule_filters)
+        self.intensity_master.toggled.connect(self._intensity_master_changed)
 
         section = CollapsibleSection(
             "selected_mask_information", "Selected Mask Information"
@@ -380,31 +385,43 @@ class MaskReviewPanel(QWidget):
         self.intensity_controls = {}; self.perinuclear_controls = {}
         definitions = result.get("perinuclear_definitions", [])
         self.perinuclear_filter_note.setVisible(not definitions)
-        for item in result.get("intensity_definitions", []):
+        intensity_definitions = result.get("intensity_definitions", [])
+        result_settings = result.get("settings") or {}
+        active_names = set(result_settings.get("intensity_filters", {}))
+        self.intensity_master.blockSignals(True)
+        self.intensity_master.setChecked(
+            bool(result_settings.get("intensity_filtering_enabled", active_names))
+        )
+        self.intensity_master.blockSignals(False)
+        for item in intensity_definitions:
             group = QGroupBox(f"{item['name']} (channel {item['index'] + 1})")
-            form = QFormLayout(group); enabled = QCheckBox("Enable"); enabled.setChecked(item.get("enabled", True))
+            form = QFormLayout(group); enabled = QCheckBox("Enable"); enabled.setChecked(item["name"] in active_names)
             low = SyncedNumericControl(item["minimum"], item["maximum"], 9)
             high = SyncedNumericControl(item["minimum"], item["maximum"], 9)
             low.setValue(item["minimum"]); high.setValue(item["maximum"])
             form.addRow(enabled); form.addRow("Minimum", low); form.addRow("Maximum", high)
-            enabled.toggled.connect(self._schedule_filters); low.valueChanged.connect(self._schedule_filters); high.valueChanged.connect(self._schedule_filters)
+            enabled.toggled.connect(self._intensity_channel_changed); low.valueChanged.connect(self._schedule_filters); high.valueChanged.connect(self._schedule_filters)
             self.intensity_layout.addWidget(group); self.intensity_controls[item["index"]] = (group, enabled, low, high, item)
         for item in definitions:
             group = QGroupBox(item["name"]); form = QFormLayout(group)
             minimum = SyncedNumericControl(0, 1, 6); minimum.setValue(item["minimum_positive_fraction"])
             form.addRow("Minimum positive fraction", minimum); minimum.valueChanged.connect(self._schedule_filters)
             self.perinuclear_layout.addWidget(group); self.perinuclear_controls[item["name"]] = (group, minimum, item)
+        self._update_optional_filter_visibility()
 
     def filter_settings(self):
         intensity = {}
-        for _, enabled, low, high, item in self.intensity_controls.values():
-            if enabled.isChecked(): intensity[item["name"]] = {"column": item["column"], "minimum": low.value(), "maximum": high.value()}
+        if self.intensity_master.isChecked():
+            for _, enabled, low, high, item in self.intensity_controls.values():
+                if enabled.isChecked(): intensity[item["name"]] = {"column": item["column"], "minimum": low.value(), "maximum": high.value()}
         perinuclear = {name: {"column": item["column"], "minimum_positive_fraction": control.value()} for name, (_, control, item) in self.perinuclear_controls.items()}
         return {"minimum_volume_um3": self.minimum_volume.value(), "minimum_sphericity": self.minimum_sphericity.value(),
                 "first_tissue_z": self.first_tissue_z.value(), "last_tissue_z": self.last_tissue_z.value(),
                 "z_guard_um": self.z_guard_um.value(), "z_guard_mode": self.z_guard_mode.currentText(), "z_counting_rule": "directional_entry_v1",
                 "perinuclear_combination": self.perinuclear_combination.currentText(), "perinuclear_filters": perinuclear,
-                "intensity_combination": self.intensity_combination.currentText(), "intensity_filters": intensity}
+                "intensity_combination": self.intensity_combination.currentText(),
+                "intensity_filtering_enabled": self.intensity_master.isChecked(),
+                "intensity_filters": intensity}
 
     def update_filter_summary(self, result, current=True):
         qualifier = "validated" if result.get("roi_reviewed") else "preliminary — ROI review required"
@@ -426,6 +443,31 @@ class MaskReviewPanel(QWidget):
 
     def _schedule_filters(self, *args):
         self._filter_timer.start()
+
+    def _intensity_master_changed(self, *args):
+        self._update_optional_filter_visibility()
+        self._schedule_filters()
+
+    def _intensity_channel_changed(self, *args):
+        self._update_optional_filter_visibility()
+        self._schedule_filters()
+
+    def _update_optional_filter_visibility(self):
+        intensity_enabled = self.intensity_master.isChecked()
+        active_intensity = sum(
+            enabled.isChecked()
+            for _, enabled, _, _, _ in self.intensity_controls.values()
+        ) if intensity_enabled else 0
+        self.intensity_label.setVisible(intensity_enabled)
+        self.intensity_combination.setVisible(intensity_enabled and active_intensity >= 2)
+        for group, *_ in self.intensity_controls.values():
+            group.setVisible(intensity_enabled)
+
+        marker_count = len(self.perinuclear_controls)
+        self.perinuclear_label.setVisible(marker_count >= 2)
+        self.perinuclear_combination.setVisible(marker_count >= 2)
+        for group, *_ in self.perinuclear_controls.values():
+            group.setVisible(marker_count > 0)
 
     def add_marker(self, record=None):
         if not self.project_state.channels:

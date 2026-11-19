@@ -247,9 +247,18 @@ def test_controller_runs_off_main_thread_retains_result_and_locks_conflicts(
     assert viewer.layers[0].editable is False
     assert conflict.isEnabled()
     np.testing.assert_array_equal(state.original_dataset.data_czyx, source)
+    executed_cellprob = state.segmentation_result["scientific_config"][
+        "CELLPROB_THRESHOLD"
+    ]
     panel.cellprob.setValue(panel.cellprob.value() - 0.5)
-    assert not state.segmentation_is_current
-    assert "outdated" in viewer.layers[0].name
+    assert state.segmentation_is_current
+    assert viewer.layers[0].name == "Raw Cellpose masks"
+    assert state.segmentation_result["scientific_config"][
+        "CELLPROB_THRESHOLD"
+    ] == executed_cellprob
+    assert "Existing masks remain available" in panel.execution_summary.text()
+    panel.cellprob.setValue(executed_cellprob)
+    assert panel.execution_summary.text().startswith("Completed —")
     controller.dispose()
     panel.dispose()
 

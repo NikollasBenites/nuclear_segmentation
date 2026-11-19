@@ -81,6 +81,7 @@ class SegmentationWorker(QObject):
                 self.project_state, self.config
             )
             result = self.runner(scientific_input, self.progress.emit)
+            result.setdefault("scientific_config", deepcopy(self.config))
         except Exception:
             self.failed.emit(traceback.format_exc())
         else:
@@ -116,7 +117,7 @@ class SegmentationController(QObject):
         self._availability_timer.start()
         self._conflict_enabled = ()
         panel.run_requested.connect(self.run)
-        panel.configuration_changed.connect(self.project_state.invalidate_segmentation)
+        panel.configuration_changed.connect(self._configuration_changed)
         project_state.segmentation_result_changed.connect(self._sync_result_layer)
 
     @property
@@ -175,6 +176,30 @@ class SegmentationController(QObject):
     def _progress(self, message: str) -> None:
         self.panel.set_execution_status(message)
         self.status_changed.emit(str(message))
+
+    def _configuration_changed(self) -> None:
+        result = self.project_state.segmentation_result
+        if result is None or not self.project_state.segmentation_is_current:
+            return
+        executed = result.get("scientific_config")
+        try:
+            pending = executed is None or self.panel.scientific_config() != executed
+        except (TypeError, ValueError):
+            pending = True
+        if not pending:
+            self.panel.set_execution_status(
+                f"Completed — {result['object_count']:,} objects; "
+                f"mask shape {tuple(result['mask_shape'])}; "
+                f"device {result['device']}.",
+                append=False,
+            )
+            return
+        message = (
+            "Segmentation parameters modified. Existing masks remain available. "
+            "Run Segmentation again to apply the new settings."
+        )
+        self.panel.set_execution_status(message, append=False)
+        self.status_changed.emit(message)
 
     def _succeeded(self, result) -> None:
         try:
@@ -254,9 +279,7 @@ class SegmentationController(QObject):
         self._availability_timer.stop()
         self.clear_project()
         self.panel.run_requested.disconnect(self.run)
-        self.panel.configuration_changed.disconnect(
-            self.project_state.invalidate_segmentation
-        )
+        self.panel.configuration_changed.disconnect(self._configuration_changed)
         self.project_state.segmentation_result_changed.disconnect(
             self._sync_result_layer
         )
