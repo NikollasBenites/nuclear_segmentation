@@ -62,7 +62,9 @@ def calculate_filtering_prerequisites(project_state, config):
         properties[column] = properties[column].fillna(0.0)
         ring_labels[name] = rings
         perinuclear_definitions.append({
-            "name": name, "column": column,
+            "name": name,
+            "channel_index": int(next(item["index"] for item in ns["CHANNELS"] if item["name"] == name)),
+            "column": column,
             "minimum_positive_fraction": float(marker.get("initial_min_positive_fraction", 0)),
             "resolved_pixel_threshold": float(threshold),
             "threshold_source": source,
@@ -122,6 +124,7 @@ class FilteringController(QObject):
         panel.calculate_measurements_requested.connect(self.calculate)
         panel.filters_changed.connect(self.apply_filters)
         panel.accept_roi_requested.connect(self.accept_roi)
+        panel.marker_configuration_changed.connect(self.update_marker_configuration)
         state.filtering_result_changed.connect(self._state_changed)
     @property
     def busy(self): return self._thread is not None
@@ -196,6 +199,19 @@ class FilteringController(QObject):
             if self.filtered_layer is not None: self.filtered_layer.name = "Live filtered masks — outdated"
             if self.roi_layer is not None: self.roi_layer.name = "MNTB ROI — outdated"
             self.panel.configure_filtering(result, False)
+    def update_marker_configuration(self, records):
+        try:
+            measurement_changed = self.state.set_perinuclear_markers(records)
+        except ValueError as error:
+            self.panel.measurement_status.setText(str(error))
+            return
+        if measurement_changed:
+            message = "Perinuclear marker measurement configuration changed — recalculate measurements."
+        else:
+            self.panel.set_perinuclear_filter_defaults(records)
+            message = "Perinuclear positive-fraction filters updated from cached measurements."
+        self.panel.measurement_status.setText(message)
+        self.status_changed.emit(message)
     def clear_layers(self):
         if self.roi_layer is not None and self._roi_callback is not None:
             try: self.roi_layer.events.data.disconnect(self._roi_callback)
@@ -205,4 +221,4 @@ class FilteringController(QObject):
         self.filtered_layer = self.roi_layer = self._roi_callback = self._roi_transform = None
     def clear_project(self): self.clear_layers()
     def dispose(self):
-        self.clear_layers(); self.panel.calculate_measurements_requested.disconnect(self.calculate); self.panel.filters_changed.disconnect(self.apply_filters); self.panel.accept_roi_requested.disconnect(self.accept_roi); self.state.filtering_result_changed.disconnect(self._state_changed)
+        self.clear_layers(); self.panel.calculate_measurements_requested.disconnect(self.calculate); self.panel.filters_changed.disconnect(self.apply_filters); self.panel.accept_roi_requested.disconnect(self.accept_roi); self.panel.marker_configuration_changed.disconnect(self.update_marker_configuration); self.state.filtering_result_changed.disconnect(self._state_changed)

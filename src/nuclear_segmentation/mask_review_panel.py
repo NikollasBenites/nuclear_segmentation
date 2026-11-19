@@ -1,13 +1,130 @@
 """Application-owned view of existing mask selection and segmentation state."""
 from __future__ import annotations
 
-from qtpy.QtCore import Signal
+import numpy as np
+from qtpy.QtCore import Qt, QTimer, Signal
 from qtpy.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QLabel,
-    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .collapsible_section import CollapsibleSection
+
+
+class SyncedNumericControl(QWidget):
+    """High-DPI slider plus exact floating-point editor."""
+
+    valueChanged = Signal(float)
+    _STEPS = 1000
+
+    def __init__(self, minimum=0.0, maximum=1.0, decimals=4, parent=None):
+        super().__init__(parent)
+        self._minimum = float(minimum)
+        self._maximum = float(maximum)
+        self._syncing = False
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(0, self._STEPS)
+        self.editor = QDoubleSpinBox()
+        self.editor.setDecimals(int(decimals))
+        self.editor.setKeyboardTracking(False)
+        self.editor.setMinimumWidth(88)
+        layout.addWidget(self.slider, 1)
+        layout.addWidget(self.editor)
+        self.setRange(minimum, maximum)
+        self.slider.valueChanged.connect(self._from_slider)
+        self.editor.valueChanged.connect(self._from_editor)
+
+    def setRange(self, minimum, maximum):
+        minimum, maximum = float(minimum), float(maximum)
+        if not np.isfinite([minimum, maximum]).all() or maximum <= minimum:
+            maximum = minimum + 1.0
+        value = np.clip(self.value(), minimum, maximum)
+        self._minimum, self._maximum = minimum, maximum
+        self.editor.setRange(minimum, maximum)
+        self.editor.setSingleStep(max((maximum - minimum) / self._STEPS, 10 ** -self.editor.decimals()))
+        self.setValue(value)
+
+    def setValue(self, value):
+        value = float(np.clip(float(value), self._minimum, self._maximum))
+        self._syncing = True
+        self.editor.setValue(value)
+        position = round((value - self._minimum) / (self._maximum - self._minimum) * self._STEPS)
+        self.slider.setValue(position)
+        self._syncing = False
+
+    def value(self):
+        return float(self.editor.value()) if hasattr(self, "editor") else self._minimum
+
+    def _from_slider(self, position):
+        if self._syncing:
+            return
+        value = self._minimum + (self._maximum - self._minimum) * position / self._STEPS
+        self._syncing = True
+        self.editor.setValue(value)
+        self._syncing = False
+        self.valueChanged.emit(self.value())
+
+    def _from_editor(self, value):
+        if self._syncing:
+            return
+        self._syncing = True
+        position = round((float(value) - self._minimum) / (self._maximum - self._minimum) * self._STEPS)
+        self.slider.setValue(position)
+        self._syncing = False
+        self.valueChanged.emit(float(value))
+
+
+class PerinuclearMarkerRow(QGroupBox):
+    changed = Signal()
+    remove_requested = Signal(object)
+
+    def __init__(self, channels, record=None, parent=None):
+        super().__init__(parent)
+        record = dict(record or {})
+        form = QFormLayout(self)
+        self.channel = QComboBox()
+        for item in channels:
+            self.channel.addItem(f"{item.name} (channel {item.index + 1})", int(item.index))
+        selected = self.channel.findData(record.get("channel_index"))
+        if selected >= 0:
+            self.channel.setCurrentIndex(selected)
+        self.enabled = QCheckBox("Enabled")
+        self.enabled.setChecked(bool(record.get("enabled", True)))
+        self.inner = QDoubleSpinBox(); self.inner.setRange(0, 1e6); self.inner.setDecimals(3)
+        self.outer = QDoubleSpinBox(); self.outer.setRange(0.001, 1e6); self.outer.setDecimals(3)
+        self.inner.setValue(float(record.get("ring_inner_um", .5)))
+        self.outer.setValue(float(record.get("ring_outer_um", 3.0)))
+        self.manual_threshold = QCheckBox("Manual pixel threshold")
+        threshold = record.get("pixel_threshold")
+        self.manual_threshold.setChecked(threshold is not None)
+        self.threshold = QDoubleSpinBox(); self.threshold.setRange(-1e30, 1e30); self.threshold.setDecimals(6)
+        self.threshold.setValue(0.0 if threshold is None else float(threshold)); self.threshold.setEnabled(threshold is not None)
+        self.fraction = SyncedNumericControl(0, 1, 6)
+        self.fraction.setValue(float(record.get("initial_min_positive_fraction", 0.1)))
+        self.remove_button = QPushButton("Remove Marker")
+        form.addRow("Source channel", self.channel); form.addRow(self.enabled)
+        form.addRow("Inner shell distance (µm)", self.inner); form.addRow("Outer shell distance (µm)", self.outer)
+        form.addRow(self.manual_threshold, self.threshold); form.addRow("Minimum positive fraction", self.fraction)
+        form.addRow(self.remove_button)
+        self.setToolTip("Shell distances are physical micrometres. Automatic threshold uses the existing resolver.")
+        self.manual_threshold.toggled.connect(self.threshold.setEnabled)
+        for signal in (self.channel.currentIndexChanged, self.enabled.toggled,
+                       self.inner.valueChanged, self.outer.valueChanged,
+                       self.manual_threshold.toggled, self.threshold.valueChanged,
+                       self.fraction.valueChanged):
+            signal.connect(self.changed)
+        self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self))
+
+    def record(self):
+        return {
+            "channel_index": int(self.channel.currentData()),
+            "enabled": self.enabled.isChecked(),
+            "ring_inner_um": self.inner.value(), "ring_outer_um": self.outer.value(),
+            "pixel_threshold": self.threshold.value() if self.manual_threshold.isChecked() else None,
+            "initial_min_positive_fraction": self.fraction.value(),
+        }
 
 
 class MaskReviewPanel(QWidget):
@@ -19,6 +136,7 @@ class MaskReviewPanel(QWidget):
     calculate_measurements_requested = Signal()
     filters_changed = Signal()
     accept_roi_requested = Signal()
+    marker_configuration_changed = Signal(object)
 
     def __init__(self, project_state, parent=None):
         super().__init__(parent)
@@ -27,6 +145,11 @@ class MaskReviewPanel(QWidget):
         self._result_current = False
         self._selected_id = None
         self._selected_is_raw = False
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(120)
+        self._filter_timer.timeout.connect(self.filters_changed)
+        self.marker_rows = []
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 8, 0, 0)
         root.setSpacing(8)
@@ -55,10 +178,10 @@ class MaskReviewPanel(QWidget):
         layout.addWidget(self.calculate_button)
         layout.addWidget(self.measurement_status)
         form = QFormLayout()
-        self.minimum_volume = QDoubleSpinBox(); self.minimum_volume.setRange(0, 1e12)
-        self.minimum_sphericity = QDoubleSpinBox(); self.minimum_sphericity.setRange(0, 1); self.minimum_sphericity.setValue(.45)
+        self.minimum_volume = SyncedNumericControl(0, 1, 6)
+        self.minimum_sphericity = SyncedNumericControl(0, 1, 6); self.minimum_sphericity.setValue(.45)
         self.first_tissue_z = QSpinBox(); self.last_tissue_z = QSpinBox()
-        self.z_guard_um = QDoubleSpinBox(); self.z_guard_um.setRange(0, 1e9)
+        self.z_guard_um = SyncedNumericControl(0, 1, 6)
         self.z_guard_mode = QComboBox(); self.z_guard_mode.addItems(["none", "first", "last", "both"]); self.z_guard_mode.setCurrentText("first")
         form.addRow("Minimum volume (µm³)", self.minimum_volume)
         form.addRow("Minimum sphericity", self.minimum_sphericity)
@@ -77,9 +200,29 @@ class MaskReviewPanel(QWidget):
         layout.addWidget(self.perinuclear_combination)
         self.perinuclear_layout = QVBoxLayout(); layout.addLayout(self.perinuclear_layout)
         self.perinuclear_controls = {}
+        self.perinuclear_filter_note = self._value(
+            "No perinuclear marker measurements are available. Configure a marker and recalculate."
+        )
+        self.perinuclear_layout.addWidget(self.perinuclear_filter_note)
         self.filter_summary = self._value("Live filtering is unavailable.")
         layout.addWidget(self.filter_summary)
         section.set_content_layout(layout)
+        root.addWidget(section)
+
+        section = CollapsibleSection(
+            "perinuclear_marker_configuration",
+            "Perinuclear Marker Configuration",
+        )
+        self.marker_configuration_layout = QVBoxLayout()
+        self.marker_configuration_layout.setContentsMargins(10, 8, 10, 10)
+        self.marker_configuration_note = self._value(
+            "No perinuclear markers configured. Add a marker and select any source channel."
+        )
+        self.add_marker_button = QPushButton("Add Perinuclear Marker")
+        self.add_marker_button.clicked.connect(self.add_marker)
+        self.marker_configuration_layout.addWidget(self.marker_configuration_note)
+        self.marker_configuration_layout.addWidget(self.add_marker_button)
+        section.set_content_layout(self.marker_configuration_layout)
         root.addWidget(section)
 
         section = CollapsibleSection("scientific_roi", "Scientific MNTB ROI")
@@ -92,9 +235,9 @@ class MaskReviewPanel(QWidget):
         section.set_content_layout(layout); root.addWidget(section)
         for widget in (self.minimum_volume, self.minimum_sphericity, self.first_tissue_z,
                        self.last_tissue_z, self.z_guard_um):
-            widget.valueChanged.connect(self.filters_changed)
+            widget.valueChanged.connect(self._schedule_filters)
         for widget in (self.z_guard_mode, self.intensity_combination, self.perinuclear_combination):
-            widget.currentTextChanged.connect(self.filters_changed)
+            widget.currentTextChanged.connect(self._schedule_filters)
 
         section = CollapsibleSection(
             "selected_mask_information", "Selected Mask Information"
@@ -159,6 +302,9 @@ class MaskReviewPanel(QWidget):
         root.addStretch(1)
 
         project_state.segmentation_result_changed.connect(self.set_result)
+        project_state.channels_changed.connect(self._channels_changed)
+        project_state.perinuclear_markers_changed.connect(self.set_marker_configuration)
+        self.set_marker_configuration(project_state.perinuclear_markers)
         self.set_result(
             project_state.segmentation_result,
             project_state.segmentation_is_current,
@@ -204,6 +350,10 @@ class MaskReviewPanel(QWidget):
         for control in (self.first_tissue_z, self.last_tissue_z):
             control.blockSignals(True); control.setRange(0, nz - 1); control.blockSignals(False)
         settings = result.get("settings") or {}
+        volume_high = max(1.0, float(np.ceil(table["volume_um3"].max())))
+        self.minimum_volume.setRange(0.0, volume_high)
+        z_high = max(1.0, (nz - 1) * float(self.project_state.voxel_spacing_zyx_um[0]))
+        self.z_guard_um.setRange(0.0, z_high)
         values = (
             (self.minimum_volume, settings.get("minimum_volume_um3", 0.0)),
             (self.minimum_sphericity, settings.get("minimum_sphericity", .45)),
@@ -228,19 +378,21 @@ class MaskReviewPanel(QWidget):
         for group, *_ in self.intensity_controls.values(): group.deleteLater()
         for group, *_ in self.perinuclear_controls.values(): group.deleteLater()
         self.intensity_controls = {}; self.perinuclear_controls = {}
+        definitions = result.get("perinuclear_definitions", [])
+        self.perinuclear_filter_note.setVisible(not definitions)
         for item in result.get("intensity_definitions", []):
             group = QGroupBox(f"{item['name']} (channel {item['index'] + 1})")
             form = QFormLayout(group); enabled = QCheckBox("Enable"); enabled.setChecked(item.get("enabled", True))
-            low = QDoubleSpinBox(); high = QDoubleSpinBox()
-            for control in (low, high): control.setRange(-1e15, 1e15); control.setDecimals(4)
+            low = SyncedNumericControl(item["minimum"], item["maximum"], 9)
+            high = SyncedNumericControl(item["minimum"], item["maximum"], 9)
             low.setValue(item["minimum"]); high.setValue(item["maximum"])
             form.addRow(enabled); form.addRow("Minimum", low); form.addRow("Maximum", high)
-            enabled.toggled.connect(self.filters_changed); low.valueChanged.connect(self.filters_changed); high.valueChanged.connect(self.filters_changed)
+            enabled.toggled.connect(self._schedule_filters); low.valueChanged.connect(self._schedule_filters); high.valueChanged.connect(self._schedule_filters)
             self.intensity_layout.addWidget(group); self.intensity_controls[item["index"]] = (group, enabled, low, high, item)
-        for item in result.get("perinuclear_definitions", []):
+        for item in definitions:
             group = QGroupBox(item["name"]); form = QFormLayout(group)
-            minimum = QDoubleSpinBox(); minimum.setRange(0, 1); minimum.setSingleStep(.01); minimum.setValue(item["minimum_positive_fraction"])
-            form.addRow("Minimum positive fraction", minimum); minimum.valueChanged.connect(self.filters_changed)
+            minimum = SyncedNumericControl(0, 1, 6); minimum.setValue(item["minimum_positive_fraction"])
+            form.addRow("Minimum positive fraction", minimum); minimum.valueChanged.connect(self._schedule_filters)
             self.perinuclear_layout.addWidget(group); self.perinuclear_controls[item["name"]] = (group, minimum, item)
 
     def filter_settings(self):
@@ -271,6 +423,95 @@ class MaskReviewPanel(QWidget):
         for key, value in row.items():
             if ("intensity" in key or "positive_fraction" in key) and hasattr(value, "__float__"): lines.append(f"{key}: {float(value):.4g}")
         self.measurements.setText("\n".join(lines))
+
+    def _schedule_filters(self, *args):
+        self._filter_timer.start()
+
+    def add_marker(self, record=None):
+        if not self.project_state.channels:
+            self.marker_configuration_note.setText("Load a project before configuring markers.")
+            return
+        if record is None:
+            used = {item["channel_index"] for item in self.marker_configuration()}
+            available = next(
+                (item.index for item in self.project_state.channels if item.index not in used),
+                None,
+            )
+            if available is None:
+                self.measurement_status.setText(
+                    "Every image channel already has a perinuclear marker configuration."
+                )
+                return
+            record = {"channel_index": available}
+            new_record = True
+        else:
+            new_record = False
+        row = PerinuclearMarkerRow(self.project_state.channels, record, self)
+        row.changed.connect(self._marker_configuration_edited)
+        row.remove_requested.connect(self.remove_marker)
+        self.marker_configuration_layout.insertWidget(
+            self.marker_configuration_layout.count() - 1, row
+        )
+        self.marker_rows.append(row)
+        self.marker_configuration_note.setVisible(False)
+        if new_record:
+            self._marker_configuration_edited()
+
+    def remove_marker(self, row):
+        if row not in self.marker_rows:
+            return
+        self.marker_rows.remove(row)
+        row.deleteLater()
+        self.marker_configuration_note.setVisible(not self.marker_rows)
+        self._marker_configuration_edited()
+
+    def marker_configuration(self):
+        return [row.record() for row in self.marker_rows]
+
+    def _marker_configuration_edited(self, *args):
+        records = self.marker_configuration()
+        indexes = [item["channel_index"] for item in records]
+        if len(indexes) != len(set(indexes)):
+            self.measurement_status.setText(
+                "Each source channel may be configured as a perinuclear marker only once."
+            )
+            return
+        for item in records:
+            if not 0 <= item["ring_inner_um"] < item["ring_outer_um"]:
+                self.measurement_status.setText(
+                    "Perinuclear distances must satisfy 0 ≤ inner < outer."
+                )
+                return
+        self.marker_configuration_changed.emit(records)
+
+    def set_marker_configuration(self, records):
+        records = [dict(item) for item in records]
+        if self.marker_rows and self.marker_configuration() == records:
+            return
+        for row in self.marker_rows:
+            row.deleteLater()
+        self.marker_rows = []
+        for record in records:
+            self.add_marker(record)
+        self.marker_configuration_note.setVisible(not records)
+
+    def _channels_changed(self, channels):
+        records = self.marker_configuration()
+        self.set_marker_configuration(records)
+
+    def set_perinuclear_filter_defaults(self, records):
+        by_index = {int(item["channel_index"]): item for item in records}
+        changed = False
+        for _, control, definition in self.perinuclear_controls.values():
+            record = by_index.get(int(definition["channel_index"]))
+            if record is None:
+                continue
+            value = float(record["initial_min_positive_fraction"])
+            if control.value() != value:
+                control.setValue(value)
+                changed = True
+        if changed:
+            self._schedule_filters()
 
     def set_result(self, result, current: bool) -> None:
         self._result = result
@@ -311,4 +552,9 @@ class MaskReviewPanel(QWidget):
         self.clear_button.setEnabled(self._selected_id is not None)
 
     def dispose(self) -> None:
+        self._filter_timer.stop()
         self.project_state.segmentation_result_changed.disconnect(self.set_result)
+        self.project_state.channels_changed.disconnect(self._channels_changed)
+        self.project_state.perinuclear_markers_changed.disconnect(
+            self.set_marker_configuration
+        )

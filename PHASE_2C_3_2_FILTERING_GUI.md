@@ -82,3 +82,41 @@ also included in the relevant regression run.
 9. Select raw and filtered objects in 2D and 3D and inspect their properties.
 10. Change a segmentation-relevant setting and confirm filtering becomes
     outdated; close/reopen a project and confirm no layers or state leak.
+
+## Phase 2C.3.2.1 GUI and marker-configuration refinement
+
+Filtering thresholds now use a synchronized horizontal slider and numerical
+editor. The editor retains precise floating-point entry, while slider ranges
+come from measured volume and channel-intensity statistics. Sphericity and
+positive-fraction controls remain bounded to 0–1, Z guard remains calibrated
+in micrometres, and first/last tissue planes remain discrete integer controls.
+A 120 ms Qt debounce coalesces rapid slider motion; it does not rerun morphology
+or perinuclear measurements.
+
+The Mask Review workflow now includes a distinct **Perinuclear Marker
+Configuration** section. Each entry stores a stable channel index and the
+existing `enabled`, inner/outer distance, automatic/manual pixel threshold, and
+initial positive-fraction fields. Current channel names are resolved only when
+constructing `PERINUCLEAR_MARKERS`, so renaming `Channel 4` does not change its
+identity. Duplicate source channels and invalid physical distances are rejected.
+
+Channel, enabled-state, shell-distance, and pixel-threshold changes invalidate
+the previous measurement result and require **Calculate Measurements**. A
+minimum-positive-fraction change is filter-only: it updates the existing filter
+control and reuses cached shell measurements. No new thresholding, shell, or
+filtering algorithm was introduced.
+
+Additional native verification:
+
+1. Confirm each supported threshold has a visible slider and exact numerical
+   field, and that changing either updates the other.
+2. Confirm intensity sliders use measured values rather than a fixed 0–255
+   range.
+3. With generic channel names, add two marker configurations using different
+   source channels and test automatic and manual pixel thresholds.
+4. Rename a configured source channel and confirm the configuration remains on
+   the same channel index with the new display name.
+5. Change shell distances and confirm existing results become outdated without
+   rerunning Cellpose; recalculate and confirm new shell measurements appear.
+6. Change only minimum positive fraction and confirm live filtering updates
+   without recalculating morphology or shells.

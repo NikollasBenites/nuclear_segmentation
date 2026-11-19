@@ -1,10 +1,18 @@
 import numpy as np
 import pandas as pd
+import pytest
+from qtpy.QtWidgets import QApplication
 
 from nuclear_segmentation.config import defaults
 from nuclear_segmentation.filtering import apply_filter_settings
 from nuclear_segmentation.filtering_workspace import calculate_filtering_prerequisites
+from nuclear_segmentation.mask_review_panel import SyncedNumericControl
 from nuclear_segmentation.project_state import ChannelDescriptor, ImportedDataset, ProjectState
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    return QApplication.instance() or QApplication([])
 
 
 def _properties():
@@ -121,16 +129,101 @@ def test_measurement_adapter_uses_working_data_calibration_and_raw_ids(tmp_path)
     masks = np.zeros((3, 6, 6), dtype=np.uint16)
     masks[:, 1:3, 1:3] = 4; masks[:, 3:5, 3:5] = 9
     state.set_segmentation_result({"masks": masks, "object_count": 2, "input_provenance": {"source_path": str(dataset.source_path)}})
+    state.set_perinuclear_markers([{
+        "channel_index": 1, "enabled": True, "ring_inner_um": 0.0,
+        "ring_outer_um": 1.0, "pixel_threshold": None,
+        "initial_min_positive_fraction": .25,
+    }])
     config = defaults(); config.update(
         RUN_MODE="segment", CHANNELS=state.analysis_channel_records(),
         SEGMENTATION_CHANNEL=state.segmentation_channel,
         VOXEL_SPACING_OVERRIDE_UM=list(state.voxel_spacing_zyx_um),
         Z_CORRECTIONS={}, CELLPOSE_NORMALIZE=True, CELLPOSE_ROI_NORMALIZATION=None,
-        INITIAL_MIN_VOLUME_UM3=0, PERINUCLEAR_MARKERS=[],
+        INITIAL_MIN_VOLUME_UM3=0,
+        PERINUCLEAR_MARKERS=state.legacy_perinuclear_markers(),
     )
     result = calculate_filtering_prerequisites(state, config)
     assert tuple(result["properties"].index) == (4, 9)
     assert result["raw_mask_shape"] == masks.shape
     assert result["measurement_provenance"]["voxel_spacing_zyx_um"] == (2., .5, .5)
     assert not np.shares_memory(result["filtered_masks"], masks)
+    assert result["perinuclear_definitions"][0]["channel_index"] == 1
+    assert result["perinuclear_definitions"][0]["name"] == "Marker"
     np.testing.assert_array_equal(state.segmentation_result["masks"], masks)
+
+
+def test_slider_and_exact_numeric_editor_remain_synchronized(qapp):
+    control = SyncedNumericControl(-37.5, 9123.75, 6)
+    control.setValue(1234.567891)
+    assert control.value() == pytest.approx(1234.567891)
+    expected_position = round(
+        (1234.567891 + 37.5) / (9123.75 + 37.5) * control._STEPS
+    )
+    assert control.slider.value() == expected_position
+    control.slider.setValue(750)
+    assert control.editor.value() == pytest.approx(
+        -37.5 + (9123.75 + 37.5) * .75,
+        abs=1e-6,
+    )
+
+
+def test_fraction_control_is_bounded(qapp):
+    control = SyncedNumericControl(0, 1, 4)
+    control.editor.setValue(2)
+    assert control.value() == 1
+    control.editor.setValue(-1)
+    assert control.value() == 0
+
+
+def test_perinuclear_configuration_uses_stable_index_and_current_name(tmp_path):
+    image = np.ones((3, 2, 4, 4), dtype=np.uint16)
+    channels = tuple(
+        ChannelDescriptor(index, f"Channel {index + 1}", f"Channel {index + 1}",
+                          "segmentation" if index == 0 else "measurement")
+        for index in range(3)
+    )
+    dataset = ImportedDataset(
+        source_path=tmp_path / "generic.tif", source_format="TIFF", series_index=0,
+        series_identifier="0", series_name="Image", reported_axes="CZYX",
+        reported_shape=image.shape, standardized_shape=image.shape,
+        dtype=str(image.dtype), data_czyx=image,
+        voxel_spacing_zyx_um=(1., .5, .5), calibration_source="test",
+        channels=channels,
+    )
+    state = ProjectState(); state.set_dataset(dataset)
+    records = [
+        {"channel_index": 1, "enabled": True, "ring_inner_um": .25,
+         "ring_outer_um": 1.5, "pixel_threshold": None,
+         "initial_min_positive_fraction": .2},
+        {"channel_index": 2, "enabled": True, "ring_inner_um": .5,
+         "ring_outer_um": 2., "pixel_threshold": 42.,
+         "initial_min_positive_fraction": .4},
+    ]
+    assert state.set_perinuclear_markers(records)
+    assert [item["name"] for item in state.legacy_perinuclear_markers()] == [
+        "Channel 2", "Channel 3"
+    ]
+    state.update_channel(1, name="MAP2-like marker")
+    legacy = state.legacy_perinuclear_markers()
+    assert legacy[0]["name"] == "MAP2-like marker"
+    assert state.perinuclear_markers[0]["channel_index"] == 1
+    assert legacy[0]["pixel_threshold"] is None
+    assert legacy[1]["pixel_threshold"] == 42.
+
+
+def test_marker_validation_and_filter_only_change_do_not_invalidate_measurements():
+    state = ProjectState()
+    state.channels = [ChannelDescriptor(0, "Channel 1", "Channel 1")]
+    base = {"channel_index": 0, "enabled": True, "ring_inner_um": .5,
+            "ring_outer_um": 2., "pixel_threshold": None,
+            "initial_min_positive_fraction": .1}
+    assert state.set_perinuclear_markers([base])
+    state.filtering_result = {"filtered_masks": np.zeros((1, 1, 1), dtype=np.uint8)}
+    state.filtering_is_current = True
+    threshold_only = dict(base, initial_min_positive_fraction=.75)
+    assert not state.set_perinuclear_markers([threshold_only])
+    assert state.filtering_is_current
+    with pytest.raises(ValueError, match="inner < outer"):
+        state.set_perinuclear_markers([dict(base, ring_inner_um=2.)])
+    with pytest.raises(ValueError, match="only once"):
+        state.set_perinuclear_markers([base, base])

@@ -217,6 +217,7 @@ class SegmentationPanel(QWidget):
             VOXEL_SPACING_OVERRIDE_UM=None if state.voxel_spacing_zyx_um is None else list(state.voxel_spacing_zyx_um),
             Z_CORRECTIONS=state.legacy_z_corrections(),
             Z_CORRECTION_SOURCE=None,
+            PERINUCLEAR_MARKERS=state.legacy_perinuclear_markers(),
         )
         normalization = state.normalization_configuration or {}
         config["CELLPOSE_NORMALIZE"] = deepcopy(normalization.get("cellpose_normalize", True))

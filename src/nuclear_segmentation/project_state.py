@@ -70,6 +70,7 @@ class ProjectState(QObject):
     z_correction_changed = Signal(object)
     segmentation_result_changed = Signal(object, bool)
     filtering_result_changed = Signal(object, bool)
+    perinuclear_markers_changed = Signal(object)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -98,6 +99,7 @@ class ProjectState(QObject):
         self.segmentation_is_current = False
         self.filtering_result: dict[str, Any] | None = None
         self.filtering_is_current = False
+        self.perinuclear_markers: list[dict[str, Any]] = []
 
     @property
     def dataset_ready(self) -> bool:
@@ -118,6 +120,23 @@ class ProjectState(QObject):
         self.voxel_spacing_zyx_um = dataset.voxel_spacing_zyx_um
         self.calibration_source = dataset.calibration_source
         self.channels = list(dataset.channels)
+        from .config import defaults
+
+        channel_indexes = {channel.name: int(channel.index) for channel in self.channels}
+        self.perinuclear_markers = [
+            {
+                "channel_index": channel_indexes[item["name"]],
+                "enabled": bool(item.get("enabled", True)),
+                "ring_inner_um": float(item.get("ring_inner_um", 0.5)),
+                "ring_outer_um": float(item.get("ring_outer_um", 3.0)),
+                "pixel_threshold": item.get("pixel_threshold"),
+                "initial_min_positive_fraction": float(
+                    item.get("initial_min_positive_fraction", 0.0)
+                ),
+            }
+            for item in defaults()["PERINUCLEAR_MARKERS"]
+            if item["name"] in channel_indexes
+        ]
         self.segmentation_channel_index = next(
             (
                 channel.index
@@ -132,6 +151,9 @@ class ProjectState(QObject):
         self.set_import_status("Dataset ready")
         self.changed.emit(dataset)
         self.channels_changed.emit(tuple(self.channels))
+        self.perinuclear_markers_changed.emit(
+            tuple(dict(item) for item in self.perinuclear_markers)
+        )
 
     def apply_crop(
         self,
@@ -349,6 +371,7 @@ class ProjectState(QObject):
         self.voxel_spacing_zyx_um = None
         self.calibration_source = None
         self.channels = []
+        self.perinuclear_markers = []
         self.segmentation_channel_index = None
         self.normalization_configuration = None
         self.normalization_preview = None
@@ -359,6 +382,7 @@ class ProjectState(QObject):
         self.reset_all_z_corrections(emit=False)
         self.set_import_status("No image loaded")
         self.channels_changed.emit(())
+        self.perinuclear_markers_changed.emit(())
         self.normalization_changed.emit(None, False)
         self.normalization_roi_changed.emit(None)
         self.z_correction_changed.emit(None)
@@ -499,4 +523,67 @@ class ProjectState(QObject):
                 "filter_max": None,
             }
             for channel in self.channels
+        ]
+
+    def set_perinuclear_markers(self, markers) -> bool:
+        records = []
+        seen = set()
+        available = {int(channel.index) for channel in self.channels}
+        for marker in markers:
+            index = int(marker["channel_index"])
+            if index not in available:
+                raise ValueError(f"Unknown perinuclear marker channel index: {index}")
+            if index in seen:
+                raise ValueError("A channel can be configured as a perinuclear marker only once.")
+            seen.add(index)
+            inner = float(marker.get("ring_inner_um", 0.5))
+            outer = float(marker.get("ring_outer_um", 3.0))
+            threshold = marker.get("pixel_threshold")
+            threshold = None if threshold is None else float(threshold)
+            fraction = float(marker.get("initial_min_positive_fraction", 0.0))
+            if not np.isfinite(inner) or not np.isfinite(outer) or not 0 <= inner < outer:
+                raise ValueError("Perinuclear distances must satisfy 0 <= inner < outer.")
+            if threshold is not None and not np.isfinite(threshold):
+                raise ValueError("Manual perinuclear pixel thresholds must be finite.")
+            if not np.isfinite(fraction) or not 0 <= fraction <= 1:
+                raise ValueError("Perinuclear positive fraction must be between 0 and 1.")
+            records.append({
+                "channel_index": index,
+                "enabled": bool(marker.get("enabled", True)),
+                "ring_inner_um": inner,
+                "ring_outer_um": outer,
+                "pixel_threshold": threshold,
+                "initial_min_positive_fraction": fraction,
+            })
+        measurement_keys = (
+            "channel_index", "enabled", "ring_inner_um", "ring_outer_um",
+            "pixel_threshold",
+        )
+        previous_measurement = [
+            tuple(item.get(key) for key in measurement_keys)
+            for item in self.perinuclear_markers
+        ]
+        current_measurement = [
+            tuple(item.get(key) for key in measurement_keys) for item in records
+        ]
+        measurement_changed = previous_measurement != current_measurement
+        self.perinuclear_markers = records
+        if measurement_changed:
+            self.invalidate_filtering()
+        self.perinuclear_markers_changed.emit(tuple(dict(item) for item in records))
+        return measurement_changed
+
+    def legacy_perinuclear_markers(self) -> list[dict[str, Any]]:
+        channels = {int(channel.index): channel.name for channel in self.channels}
+        return [
+            {
+                "name": channels[item["channel_index"]],
+                "enabled": item["enabled"],
+                "ring_inner_um": item["ring_inner_um"],
+                "ring_outer_um": item["ring_outer_um"],
+                "pixel_threshold": item["pixel_threshold"],
+                "initial_min_positive_fraction": item["initial_min_positive_fraction"],
+            }
+            for item in self.perinuclear_markers
+            if item["channel_index"] in channels
         ]

@@ -3,8 +3,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
+import pandas as pd
 import pytest
 from qtpy.QtCore import QSettings
+from qtpy.QtTest import QTest
 from qtpy.QtWidgets import QApplication, QWidget
 
 from nuclear_segmentation.desktop_window import DesktopWindow
@@ -81,6 +83,57 @@ def test_mask_review_page_activation_and_result_summary(review_window):
     assert layer is not None
     assert np.shares_memory(np.asarray(layer.data), masks)
     assert not layer.editable
+
+
+def test_filter_slider_is_debounced_without_requesting_measurement(review_window):
+    window, _ = review_window
+    panel = window.context_panel.mask_review_page
+    emitted = []
+    recalculated = []
+    panel.filters_changed.connect(lambda: emitted.append(True))
+    panel.calculate_measurements_requested.connect(lambda: recalculated.append(True))
+    panel.minimum_sphericity.editor.setValue(.61)
+    panel.minimum_sphericity.editor.setValue(.62)
+    panel.minimum_sphericity.editor.setValue(.63)
+    assert emitted == []
+    QTest.qWait(150)
+    assert emitted == [True]
+    assert recalculated == []
+
+
+def test_measured_intensity_defines_slider_range(review_window):
+    window, _ = review_window
+    panel = window.context_panel.mask_review_page
+    result = {
+        "properties": pd.DataFrame(
+            {"volume_um3": [12.5, 80.25]}, index=[1, 2]
+        ),
+        "raw_mask_shape": (4, 8, 9), "settings": {},
+        "intensity_definitions": [{
+            "index": 0, "name": "DAPI", "column": "mean_intensity_DAPI",
+            "minimum": -5.5, "maximum": 2048.75, "enabled": True,
+        }],
+        "perinuclear_definitions": [], "retained_ids": (1, 2),
+        "roi_reviewed": False,
+    }
+    panel.configure_filtering(result)
+    _, _, low, high, _ = panel.intensity_controls[0]
+    assert low.editor.minimum() == -5.5
+    assert high.editor.maximum() == 2048.75
+    assert panel.minimum_volume.editor.maximum() == 81.0
+
+
+def test_marker_configuration_is_owned_by_stable_channel_index(review_window):
+    window, _ = review_window
+    panel = window.context_panel.mask_review_page
+    panel.add_marker()
+    assert len(panel.marker_rows) == 1
+    assert window.project_state.perinuclear_markers[0]["channel_index"] == 0
+    row = panel.marker_rows[0]
+    row.inner.setValue(0.25)
+    row.outer.setValue(1.5)
+    assert window.project_state.perinuclear_markers[0]["ring_inner_um"] == .25
+    assert window.project_state.perinuclear_markers[0]["ring_outer_um"] == 1.5
 
 
 def test_existing_selection_updates_review_and_visualization(review_window):
