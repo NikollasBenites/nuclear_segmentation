@@ -152,7 +152,31 @@ class FilteringController(QObject):
         config = deepcopy(executed) if executed is not None else self.config_provider()
         config["PERINUCLEAR_MARKERS"] = self.state.legacy_perinuclear_markers()
         return config
+    @staticmethod
+    def _roi_provenance(result):
+        provenance = deepcopy(result.get("measurement_provenance", {}))
+        provenance["mask_shape"] = tuple(result["raw_mask_shape"])
+        return provenance
+    def _roi_is_compatible(self, result):
+        return (
+            self.state.scientific_roi is not None
+            and tuple(self.state.scientific_roi.shape)
+            == tuple(result["raw_mask_shape"])
+            and self.state.scientific_roi_provenance
+            == self._roi_provenance(result)
+        )
     def _calculated(self, result):
+        if self._roi_is_compatible(result):
+            result = dict(
+                result,
+                scientific_roi=np.array(self.state.scientific_roi, copy=True),
+                roi_reviewed=bool(self.state.scientific_roi_reviewed),
+            )
+        else:
+            self.state.set_scientific_roi(
+                result["scientific_roi"], self._roi_provenance(result),
+                reviewed=False,
+            )
         if self._pending_filter_settings is not None:
             result = self._result_with_settings(
                 result, self._pending_filter_settings, result["scientific_roi"]
@@ -169,7 +193,11 @@ class FilteringController(QObject):
         self.filtered_layer = self.viewer.add_labels(result["filtered_masks"], name="Live filtered masks", scale=spacing, translate=translate,
             metadata={"mask_type": "nuclear", "nucytoseg_filtered_segmentation": True})
         self.filtered_layer.editable = False
-        self.roi_layer = self.viewer.add_labels(result["scientific_roi"].astype(np.uint8), name="MNTB ROI — provisional review", scale=spacing, translate=translate,
+        roi_name = (
+            "MNTB ROI — reviewed" if result.get("roi_reviewed")
+            else "MNTB ROI — provisional review"
+        )
+        self.roi_layer = self.viewer.add_labels(result["scientific_roi"].astype(np.uint8), name=roi_name, scale=spacing, translate=translate,
             opacity=.35, visible=False, metadata={"nucytoseg_scientific_roi": True})
         self.roi_layer.editable = True
         self._roi_transform = (np.asarray(self.roi_layer.scale, dtype=float).copy(),
@@ -224,19 +252,46 @@ class FilteringController(QObject):
         roi = np.asarray(self.roi_layer.data) > 0
         if roi.shape != self.state.segmentation_result["masks"].shape or not roi.any():
             self.panel.roi_status.setText("Invalid or empty scientific ROI."); return
-        updated = dict(self.state.filtering_result, scientific_roi=np.array(roi, copy=True), roi_reviewed=True)
-        self.state.set_filtering_result(updated); self.roi_layer.name = "MNTB ROI — reviewed"; self.panel.roi_status.setText("Reviewed and accepted."); self.apply_filters()
+        expected_provenance = self._roi_provenance(self.state.filtering_result)
+        if (self.state.scientific_roi_provenance is not None
+                and self.state.scientific_roi_provenance != expected_provenance):
+            self.panel.roi_status.setText(
+                "Scientific ROI provenance is incompatible with the current segmentation."
+            )
+            return
+        self.state.set_scientific_roi(
+            roi, expected_provenance, reviewed=True
+        )
+        self.state.update_filtering_roi_state(roi, True)
+        self.roi_layer.name = "MNTB ROI — reviewed"
+        self.panel.roi_status.setText("Reviewed and accepted.")
+        if self.state.filtering_is_current:
+            self.apply_filters()
     def invalidate_roi(self):
-        if self.state.filtering_result is None or not self.state.filtering_result.get("roi_reviewed"): return
-        updated = dict(self.state.filtering_result, roi_reviewed=False)
-        self.state.set_filtering_result(updated)
+        if self.state.filtering_result is None or self.roi_layer is None:
+            return
+        roi = np.asarray(self.roi_layer.data) > 0
+        if roi.shape != tuple(self.state.filtering_result["raw_mask_shape"]):
+            return
+        self.state.set_scientific_roi(
+            roi, self._roi_provenance(self.state.filtering_result), reviewed=False
+        )
+        self.state.update_filtering_roi_state(roi, False)
+        self.roi_layer.name = "MNTB ROI — provisional review"
         self.panel.roi_status.setText("ROI changed — inspect and accept again.")
-        self.panel.update_filter_summary(updated, True)
+        self.panel.update_filter_summary(
+            self.state.filtering_result, self.state.filtering_is_current
+        )
     def _state_changed(self, result, current):
         if result is None: self.clear_layers(); self.panel.configure_filtering(None, False)
         elif not current:
             if self.filtered_layer is not None: self.filtered_layer.name = "Live filtered masks — outdated"
-            if self.roi_layer is not None: self.roi_layer.name = "MNTB ROI — outdated"
+            if self.roi_layer is not None:
+                self.roi_layer.name = (
+                    "MNTB ROI — reviewed"
+                    if self.state.scientific_roi_reviewed
+                    else "MNTB ROI — provisional review"
+                )
             self.panel.configure_filtering(result, False)
     def update_marker_configuration(self, records):
         try:

@@ -204,10 +204,6 @@ class MaskReviewPanel(QWidget):
         layout.addWidget(self.perinuclear_combination)
         self.perinuclear_layout = QVBoxLayout(); layout.addLayout(self.perinuclear_layout)
         self.perinuclear_controls = {}
-        self.perinuclear_filter_note = self._value(
-            "No perinuclear marker measurements are available. Configure a marker and recalculate."
-        )
-        self.perinuclear_layout.addWidget(self.perinuclear_filter_note)
         self.filter_summary = self._value("Live filtering is unavailable.")
         layout.addWidget(self.filter_summary)
         section.set_content_layout(layout)
@@ -376,7 +372,7 @@ class MaskReviewPanel(QWidget):
             control.blockSignals(True); control.setCurrentText(value); control.blockSignals(False)
         self._rebuild_filter_controls(result)
         self.roi_status.setText("Reviewed and accepted." if result.get("roi_reviewed") else "Provisional 3D ROI — inspect and accept before validated counting eligibility.")
-        self.accept_roi_button.setEnabled(bool(current))
+        self.accept_roi_button.setEnabled(bool(self._result_current))
         self.update_filter_summary(result, current)
 
     def _rebuild_filter_controls(self, result):
@@ -384,7 +380,6 @@ class MaskReviewPanel(QWidget):
         for group, *_ in self.perinuclear_controls.values(): group.deleteLater()
         self.intensity_controls = {}; self.perinuclear_controls = {}
         definitions = result.get("perinuclear_definitions", [])
-        self.perinuclear_filter_note.setVisible(not definitions)
         intensity_definitions = result.get("intensity_definitions", [])
         result_settings = result.get("settings") or {}
         active_names = set(result_settings.get("intensity_filters", {}))
@@ -582,6 +577,11 @@ class MaskReviewPanel(QWidget):
             )
         self._refresh_actions()
         self.calculate_button.setEnabled(result is not None and current)
+        self.accept_roi_button.setEnabled(
+            result is not None
+            and current
+            and self.project_state.filtering_result is not None
+        )
 
     def set_visualization_status(self, message: str) -> None:
         self.visualization_status.setText(str(message))

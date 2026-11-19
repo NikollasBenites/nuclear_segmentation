@@ -20,6 +20,7 @@ class SegmentationPanel(QWidget):
 
     run_requested = Signal()
     configuration_changed = Signal()
+    mask_review_requested = Signal()
 
     def __init__(self, project_state, parent=None):
         super().__init__(parent)
@@ -29,6 +30,7 @@ class SegmentationPanel(QWidget):
         root.setContentsMargins(0, 8, 0, 0)
 
         section = CollapsibleSection("segmentation_input", "Segmentation Input")
+        self.input_section = section
         form = QFormLayout()
         form.setContentsMargins(10, 8, 10, 10)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
@@ -58,6 +60,7 @@ class SegmentationPanel(QWidget):
         root.addWidget(section)
 
         section = CollapsibleSection("cellpose_model", "Cellpose Model")
+        self.model_section = section
         form = QFormLayout()
         form.setContentsMargins(10, 8, 10, 10)
         self.model_name = QLineEdit(str(self._defaults["MODEL_NAME"]))
@@ -75,6 +78,7 @@ class SegmentationPanel(QWidget):
         root.addWidget(section)
 
         section = CollapsibleSection("cellpose_parameters", "Segmentation Parameters")
+        self.parameters_section = section
         form = QFormLayout()
         form.setContentsMargins(10, 8, 10, 10)
         self.cellprob = self._double(-1000, 1000, self._defaults["CELLPROB_THRESHOLD"])
@@ -89,6 +93,7 @@ class SegmentationPanel(QWidget):
         root.addWidget(section)
 
         section = CollapsibleSection("cellpose_advanced", "Advanced Parameters", expanded=False)
+        self.advanced_section = section
         form = QFormLayout()
         form.setContentsMargins(10, 8, 10, 10)
         self.batch_size = QSpinBox()
@@ -120,6 +125,7 @@ class SegmentationPanel(QWidget):
         root.addWidget(section)
 
         section = CollapsibleSection("segmentation_readiness", "Execution Readiness")
+        self.execution_section = section
         content = QVBoxLayout()
         content.setContentsMargins(10, 8, 10, 10)
         self.readiness = QLabel()
@@ -143,8 +149,42 @@ class SegmentationPanel(QWidget):
         self.execute_button.setEnabled(False)
         self.execute_button.setToolTip("Run the existing Cellpose pipeline on the current working image.")
         content.addWidget(self.execute_button)
+        self.return_to_results_button = QPushButton("Return to Completed Results")
+        self.return_to_results_button.hide()
+        content.addWidget(self.return_to_results_button)
         section.set_content_layout(content)
         root.addWidget(section)
+
+        self.results_section = CollapsibleSection(
+            "segmentation_results", "Segmentation Results"
+        )
+        results = QVBoxLayout()
+        results.setContentsMargins(10, 8, 10, 10)
+        self.result_summary = QLabel()
+        self.result_summary.setWordWrap(True)
+        self.result_summary.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        results.addWidget(self.result_summary)
+        self.view_parameters_button = QPushButton("View Parameters")
+        self.view_parameters_button.setCheckable(True)
+        results.addWidget(self.view_parameters_button)
+        self.executed_parameters = QLabel()
+        self.executed_parameters.setWordWrap(True)
+        self.executed_parameters.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.executed_parameters.hide()
+        results.addWidget(self.executed_parameters)
+        self.run_new_button = QPushButton("Run New Segmentation")
+        self.go_review_button = QPushButton("Go to Mask Review")
+        results.addWidget(self.run_new_button)
+        results.addWidget(self.go_review_button)
+        self.results_section.set_content_layout(results)
+        self.results_section.hide()
+        root.addWidget(self.results_section)
         root.addStretch(1)
 
         self.mode.currentIndexChanged.connect(self._mode_changed)
@@ -167,9 +207,99 @@ class SegmentationPanel(QWidget):
         project_state.z_correction_changed.connect(self.refresh)
         project_state.segmentation_result_changed.connect(self._result_changed)
         self.execute_button.clicked.connect(self.run_requested)
+        self.view_parameters_button.toggled.connect(
+            self.executed_parameters.setVisible
+        )
+        self.run_new_button.clicked.connect(self._show_configuration)
+        self.return_to_results_button.clicked.connect(self._show_completed_result)
+        self.go_review_button.clicked.connect(self.mask_review_requested)
         self._busy = False
         self._external_busy = False
         self._mode_changed()
+
+    @property
+    def _configuration_sections(self):
+        return (
+            self.input_section, self.model_section, self.parameters_section,
+            self.advanced_section, self.execution_section,
+        )
+
+    def _show_configuration(self) -> None:
+        for section in self._configuration_sections:
+            section.show()
+        self.results_section.hide()
+        has_result = bool(
+            self.project_state.segmentation_result is not None
+            and self.project_state.segmentation_is_current
+        )
+        self.return_to_results_button.setVisible(has_result)
+        if has_result and not self._busy:
+            self.execution_summary.setText(
+                "These settings apply to the next execution. Existing masks remain available."
+            )
+
+    def _show_completed_result(self) -> None:
+        result = self.project_state.segmentation_result
+        if result is None or not self.project_state.segmentation_is_current:
+            self._show_configuration()
+            return
+        for section in self._configuration_sections:
+            section.hide()
+        self.return_to_results_button.hide()
+        self.result_summary.setText(self._format_result_summary(result))
+        self.executed_parameters.setText(self._format_executed_parameters(result))
+        self.view_parameters_button.setChecked(False)
+        self.results_section.show()
+
+    @staticmethod
+    def _executed_config(result):
+        return result.get("scientific_config") or result.get("parameters") or {}
+
+    def _format_result_summary(self, result) -> str:
+        config = self._executed_config(result)
+        do_3d = bool(config.get("CELLPOSE_DO_3D", True))
+        z_applied = result.get("z_corrections") or {}
+        channel = result.get("segmentation_channel")
+        correction = z_applied.get(channel, {}) if channel is not None else {}
+        processing = (
+            "Z-corrected" if correction.get("segmentation")
+            else "Original working image"
+        )
+        normalize = result.get("cellpose_normalize", config.get("CELLPOSE_NORMALIZE", True))
+        normalization = "Cellpose Default" if normalize is True else (
+            "Disabled" if normalize is False else "Custom Cellpose normalization"
+        )
+        return "\n".join((
+            "Status: Completed",
+            "Segmentation type: Nuclear",
+            f"Model: {result.get('model_name', config.get('MODEL_NAME', '—'))}",
+            f"Device: {result.get('device', config.get('PROCESSING_DEVICE', '—'))}",
+            f"Mode: {'3D' if do_3d else '2D + stitching'}",
+            f"Objects detected: {int(result.get('object_count', 0)):,}",
+            f"Input channel: {result.get('segmentation_channel', '—')}",
+            f"Input processing: {processing}",
+            f"Normalization: {normalization}",
+        ))
+
+    def _format_executed_parameters(self, result) -> str:
+        config = self._executed_config(result)
+        fields = (
+            ("MODEL_NAME", "Model"),
+            ("PROCESSING_DEVICE", "Requested device"),
+            ("CELLPOSE_DO_3D", "3D mode"),
+            ("CELLPROB_THRESHOLD", "Cell probability threshold"),
+            ("CELLPOSE_MIN_SIZE_VOXELS", "Minimum size (voxels)"),
+            ("CELLPOSE_STITCH_THRESHOLD", "Stitch threshold"),
+            ("BATCH_SIZE", "Batch size"),
+            ("FLOW3D_SMOOTH", "3D flow smoothing"),
+            ("CELLPOSE_RESAMPLE", "Resample"),
+            ("CELLPOSE_RESCALE", "Rescale"),
+            ("DIAMETER_PIXELS", "Diameter (pixels)"),
+            ("CELLPOSE_NORMALIZE", "Cellpose normalization"),
+        )
+        return "\n".join(
+            f"{label}: {config.get(key, '—')}" for key, label in fields
+        )
 
     def _configuration_edited(self, *args):
         self.configuration_changed.emit()
@@ -319,6 +449,12 @@ class SegmentationPanel(QWidget):
         self.execution_progress.setVisible(running)
         self.execution_log.setVisible(running or bool(self.execution_log.toPlainText()))
         self.refresh()
+        if (
+            not running
+            and self.project_state.segmentation_result is not None
+            and self.project_state.segmentation_is_current
+        ):
+            self._show_completed_result()
 
     def set_execution_status(self, message: str, *, append: bool = True) -> None:
         self.execution_summary.setText(str(message))
@@ -337,10 +473,13 @@ class SegmentationPanel(QWidget):
                 f"Completed — {result['object_count']:,} objects; "
                 f"mask shape {tuple(result['mask_shape'])}; device {result['device']}."
             )
+            if not self._busy:
+                self._show_completed_result()
         else:
             self.execution_summary.setText(
                 "Previous segmentation remains available but is outdated for the current settings."
             )
+            self._show_configuration()
         self.refresh()
 
     def dispose(self):

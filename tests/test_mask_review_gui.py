@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 from qtpy.QtCore import QSettings
 from qtpy.QtTest import QTest
-from qtpy.QtWidgets import QApplication, QWidget
+from qtpy.QtWidgets import QApplication, QLabel, QWidget
 
 from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.project_state import ChannelDescriptor, ImportedDataset
@@ -162,6 +162,11 @@ def test_optional_filter_controls_follow_active_counts(review_window):
         "settings": {"intensity_filters": {}},
     }
     panel.configure_filtering(base)
+    assert not hasattr(panel, "perinuclear_filter_note")
+    assert not any(
+        "No perinuclear marker measurements" in label.text()
+        for label in panel.findChildren(QLabel)
+    )
     assert not panel.intensity_master.isChecked()
     assert panel.intensity_combination.isHidden()
     assert all(group.isHidden() for group, *_ in panel.intensity_controls.values())
@@ -201,6 +206,68 @@ def test_optional_filter_controls_follow_active_counts(review_window):
     ])
     panel.configure_filtering(two_markers)
     assert not panel.perinuclear_combination.isHidden()
+
+
+def test_reviewed_roi_survives_measurement_invalidation(review_window):
+    window, masks = review_window
+    state = window.project_state
+    controller = window.filtering
+    panel = window.context_panel.mask_review_page
+    roi = masks > 0
+    provenance = {"source": "compatible", "mask_shape": tuple(masks.shape)}
+    result = {
+        "properties": pd.DataFrame(
+            {"volume_um3": [10.0, 12.0]}, index=[1, 2]
+        ),
+        "raw_mask_shape": tuple(masks.shape),
+        "settings": {},
+        "intensity_definitions": [],
+        "perinuclear_definitions": [],
+        "retained_ids": (1, 2),
+        "retained_count": 2,
+        "filtered_masks": np.array(masks, copy=True),
+        "scientific_roi": np.array(roi, copy=True),
+        "roi_reviewed": True,
+        "measurement_provenance": {"source": "compatible"},
+    }
+    state.set_scientific_roi(roi, provenance, reviewed=True)
+    state.set_filtering_result(result)
+    controller._create_layers(result)
+    panel.configure_filtering(result, True)
+
+    state.invalidate_filtering()
+    assert not state.filtering_is_current
+    assert state.scientific_roi_reviewed
+    assert controller.roi_layer.name == "MNTB ROI — reviewed"
+    assert panel.accept_roi_button.isEnabled()
+
+    controller.accept_roi()
+    assert state.scientific_roi_reviewed
+    assert not state.filtering_is_current
+
+    recalculated = dict(
+        result,
+        scientific_roi=np.zeros_like(roi),
+        roi_reviewed=False,
+    )
+    controller._pending_filter_settings = None
+    controller._calculated(recalculated)
+    assert state.filtering_is_current
+    assert state.scientific_roi_reviewed
+    np.testing.assert_array_equal(
+        state.filtering_result["scientific_roi"], roi
+    )
+    assert controller.roi_layer.name == "MNTB ROI — reviewed"
+
+
+def test_segmentation_result_can_navigate_to_existing_mask_review(review_window):
+    window, _ = review_window
+    window.set_workflow("segmentation")
+    panel = window.context_panel.segmentation_page
+    assert not panel.results_section.isHidden()
+    panel.go_review_button.click()
+    assert window.navigation.current_workflow == "mask_review"
+    assert window.context_panel.heading.text() == "Mask Review"
 
 
 def test_marker_configuration_is_owned_by_stable_channel_index(review_window):

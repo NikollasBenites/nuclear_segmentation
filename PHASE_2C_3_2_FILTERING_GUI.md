@@ -166,3 +166,42 @@ Native verification additions:
    update from cached measurements, then re-enable it and confirm values return.
 5. Exercise zero, one, and two enabled intensity channels and markers; confirm
    each **all/any** selector appears only for two or more active filters.
+# Phase 2C.3.2.3 — Results and scientific ROI lifecycle refinement
+
+The Segmentation workflow now switches to a compact, read-only result summary
+after a successful run. The summary reports the executed model, device, mode,
+object count, input channel, preprocessing route, and Cellpose normalization.
+`View Parameters` displays the stored executed configuration. `Run New
+Segmentation` returns to the existing editable controls without invalidating the
+completed masks, and `Go to Mask Review` uses the existing workflow navigation.
+
+Scientific ROI review state is now stored independently from filtering
+measurement currency. Changes to filter thresholds or perinuclear measurement
+definitions can require measurement recalculation while a spatially compatible
+reviewed ROI remains valid. Compatibility still requires the same segmentation
+grid and scientific input provenance. A new image, crop/grid, calibration,
+spatial routing, or segmentation result clears the ROI through the existing
+invalidation lifecycle. Accepting an ROI does not make outdated measurements
+current; later quantification must require both current measurements and a
+reviewed compatible ROI.
+
+The redundant no-marker message was removed from Scientific Filtering. Marker
+instructions remain in Perinuclear Marker Configuration, and filtering controls
+remain hidden until measurements provide active marker definitions.
+
+## Native macOS verification
+
+1. Run a small nuclear segmentation and confirm the compact completed summary.
+2. Expand `View Parameters` and compare its values with the executed settings.
+3. Choose `Run New Segmentation`, change a parameter, and confirm the old masks
+   and filtering results remain available.
+4. Return to the completed summary without running and open Mask Review.
+5. Review and accept the MNTB ROI, then change a perinuclear shell definition.
+6. Confirm measurements become outdated while the compatible reviewed ROI stays
+   reviewed and editable/acceptable.
+7. Recalculate measurements and confirm the ROI geometry and acceptance persist.
+8. Change the working crop or replace the segmentation and confirm the old ROI is
+   invalidated.
+
+Native rendering and interaction must be confirmed on macOS; the automated
+suite uses Qt's offscreen platform.

@@ -71,6 +71,7 @@ class ProjectState(QObject):
     segmentation_result_changed = Signal(object, bool)
     filtering_result_changed = Signal(object, bool)
     perinuclear_markers_changed = Signal(object)
+    scientific_roi_changed = Signal(object, bool)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
@@ -100,6 +101,9 @@ class ProjectState(QObject):
         self.filtering_result: dict[str, Any] | None = None
         self.filtering_is_current = False
         self.perinuclear_markers: list[dict[str, Any]] = []
+        self.scientific_roi: np.ndarray | None = None
+        self.scientific_roi_reviewed = False
+        self.scientific_roi_provenance: dict[str, Any] | None = None
 
     @property
     def dataset_ready(self) -> bool:
@@ -383,6 +387,7 @@ class ProjectState(QObject):
         self.set_import_status("No image loaded")
         self.channels_changed.emit(())
         self.perinuclear_markers_changed.emit(())
+        self.scientific_roi_changed.emit(None, False)
         self.normalization_changed.emit(None, False)
         self.normalization_roi_changed.emit(None)
         self.z_correction_changed.emit(None)
@@ -453,6 +458,7 @@ class ProjectState(QObject):
 
     def set_segmentation_result(self, result: dict[str, Any]) -> None:
         self.clear_filtering_result()
+        self.clear_scientific_roi()
         masks = np.asarray(result.get("masks"))
         if masks.ndim != 3 or not masks.size or int(masks.max()) == 0:
             raise ValueError("Segmentation results require a nonempty ZYX label mask.")
@@ -468,10 +474,12 @@ class ProjectState(QObject):
             return
         self.segmentation_is_current = False
         self.invalidate_filtering()
+        self.clear_scientific_roi()
         self.segmentation_result_changed.emit(self.segmentation_result, False)
 
     def clear_segmentation_result(self, *, emit: bool = True) -> None:
         self.clear_filtering_result(emit=emit)
+        self.clear_scientific_roi(emit=emit)
         self.segmentation_result = None
         self.segmentation_is_current = False
         if emit:
@@ -497,6 +505,35 @@ class ProjectState(QObject):
         self.filtering_is_current = False
         if emit:
             self.filtering_result_changed.emit(None, False)
+
+    def set_scientific_roi(self, mask, provenance, *, reviewed: bool) -> None:
+        roi = np.asarray(mask, dtype=bool)
+        if roi.ndim != 3 or not roi.any():
+            raise ValueError("Scientific ROI must be a nonempty 3D mask.")
+        self.scientific_roi = np.array(roi, copy=True)
+        self.scientific_roi_reviewed = bool(reviewed)
+        self.scientific_roi_provenance = dict(provenance)
+        self.scientific_roi_changed.emit(
+            self.scientific_roi, self.scientific_roi_reviewed
+        )
+
+    def clear_scientific_roi(self, *, emit: bool = True) -> None:
+        self.scientific_roi = None
+        self.scientific_roi_reviewed = False
+        self.scientific_roi_provenance = None
+        if emit:
+            self.scientific_roi_changed.emit(None, False)
+
+    def update_filtering_roi_state(self, mask, reviewed: bool) -> None:
+        if self.filtering_result is None:
+            return
+        stored = dict(
+            self.filtering_result,
+            scientific_roi=np.array(mask, dtype=bool, copy=True),
+            roi_reviewed=bool(reviewed),
+        )
+        self.filtering_result = stored
+        self.filtering_result_changed.emit(stored, self.filtering_is_current)
 
     @property
     def segmentation_channel(self) -> str | None:

@@ -159,6 +159,9 @@ class DesktopWindow(QMainWindow):
             parent=self,
         )
         self.segmentation.status_changed.connect(self.statusBar().showMessage)
+        self.context_panel.segmentation_page.mask_review_requested.connect(
+            self._show_mask_review
+        )
         self.filtering = FilteringController(
             self.embedding.viewer,
             self.project_state,
@@ -952,6 +955,9 @@ class DesktopWindow(QMainWindow):
         if hasattr(self, "header_workflow"):
             self.header_workflow.setText(label.upper())
         self.statusBar().showMessage(f"{label} workspace selected")
+
+    def _show_mask_review(self) -> None:
+        self.set_workflow("mask_review")
 
     def _toggle_navigation(self, visible: bool) -> None:
         self.navigation.setVisible(visible)

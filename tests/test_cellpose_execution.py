@@ -302,3 +302,43 @@ def test_failed_rerun_preserves_previous_valid_result(qapp, tmp_path):
     assert not viewer.layers
     controller.dispose()
     panel.dispose()
+
+
+def test_completed_results_use_executed_values_and_future_settings_are_separate(
+    qapp, tmp_path
+):
+    state, _ = _state(tmp_path)
+    panel = SegmentationPanel(state)
+    viewer = _Viewer()
+    controller = SegmentationController(
+        viewer, state, panel, runner=lambda scientific, progress: _fake_result(scientific)
+    )
+
+    executed_cellprob = panel.cellprob.value()
+    assert controller.run()
+    _wait(qapp, lambda: not controller.busy)
+    assert not panel.results_section.isHidden()
+    assert panel.model_section.isHidden()
+    assert "Status: Completed" in panel.result_summary.text()
+    assert "Segmentation type: Nuclear" in panel.result_summary.text()
+
+    panel.view_parameters_button.setChecked(True)
+    assert not panel.executed_parameters.isHidden()
+    assert f"Cell probability threshold: {executed_cellprob}" in panel.executed_parameters.text()
+
+    previous = state.segmentation_result
+    panel.run_new_button.click()
+    assert not panel.model_section.isHidden()
+    assert panel.results_section.isHidden()
+    panel.cellprob.setValue(executed_cellprob - 1)
+    assert state.segmentation_result is previous
+    assert state.segmentation_is_current
+    assert "Existing masks remain available" in panel.execution_summary.text()
+
+    panel.return_to_results_button.click()
+    assert not panel.results_section.isHidden()
+    assert str(executed_cellprob) in panel.executed_parameters.text()
+    assert str(panel.cellprob.value()) not in panel.executed_parameters.text()
+
+    controller.dispose()
+    panel.dispose()
