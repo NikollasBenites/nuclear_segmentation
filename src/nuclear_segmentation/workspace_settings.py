@@ -22,6 +22,7 @@ class WorkspaceSnapshot:
     context_visible: bool
     workflow: str
     project_sections: tuple[tuple[str, bool], ...] = ()
+    workflow_subpages: tuple[tuple[str, str], ...] = ()
 
 
 class WorkspaceSettings:
@@ -53,6 +54,11 @@ class WorkspaceSettings:
             )
         except (TypeError, ValueError, json.JSONDecodeError):
             sections = ()
+        raw_subpages = self.settings.value(self._key(slot, "workflow_subpages"), "{}")
+        try:
+            subpages = json.loads(str(raw_subpages))
+        except (TypeError, ValueError):
+            subpages = {}
         return WorkspaceSnapshot(
             geometry=geometry,
             window_state=state if isinstance(state, QByteArray) else QByteArray(),
@@ -68,6 +74,9 @@ class WorkspaceSettings:
             ),
             workflow=str(self.settings.value(self._key(slot, "workflow"), "project")),
             project_sections=sections,
+            workflow_subpages=tuple(
+                (key, value) for key, value in subpages.items() if isinstance(value, str)
+            ) if isinstance(subpages, dict) else (),
         )
 
     def write(self, snapshot: WorkspaceSnapshot, slot: str = "current") -> None:
@@ -80,6 +89,7 @@ class WorkspaceSettings:
             "context_visible": snapshot.context_visible,
             "workflow": snapshot.workflow,
             "project_sections": json.dumps(dict(snapshot.project_sections)),
+            "workflow_subpages": json.dumps(dict(snapshot.workflow_subpages)),
         }
         for name, value in values.items():
             self.settings.setValue(self._key(slot, name), value)

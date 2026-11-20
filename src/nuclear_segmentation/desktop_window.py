@@ -135,7 +135,7 @@ class DesktopWindow(QMainWindow):
         self.image_preparation = ImagePreparationController(
             self.embedding.viewer,
             self.project_state,
-            self.context_panel.preprocessing_page.image_preparation_panel,
+            self.context_panel.export_page.image_preparation_panel,
             self,
         )
         self.image_preparation.status_changed.connect(self.statusBar().showMessage)
@@ -280,9 +280,10 @@ class DesktopWindow(QMainWindow):
         kicker = QLabel("CONTEXT PANEL")
         kicker.setObjectName("panelKicker")
         titles.addWidget(kicker)
-        title = QLabel("Parameters")
-        title.setObjectName("panelTitle")
-        titles.addWidget(title)
+        self.context_title = QLabel()
+        self.context_title.setObjectName("panelTitle")
+        self.context_title.setWordWrap(True)
+        titles.addWidget(self.context_title)
         header_layout.addLayout(titles)
         header_layout.addStretch(1)
         self.context_collapse_button = QToolButton()
@@ -968,9 +969,10 @@ class DesktopWindow(QMainWindow):
     def set_workflow(self, key: str) -> None:
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
-        self.context_panel.set_workflow(key)
+        self.context_panel.set_workflow(key, self.navigation.current_subpage)
+        self.context_title.setText(self.context_panel.workflow_title)
         self.graph_window.setVisible(self.isVisible() and key == "quality_control")
-        label = self.context_panel.heading.text()
+        label = self.context_panel.workflow_label
         if hasattr(self, "workflow_status"):
             self.workflow_status.setText(f"Workflow: {label}")
         if hasattr(self, "header_workflow"):
@@ -999,6 +1001,7 @@ class DesktopWindow(QMainWindow):
             navigation_visible=self.toggle_navigation_action.isChecked(),
             context_visible=self.toggle_context_action.isChecked(),
             workflow=self.navigation.current_workflow,
+            workflow_subpages=self.navigation.subpage_selections(),
             project_sections=tuple(
                 self.context_panel.project_page.section_states().items()
             ),
@@ -1018,6 +1021,7 @@ class DesktopWindow(QMainWindow):
         self.toggle_context_action.setChecked(snapshot.context_visible)
         if len(snapshot.splitter_sizes) == 3 and sum(snapshot.splitter_sizes) > 0:
             self.splitter.setSizes(list(snapshot.splitter_sizes))
+        self.navigation.restore_subpages(snapshot.workflow_subpages)
         self.set_workflow(snapshot.workflow)
         self.context_panel.project_page.set_section_states(snapshot.project_sections)
         return restored
@@ -1095,15 +1099,26 @@ class DesktopWindow(QMainWindow):
             #openImageButton { background: #17677a; color: #dffcff; border-radius: 7px; padding: 8px 13px; }
             #openImageButton:disabled { background: #20313d; color: #708391; }
             #workflowNavigation { background: #121d29; border-right: 1px solid #263748; }
+            #workflowRail, #workflowRail > QWidget > QWidget { background: #121d29; }
             #navigationBrand, #panelTitle { font-size: 16px; font-weight: 700; color: #f2f7fb; }
             #panelKicker { font-size: 10px; font-weight: 600; color: #8298aa; letter-spacing: 1px; }
             QToolButton { background: transparent; border: 0; border-radius: 7px; padding: 7px; }
             QToolButton:hover { background: #203343; }
             QToolButton:checked { background: #15546b; color: #bff7f2; }
             QToolButton:disabled { color: #526171; }
+            #workflowSubpage { padding: 5px 7px; text-align: left; }
+            #workflowSubpage:checked { background: #20394b; color: #bff7f2; }
             #headerActionButton { background: #192a38; }
             #contextContainer { background: #121d29; border-left: 1px solid #263748; }
             #contextPanelHeader { border-bottom: 1px solid #263748; }
+            #contextContainer QScrollArea, #contextViewport { background: #121d29; }
+            #contextContainer QListWidget, #contextContainer QAbstractSpinBox {
+                background: #0f1923; border: 1px solid #314759; border-radius: 4px;
+            }
+            #contextContainer QListWidget::item:selected { background: #15546b; color: #f2fbfc; }
+            QScrollArea QScrollBar:vertical { background: #142431; width: 12px; margin: 0; }
+            QScrollArea QScrollBar::handle:vertical { background: #466176; min-height: 24px; border-radius: 4px; }
+            QScrollArea QScrollBar::add-line:vertical, QScrollArea QScrollBar::sub-line:vertical { height: 0; }
             #contextHeading { font-size: 17px; font-weight: 650; color: #f1f6fa; }
             #selectedMaskPanel { background: #162735; border-top: 1px solid #263748; }
             #selectedMaskId { color: #f2f8fb; font-size: 16px; font-weight: 700; }
@@ -1147,6 +1162,14 @@ class DesktopWindow(QMainWindow):
         if self.navigation.current_workflow == "quality_control":
             self.graph_window.show()
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "image_display_panel"):
+            # Reserve sidebar space for the workflow at the minimum window height.
+            extra = max(0, event.size().height() - self.minimumHeight())
+            controls = self.image_display_panel.controls_scroll
+            controls.setFixedHeight(min(72 + extra // 2, controls.widget().sizeHint().height()))
+
     def closeEvent(self, event) -> None:
         if self._import_thread is not None and self._import_thread.isRunning():
             self._close_when_import_finishes = True
@@ -1185,6 +1208,7 @@ class DesktopWindow(QMainWindow):
             self._disconnect_channel_layers()
             self.context_panel.project_page.channel_panel.dispose()
             self.context_panel.preprocessing_page.dispose()
+            self.context_panel.export_page.image_preparation_panel.dispose()
             self.context_panel.segmentation_page.dispose()
             self.context_panel.mask_review_page.dispose()
             self.context_panel.quantification_page.dispose()

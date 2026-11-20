@@ -8,6 +8,7 @@ from qtpy.QtWidgets import (
     QFormLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -33,6 +34,7 @@ class ImageDisplayPanel(QWidget):
         self.section = CollapsibleSection("image_display", "Image Display")
         form = QFormLayout()
         form.setContentsMargins(10, 8, 10, 10)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.layer_name = QLabel("Select an Image layer")
         self.layer_name.setWordWrap(True)
         form.addRow("Selected layer", self.layer_name)
@@ -66,7 +68,18 @@ class ImageDisplayPanel(QWidget):
         self.scope = QLabel("Display settings do not modify image pixels.")
         self.scope.setWordWrap(True)
         form.addRow(self.scope)
-        self.section.set_content_layout(form)
+        controls = QWidget()
+        controls.setLayout(form)
+        self.controls_scroll = QScrollArea()
+        self.controls_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setWidget(controls)
+        controls.setAutoFillBackground(False)
+        self.controls_scroll.viewport().setObjectName("contextViewport")
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.addWidget(self.controls_scroll)
+        self.section.set_content_layout(body)
         outer.addWidget(self.section)
 
         self.minimum.valueChanged.connect(self._contrast_from_values)

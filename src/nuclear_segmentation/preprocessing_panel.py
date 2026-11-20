@@ -16,7 +16,6 @@ from qtpy.QtWidgets import (
 
 from .collapsible_section import CollapsibleSection
 from .results_panel import ScientificResultsSection
-from .image_preparation_panel import ImagePreparationPanel
 from .z_correction_panel import ZCorrectionPanel
 
 
@@ -45,13 +44,15 @@ class PreprocessingPanel(QWidget):
         self.project_state = project_state
         self._normalization_input_channel = None
         self._normalization_corrected_available = False
-        layout = QVBoxLayout(self)
+        normalization_page = QWidget()
+        layout = QVBoxLayout(normalization_page)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 
         normalization = CollapsibleSection("normalization", "Normalization")
         normalization_form = QFormLayout()
         normalization_form.setContentsMargins(10, 8, 10, 10)
+        normalization_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.normalization_channel_combo = QComboBox()
         self.normalization_input_combo = QComboBox()
         self.normalization_mode_combo = QComboBox()
@@ -65,6 +66,13 @@ class PreprocessingPanel(QWidget):
             "ROI-derived fixed limits", "roi_fixed"
         )
         self.normalization_mode_combo.addItem("Disabled normalization", "disabled")
+        for combo in (
+            self.normalization_channel_combo, self.normalization_input_combo,
+            self.normalization_mode_combo,
+        ):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.currentTextChanged.connect(combo.setToolTip)
+            combo.setToolTip(combo.currentText())
         self.normalization_lower = QDoubleSpinBox()
         self.normalization_upper = QDoubleSpinBox()
         for widget, value in (
@@ -109,7 +117,7 @@ class PreprocessingPanel(QWidget):
         normalization.set_content_layout(normalization_form)
         layout.addWidget(normalization)
 
-        roi_section = CollapsibleSection("normalization_roi", "Normalization ROI")
+        roi_section = CollapsibleSection("normalization_roi", "Normalization Reference ROI")
         roi_layout = QGridLayout()
         roi_layout.setContentsMargins(10, 8, 10, 10)
         self.normalization_roi_draw_button = QPushButton("Draw Polygon ROI")
@@ -141,11 +149,9 @@ class PreprocessingPanel(QWidget):
             "normalization_results", "Normalization Results"
         )
         layout.addWidget(self.normalization_results)
+        layout.addStretch(1)
 
         self.z_correction_panel = ZCorrectionPanel(project_state)
-        layout.addWidget(self.z_correction_panel)
-        self.image_preparation_panel = ImagePreparationPanel(project_state)
-        layout.addWidget(self.image_preparation_panel)
 
         self.normalization_calculate_button.clicked.connect(
             self._request_normalization_calculation
@@ -184,10 +190,16 @@ class PreprocessingPanel(QWidget):
         ):
             signal.connect(self._normalization_setting_changed)
 
+        crop_page = QWidget()
+        layout = QVBoxLayout(crop_page)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(8)
         projection = CollapsibleSection("projection", "XY Projection")
         projection_form = QFormLayout()
         projection_form.setContentsMargins(10, 8, 10, 10)
+        projection_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.channel_combo = QComboBox()
+        self.channel_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.method_combo = QComboBox()
         self.method_combo.addItem("Maximum intensity", "maximum")
         self.method_combo.addItem("Mean intensity", "mean")
@@ -246,6 +258,11 @@ class PreprocessingPanel(QWidget):
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
         layout.addStretch(1)
+        self.pages = {
+            "crop_roi": crop_page,
+            "z_correction": self.z_correction_panel,
+            "normalization": normalization_page,
+        }
         project_state.channels_changed.connect(self.set_channels)
         project_state.z_correction_changed.connect(self._z_correction_changed)
         self.set_channels(project_state.channels)
@@ -397,4 +414,3 @@ class PreprocessingPanel(QWidget):
             self._z_correction_changed
         )
         self.z_correction_panel.dispose()
-        self.image_preparation_panel.dispose()

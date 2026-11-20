@@ -19,6 +19,7 @@ from qtpy.QtWidgets import (
 )
 
 from .collapsible_section import CollapsibleSection
+from .image_preparation_panel import ImagePreparationPanel
 from .results_panel import ScientificResultsSection
 from .stages.export import SCIENTIFIC_OUTPUTS
 
@@ -107,11 +108,11 @@ class ImageExportPanel(QWidget):
     export_requested = Signal(object, str, str)
     scientific_options_changed = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, project_state=None):
         super().__init__(parent)
         self._busy = False
-        self._export_results = {}
-        outer = QVBoxLayout(self)
+        scientific_page = QWidget()
+        outer = QVBoxLayout(scientific_page)
         outer.setContentsMargins(0, 8, 0, 0)
         options = CollapsibleSection("scientific_export_options", "Scientific Export Options")
         outputs = QVBoxLayout()
@@ -158,7 +159,19 @@ class ImageExportPanel(QWidget):
         self.open_export_folder.clicked.connect(self._open_scientific_folder)
         outer.addWidget(self.open_export_folder)
         self._scientific_folder = None
-        section = CollapsibleSection("multichannel_tiff_export", "Multichannel TIFF Export")
+        self.scientific_results = ScientificResultsSection("scientific_results_history", "Export Results")
+        self.scientific_results.set_results("No scientific export completed.")
+        outer.addWidget(self.scientific_results)
+        outer.addStretch(1)
+
+        image_page = QWidget()
+        outer = QVBoxLayout(image_page)
+        outer.setContentsMargins(0, 8, 0, 0)
+        self.image_preparation_panel = None
+        if project_state is not None:
+            self.image_preparation_panel = ImagePreparationPanel(project_state)
+            outer.addWidget(self.image_preparation_panel)
+        section = CollapsibleSection("multichannel_tiff_export", "Step 2 — Export Prepared Images")
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 8, 10, 10)
         note = QLabel(
@@ -218,6 +231,15 @@ class ImageExportPanel(QWidget):
         self.results.set_results("No export completed.")
         outer.addWidget(self.results)
         outer.addStretch(1)
+        self.pages = {
+            "scientific_results": scientific_page,
+            "multichannel_images": image_page,
+        }
+        if project_state is None:
+            # Standalone export controls do not have workflow navigation.
+            standalone = QVBoxLayout(self)
+            for page in self.pages.values():
+                standalone.addWidget(page)
 
         self.select_all_button.clicked.connect(lambda: self._set_all_checked(True))
         self.clear_selection_button.clicked.connect(lambda: self._set_all_checked(False))
@@ -301,6 +323,8 @@ class ImageExportPanel(QWidget):
         self.format_combo.setEnabled(not busy)
         self.pixel_type_combo.setEnabled(not busy)
         self.channels.setEnabled(not busy)
+        if self.image_preparation_panel is not None:
+            self.image_preparation_panel.setEnabled(not busy)
         self._update_selection_state()
 
     def selected_scientific_outputs(self):
@@ -339,12 +363,12 @@ class ImageExportPanel(QWidget):
         self.status.setText(str(message).splitlines()[0])
 
     def set_results(self, text: str, *, scientific_folder=None) -> None:
-        key = "Scientific Results" if scientific_folder is not None else "Multichannel TIFF"
-        self._export_results[key] = f"{key}\nStatus: Completed\n{text}"
-        self.results.set_results("\n\n".join(self._export_results.values()))
         if scientific_folder is not None:
+            self.scientific_results.set_results(f"Scientific Results\nStatus: Completed\n{text}")
             self._scientific_folder = scientific_folder
             self.open_export_folder.show()
+        else:
+            self.results.set_results(f"Multichannel TIFF\nStatus: Completed\n{text}")
 
     def reset(self) -> None:
         self.channels.clear()
@@ -353,7 +377,7 @@ class ImageExportPanel(QWidget):
         self.pixel_type_combo.setCurrentIndex(0)
         self.export_button.setEnabled(False)
         self.status.setText("Generate prepared channel previews before exporting.")
-        self._export_results.clear()
+        self.scientific_results.set_results("No scientific export completed.")
         self.results.set_results("No export completed.")
         self._scientific_folder = None
         self.open_export_folder.hide()

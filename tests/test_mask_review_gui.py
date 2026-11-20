@@ -72,14 +72,15 @@ def test_mask_review_page_activation_and_result_summary(review_window):
     window, masks = review_window
     window.set_workflow("mask_review")
     panel = window.context_panel.mask_review_page
-    assert window.context_panel.heading.text() == "Mask Review"
-    assert window.context_panel.stack.currentWidget().widget() is panel
+    assert window.context_title.text() == "Mask Review"
+    assert window.context_panel.heading.text() == "Filtering"
+    assert window.context_panel.stack.currentWidget() is panel
     assert panel.segmentation_status.text() == "Segmentation: available and current"
     assert panel.mask_count.text() == "Detected masks: 2"
     assert panel.show_all_button.isEnabled()
     assert not panel.show_selected_button.isEnabled()
-    assert not panel.keep_button.isEnabled()
-    assert "ManualReview" in panel.review_safeguard.text()
+    window.navigation.set_subpage("mask_editing", emit=True)
+    assert "selection and visibility" in panel.review_status.text()
     layer = window.segmentation.result_layer
     assert layer is not None
     assert np.shares_memory(np.asarray(layer.data), masks)
@@ -89,6 +90,9 @@ def test_mask_review_page_activation_and_result_summary(review_window):
 def test_filter_slider_is_debounced_without_requesting_measurement(review_window):
     window, _ = review_window
     panel = window.context_panel.mask_review_page
+    window.set_workflow("mask_review")
+    for subpage in ("roi_counting", "mask_editing", "filtering", "roi_counting", "filtering"):
+        window.navigation.set_subpage(subpage, emit=True)
     emitted = []
     recalculated = []
     panel.filters_changed.connect(lambda: emitted.append(True))
@@ -267,7 +271,7 @@ def test_segmentation_result_can_navigate_to_existing_mask_review(review_window)
     assert not panel.results_section.isHidden()
     panel.go_review_button.click()
     assert window.navigation.current_workflow == "mask_review"
-    assert window.context_panel.heading.text() == "Mask Review"
+    assert window.context_title.text() == "Mask Review"
 
 
 def test_marker_configuration_is_owned_by_stable_channel_index(review_window):

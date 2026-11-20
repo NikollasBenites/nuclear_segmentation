@@ -66,6 +66,51 @@ def test_main_window_initialization_and_navigation(window):
     assert window.context_panel.heading.text() == "Segmentation"
     assert window.header_workflow.text() == "SEGMENTATION"
     assert window.embedding.viewer is original_viewer
+    assert window.context_title.text() == "Segmentation Parameters"
+
+
+@pytest.mark.parametrize("size", [(1024, 680), (1440, 900)])
+def test_hierarchical_navigation_at_supported_sizes(window, size):
+    window.resize(*size)
+    window.splitter.setSizes([200, size[0] - 528, 320])
+    navigation = window.navigation
+    context = window.context_panel
+    workflows = (
+        ("preprocessing", ("crop_roi", "z_correction", "normalization")),
+        ("mask_review", ("filtering", "roi_counting", "mask_editing")),
+        ("export", ("scientific_results", "multichannel_images")),
+    )
+    for workflow, keys in workflows:
+        navigation._buttons[workflow].click()
+        assert navigation.current_subpage == keys[0]
+        assert [key for key, submenu in navigation._submenus.items() if submenu.isVisible()] == [workflow]
+        buttons = navigation._subpage_buttons[workflow]
+        assert tuple(buttons) == keys
+        for key in keys:
+            button = buttons[key]
+            button.setFocus()
+            QTest.keyClick(button, Qt.Key.Key_Space)
+            QTest.qWait(25)
+            assert navigation.current_subpage == key and button.isChecked()
+            assert button.width() >= button.sizeHint().width()
+            assert button.toolTip()
+            scroll = context._subpage_stacks[workflow].currentWidget()
+            assert scroll.widget() is context.stack.currentWidget().pages[key]
+            assert scroll.viewport().height() >= 105
+            assert scroll.horizontalScrollBar().maximum() == 0
+
+    navigation._buttons["preprocessing"].click()
+    assert navigation.current_subpage == "normalization"
+    assert window.context_title.text() == "Preprocessing Parameters"
+    assert context.heading.text() == "Segmentation Input Normalization"
+    navigation.collapse_button.click()
+    assert navigation.collapsed and navigation.width() == 64
+    assert all(not submenu.isVisible() for submenu in navigation._submenus.values())
+    navigation._buttons["mask_review"].click()
+    assert navigation.current_subpage == "mask_editing"
+    navigation.collapse_button.click()
+    assert navigation._submenus["mask_review"].isVisible()
+    assert navigation._subpage_buttons["mask_review"]["mask_editing"].isChecked()
 
 
 def test_quality_control_uses_one_persistent_plot_widget(window, qapp):
@@ -200,6 +245,10 @@ def test_project_section_states_restore_and_invalid_values_expand(
     )
     first.context_panel.project_page.sections["calibration"].set_expanded(False)
     first.context_panel.project_page.sections["channels"].set_expanded(False)
+    first.set_workflow("export")
+    first.navigation.set_subpage("multichannel_images", emit=True)
+    first.set_workflow("preprocessing")
+    first.navigation.set_subpage("normalization", emit=True)
     first.close()
     second = DesktopWindow(
         qt_viewer_factory=FakeQtViewer,
@@ -207,6 +256,11 @@ def test_project_section_states_restore_and_invalid_values_expand(
         restore_workspace=True,
     )
     panel = second.context_panel.project_page
+    assert second.navigation.current_workflow == "preprocessing"
+    assert second.context_panel.heading.text() == "Segmentation Input Normalization"
+    second.set_workflow("export")
+    assert second.navigation.current_subpage == "multichannel_images"
+    second.set_workflow("project")
     assert not panel.sections["calibration"].expanded
     assert not panel.sections["channels"].expanded
     panel.spacing_fields[0].setText("1")

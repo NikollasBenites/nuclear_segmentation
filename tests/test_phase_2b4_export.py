@@ -60,12 +60,13 @@ def _window(qapp, tmp_path):
     )
     assert window.prepare_image_import(source, confirm_replacement=False)
     _wait(qapp, lambda: window._import_thread is None)
-    prep_panel = window.context_panel.preprocessing_page.image_preparation_panel
+    window.set_workflow("export")
+    window.navigation.set_subpage("multichannel_images", emit=True)
+    prep_panel = window.context_panel.export_page.image_preparation_panel
     prep_panel.channel_list.selectAll()
     prep_panel._routes = {0: "original", 1: "normalized", 2: "original"}
-    assert window.image_preparation.prepare(
-        prep_panel.selected_routes(), prep_panel.options()
-    )
+    prep_panel.preview_button.click()
+    assert window.image_preparation.busy
     _wait(qapp, lambda: not window.image_preparation.busy)
     return window, source, data
 

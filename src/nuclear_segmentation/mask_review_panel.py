@@ -84,7 +84,9 @@ class PerinuclearMarkerRow(QGroupBox):
         super().__init__(parent)
         record = dict(record or {})
         form = QFormLayout(self)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.channel = QComboBox()
+        self.channel.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         for item in channels:
             self.channel.addItem(f"{item.name} (channel {item.index + 1})", int(item.index))
         selected = self.channel.findData(record.get("channel_index"))
@@ -151,9 +153,13 @@ class MaskReviewPanel(QWidget):
         self._filter_timer.setInterval(120)
         self._filter_timer.timeout.connect(self.filters_changed)
         self.marker_rows = []
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 8, 0, 0)
-        root.setSpacing(8)
+        self.pages = {key: QWidget() for key in ("filtering", "roi_counting", "mask_editing")}
+        filtering, counting, editing = (
+            QVBoxLayout(page) for page in self.pages.values()
+        )
+        for page_layout in (filtering, counting, editing):
+            page_layout.setContentsMargins(0, 8, 0, 0)
+            page_layout.setSpacing(8)
 
         section = CollapsibleSection("review_selection", "Selection")
         layout = QVBoxLayout()
@@ -168,7 +174,7 @@ class MaskReviewPanel(QWidget):
         ):
             layout.addWidget(widget)
         section.set_content_layout(layout)
-        root.addWidget(section)
+        editing.addWidget(section)
 
         section = CollapsibleSection("scientific_filters", "Scientific Filtering")
         layout = QVBoxLayout()
@@ -179,6 +185,7 @@ class MaskReviewPanel(QWidget):
         layout.addWidget(self.calculate_button)
         layout.addWidget(self.measurement_status)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.minimum_volume = SyncedNumericControl(0, 1, 6)
         self.minimum_sphericity = SyncedNumericControl(0, 1, 6); self.minimum_sphericity.setValue(.45)
         self.first_tissue_z = QSpinBox(); self.last_tissue_z = QSpinBox()
@@ -186,21 +193,17 @@ class MaskReviewPanel(QWidget):
         self.z_guard_mode = QComboBox(); self.z_guard_mode.addItems(["none", "first", "last", "both"]); self.z_guard_mode.setCurrentText("first")
         form.addRow("Minimum volume (µm³)", self.minimum_volume)
         form.addRow("Minimum sphericity", self.minimum_sphericity)
-        form.addRow("First tissue Z", self.first_tissue_z)
-        form.addRow("Last tissue Z", self.last_tissue_z)
-        form.addRow("Z guard (µm)", self.z_guard_um)
-        form.addRow("Z guard mode", self.z_guard_mode)
         layout.addLayout(form)
         self.intensity_combination = QComboBox(); self.intensity_combination.addItems(["all", "any"])
         self.intensity_master = QCheckBox("Enable Intensity Filtering")
-        self.intensity_label = QLabel("Channel intensity filters (enabled channels combined by)")
+        self.intensity_label = self._value("Channel intensity filters (enabled channels combined by)")
         layout.addWidget(self.intensity_master)
         layout.addWidget(self.intensity_label)
         layout.addWidget(self.intensity_combination)
         self.intensity_layout = QVBoxLayout(); layout.addLayout(self.intensity_layout)
         self.intensity_controls = {}
         self.perinuclear_combination = QComboBox(); self.perinuclear_combination.addItems(["all", "any"])
-        self.perinuclear_label = QLabel("Perinuclear marker filters (combined by)")
+        self.perinuclear_label = self._value("Perinuclear marker filters (combined by)")
         layout.addWidget(self.perinuclear_label)
         layout.addWidget(self.perinuclear_combination)
         self.perinuclear_layout = QVBoxLayout(); layout.addLayout(self.perinuclear_layout)
@@ -208,7 +211,7 @@ class MaskReviewPanel(QWidget):
         self.filter_summary = self._value("Live filtering is unavailable.")
         layout.addWidget(self.filter_summary)
         section.set_content_layout(layout)
-        root.addWidget(section)
+        filtering.addWidget(section)
 
         section = CollapsibleSection(
             "perinuclear_marker_configuration",
@@ -224,16 +227,32 @@ class MaskReviewPanel(QWidget):
         self.marker_configuration_layout.addWidget(self.marker_configuration_note)
         self.marker_configuration_layout.addWidget(self.add_marker_button)
         section.set_content_layout(self.marker_configuration_layout)
-        root.addWidget(section)
+        filtering.addWidget(section)
 
         section = CollapsibleSection("scientific_roi", "Scientific MNTB ROI")
         layout = QVBoxLayout(); layout.setContentsMargins(10, 8, 10, 10)
+        layout.addWidget(self._value("Show the MNTB ROI in Layers to review it in the viewer."))
         self.roi_status = self._value("Provisional ROI unavailable.")
         self.accept_roi_button = QPushButton("Accept Reviewed MNTB ROI")
         self.accept_roi_button.setEnabled(False)
         self.accept_roi_button.clicked.connect(self.accept_roi_requested)
         layout.addWidget(self.roi_status); layout.addWidget(self.accept_roi_button)
-        section.set_content_layout(layout); root.addWidget(section)
+        section.set_content_layout(layout)
+        counting.addWidget(section)
+
+        section = CollapsibleSection("roi_counting", "Counting Settings")
+        form = QFormLayout()
+        form.setContentsMargins(10, 8, 10, 10)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.addRow("First tissue Z", self.first_tissue_z)
+        form.addRow("Last tissue Z", self.last_tissue_z)
+        form.addRow("Z guard (µm)", self.z_guard_um)
+        form.addRow("Z guard mode", self.z_guard_mode)
+        self.counting_error = self._value("")
+        self.counting_error.hide()
+        form.addRow(self.counting_error)
+        section.set_content_layout(form)
+        counting.addWidget(section)
         for widget in (self.minimum_volume, self.minimum_sphericity, self.first_tissue_z,
                        self.last_tissue_z, self.z_guard_um):
             widget.valueChanged.connect(self._schedule_filters)
@@ -253,7 +272,7 @@ class MaskReviewPanel(QWidget):
         layout.addWidget(self.mask_type)
         layout.addWidget(self.measurements)
         section.set_content_layout(layout)
-        root.addWidget(section)
+        editing.addWidget(section)
 
         section = CollapsibleSection("review_visualization", "Visualization")
         layout = QVBoxLayout()
@@ -273,35 +292,17 @@ class MaskReviewPanel(QWidget):
         )
         layout.addWidget(self.visualization_status)
         section.set_content_layout(layout)
-        root.addWidget(section)
+        editing.addWidget(section)
 
         section = CollapsibleSection("manual_review_status", "Review Status")
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 8, 10, 10)
         self.review_status = self._value("No segmentation is available for review.")
         layout.addWidget(self.review_status)
-        self.keep_button = QPushButton("Keep selected mask")
-        self.exclude_button = QPushButton("Exclude selected mask")
-        self.automatic_button = QPushButton("Use automatic filters")
-        self.undo_button = QPushButton("Undo last review decision")
-        for button in (
-            self.keep_button, self.exclude_button, self.automatic_button,
-            self.undo_button,
-        ):
-            button.setEnabled(False)
-            button.setToolTip(
-                "Requires integrated measurements, automatic filters, and a "
-                "reviewed scientific ROI."
-            )
-            layout.addWidget(button)
-        self.review_safeguard = self._value(
-            "Manual keep/exclude is disabled until filtering, eligibility, guard zones, "
-            "and reviewed ROI state can be supplied to the existing ManualReview logic."
-        )
-        layout.addWidget(self.review_safeguard)
         section.set_content_layout(layout)
-        root.addWidget(section)
-        root.addStretch(1)
+        editing.addWidget(section)
+        for page_layout in (filtering, counting, editing):
+            page_layout.addStretch(1)
 
         project_state.segmentation_result_changed.connect(self.set_result)
         project_state.channels_changed.connect(self._channels_changed)
@@ -345,6 +346,7 @@ class MaskReviewPanel(QWidget):
         if result is None:
             self.measurement_status.setText("Measurements have not been calculated.")
             self.accept_roi_button.setEnabled(False)
+            self.counting_error.hide()
             return
         table = result["properties"]
         self.measurement_status.setText(f"Measurements available for {len(table):,} masks." + ("" if current else " Results are outdated."))
@@ -420,9 +422,17 @@ class MaskReviewPanel(QWidget):
                 "intensity_filters": intensity}
 
     def update_filter_summary(self, result, current=True):
+        self.counting_error.hide()
         qualifier = "validated" if result.get("roi_reviewed") else "preliminary — ROI review required"
         if not current: qualifier = "outdated"
-        self.filter_summary.setText(f"Retained masks: {len(result.get('retained_ids', ())):,} / {len(result.get('properties', ())):,} ({qualifier})")
+        retained = len(result.get("retained_ids", ()))
+        excluded = len(result.get("properties", ())) - retained
+        self.filter_summary.setText(f"Retained masks: {retained:,} · Excluded masks: {excluded:,} ({qualifier})")
+
+    def show_filter_error(self, message):
+        self.filter_summary.setText(message)
+        self.counting_error.setText(message)
+        self.counting_error.show()
 
     def update_selected_properties(self, mask_id):
         result = self.project_state.filtering_result
@@ -438,6 +448,7 @@ class MaskReviewPanel(QWidget):
         self.measurements.setText("\n".join(lines))
 
     def _schedule_filters(self, *args):
+        self.counting_error.hide()
         self._filter_timer.start()
         self.filters_edited.emit()
 
@@ -565,8 +576,8 @@ class MaskReviewPanel(QWidget):
                 f"Detected masks: {int(result['object_count']):,}"
             )
             self.review_status.setText(
-                "Raw masks are ready for visual review. Scientific keep/exclude "
-                "decisions remain disabled until their prerequisites are integrated."
+                "Raw masks are ready for visual review. Use selection and visibility "
+                "controls to inspect individual masks."
             )
         else:
             self.segmentation_status.setText("Segmentation: outdated")

@@ -298,9 +298,16 @@ def test_applied_z_preview_source_cellpose_default_and_invalidation(
 ):
     window, _, _ = _window_with_tiff(qapp, tmp_path)
     preprocessing = window.context_panel.preprocessing_page
+    window.set_workflow("preprocessing")
+    assert window.navigation.current_subpage == "crop_roi"
+    preprocessing.generate_button.click()
+    _wait(qapp, lambda: not window.crop_workspace.busy)
+    projection = window.crop_workspace.projection_layer
+    assert projection is not None
+    window.navigation.set_subpage("z_correction", emit=True)
     z_panel = preprocessing.z_correction_panel
     z_panel.channel_list.item(0).setSelected(True)
-    z_panel._request_calculate()
+    z_panel.calculate_button.click()
     _wait(qapp, lambda: not window.z_correction.busy)
     temporary = window.z_correction.preview_layers[0]
     assert window.z_correction.apply([0])
@@ -311,6 +318,7 @@ def test_applied_z_preview_source_cellpose_default_and_invalidation(
     assert 0 in window.project_state.z_correction_reports
     assert 0 in window.project_state.z_correction_options
     assert 0 in window.project_state.z_correction_applied
+    window.navigation.set_subpage("normalization", emit=True)
     assert preprocessing.normalization_input_combo.currentData() == "z_corrected"
     original_position = preprocessing.normalization_input_combo.findData(
         "working_original"
@@ -331,7 +339,8 @@ def test_applied_z_preview_source_cellpose_default_and_invalidation(
     monkeypatch.setattr(workspace, "correct_z", tracked)
     options = preprocessing.normalization_options()
     assert options["mode"] == "cellpose_default"
-    assert window.normalization.calculate(options)
+    preprocessing.normalization_calculate_button.click()
+    assert window.normalization.busy
     _wait(qapp, lambda: not window.normalization.busy)
     assert len(calls) == 1
     corrected, _ = correct_z(
@@ -346,6 +355,21 @@ def test_applied_z_preview_source_cellpose_default_and_invalidation(
     assert window.project_state.normalization_configuration["cellpose_normalize"] is True
     assert window.project_state.normalization_configuration["provenance"]["input_source"] == "z_corrected"
 
+    preview = window.normalization.preview_layer
+    report = window.project_state.z_correction_reports[0]
+    window.navigation.set_subpage("crop_roi", emit=True)
+    assert window.crop_workspace.projection_layer is projection
+    window.navigation.set_subpage("z_correction", emit=True)
+    assert window.z_correction.preview_layers[0] is temporary
+    window.set_workflow("export")
+    window.navigation.set_subpage("multichannel_images", emit=True)
+    window.set_workflow("preprocessing")
+    assert window.navigation.current_subpage == "z_correction"
+    window.navigation.set_subpage("normalization", emit=True)
+    assert window.normalization.preview_layer is preview
+    assert window.project_state.z_correction_reports[0] is report
+    assert window.project_state.normalization_is_current
+    assert len(calls) == 1
     z_panel.fields["percentile"].setValue(98.0)
     qapp.processEvents()
     assert window.normalization.preview_layer is not None

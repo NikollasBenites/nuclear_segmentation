@@ -66,7 +66,9 @@ class ZCorrectionPanel(QWidget):
         selection_buttons.addWidget(self.clear_selection_button, 0, 1)
         layout.addLayout(selection_buttons)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.inspect_combo = QComboBox()
+        self.inspect_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         form.addRow("Inspect/settings channel", self.inspect_combo)
         self.fields = {}
         for key, label, minimum, maximum in (
@@ -83,11 +85,13 @@ class ZCorrectionPanel(QWidget):
             self.fields[key] = field
             form.addRow(label, field)
         self.segmentation = QCheckBox(
-            "Use correction if this is the designated segmentation channel"
+            "Apply to segmentation input"
         )
+        self.segmentation.setToolTip("Use correction if this is the designated segmentation channel.")
         self.measurement = QCheckBox(
-            "Use corrected intensities for measurements on this channel"
+            "Apply to channel measurements"
         )
+        self.measurement.setToolTip("Use corrected intensities for measurements on this channel.")
         self.segmentation.setChecked(DEFAULTS["segmentation"])
         self.measurement.setChecked(DEFAULTS["measurement"])
         self.segmentation.toggled.connect(self._save_current_settings)
@@ -96,7 +100,7 @@ class ZCorrectionPanel(QWidget):
         form.addRow(self.measurement)
         layout.addLayout(form)
         self.include_zeros = QCheckBox(
-            "Diagnostic profiles include genuine zero-intensity pixels"
+            "Include zeros in profiles"
         )
         self.include_zeros.setChecked(True)
         self.include_zeros.setToolTip(
@@ -108,19 +112,16 @@ class ZCorrectionPanel(QWidget):
         actions = QGridLayout()
         self.calculate_button = QPushButton("Calculate and Preview")
         self.apply_button = QPushButton("Apply Z Correction")
-        self.reset_selected_button = QPushButton("Reset Selected Correction")
-        self.reset_all_button = QPushButton("Reset All Corrections")
+        self.reset_selected_button = QPushButton("Reset Selected")
+        self.reset_selected_button.setToolTip("Reset the selected channels’ Z corrections.")
+        self.reset_all_button = QPushButton("Reset All")
+        self.reset_all_button.setToolTip("Reset Z corrections for every channel.")
         self.profiles_button = QPushButton("Show Z Profiles")
-        for index, button in enumerate(
-            (
-                self.calculate_button,
-                self.apply_button,
-                self.reset_selected_button,
-                self.reset_all_button,
-                self.profiles_button,
-            )
-        ):
-            actions.addWidget(button, index // 2, index % 2)
+        actions.addWidget(self.calculate_button, 0, 0, 1, 2)
+        actions.addWidget(self.apply_button, 1, 0, 1, 2)
+        actions.addWidget(self.reset_selected_button, 2, 0)
+        actions.addWidget(self.reset_all_button, 2, 1)
+        actions.addWidget(self.profiles_button, 3, 0, 1, 2)
         layout.addLayout(actions)
         self.status = QLabel("Load a project image to configure Z correction.")
         self.status.setWordWrap(True)
@@ -135,6 +136,7 @@ class ZCorrectionPanel(QWidget):
         results_selector_layout = QFormLayout(results_selector)
         results_selector_layout.setContentsMargins(0, 0, 0, 0)
         self.results_channel_combo = QComboBox()
+        self.results_channel_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         results_selector_layout.addRow("Results channel", self.results_channel_combo)
         self.results.insert_widget(0, results_selector)
 
@@ -148,6 +150,7 @@ class ZCorrectionPanel(QWidget):
         self.profile_canvas = FigureCanvasQTAgg(self.profile_figure)
         self.profile_canvas.setMinimumHeight(620)
         self.profile_toolbar = NavigationToolbar2QT(self.profile_canvas, self.results)
+        self.profile_toolbar.setMinimumWidth(0)
         self.profile_note = QLabel(
             "The horizontal axis uses calibrated Z positions. Artificial "
             "polygon-crop fill is excluded."

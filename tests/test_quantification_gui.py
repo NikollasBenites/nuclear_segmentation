@@ -298,10 +298,27 @@ def test_scientific_package_preserves_schema_results_and_executed_provenance(
     segmentation_panel.cellprob.setValue(123)
     window.context_panel.preprocessing_page.z_correction_panel.fields["percentile"].setValue(90)
     panel = window.context_panel.export_page
+    filtering = state.filtering_result
+    quantification = state.quantification_result
+    roi = state.scientific_roi
+    window.set_workflow("mask_review")
+    for key in ("roi_counting", "mask_editing", "filtering"):
+        window.navigation.set_subpage(key, emit=True)
+    window.set_workflow("quantification")
+    window.set_workflow("export")
+    panel.scientific_options["png"].setChecked(False)
+    window.navigation.set_subpage("multichannel_images", emit=True)
+    window.navigation.set_subpage("scientific_results", emit=True)
+    assert not panel.scientific_options["png"].isChecked()
+    panel.scientific_options["png"].setChecked(True)
+    assert state.filtering_result is filtering
+    assert state.quantification_result is quantification and state.quantification_is_current
+    assert state.scientific_roi is roi and state.scientific_roi_reviewed
     assert panel.scientific_button.isEnabled()
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_: str(tmp_path))
     panel.scientific_button.click()
     assert window.image_export.busy
+    assert not panel.image_preparation_panel.isEnabled()
     assert not panel.scientific_button.isEnabled()
     assert not panel.scientific_progress.isHidden()
     assert not window.close_project(confirm=False)
@@ -309,7 +326,7 @@ def test_scientific_package_preserves_schema_results_and_executed_provenance(
     assert "completed" in panel.scientific_status.text(), panel.scientific_status.text()
     assert panel.scientific_progress.isHidden()
     path, = tmp_path.glob("test_export_*")
-    results = panel.results.text.toPlainText()
+    results = panel.scientific_results.text.toPlainText()
     assert "Scientific Results\nStatus: Completed" in results
     assert f"Destination: {path}" in results
     assert "Scientific PDF report" in results
@@ -318,7 +335,7 @@ def test_scientific_package_preserves_schema_results_and_executed_provenance(
     monkeypatch.setattr("nuclear_segmentation.image_export_panel.QDesktopServices.openUrl", opened.append)
     panel.open_export_folder.click()
     assert opened[0].toLocalFile() == str(path)
-    panel.results.copy_results()
+    panel.scientific_results.copy_results()
     assert qapp.clipboard().text() == results
     assert {item.name for item in path.iterdir()} == {
         "cellpose_raw_masks.tif", "filtered_masks_syglass.tif", "mntb_roi.tif",
@@ -544,15 +561,20 @@ def test_scientific_export_rechecks_roi_and_filter_validity(
     state, _ = measure(crop=True)
     panel = window.context_panel.export_page
     review = window.context_panel.mask_review_page
+    window.set_workflow("mask_review")
+    window.navigation.set_subpage("roi_counting", emit=True)
     review.first_tissue_z.setValue(5)
     review.last_tissue_z.setValue(1)
     assert not panel.scientific_button.isEnabled()
     assert not window.image_export.export_scientific(tmp_path / "pending-filters")
     _wait(qapp, lambda: "Invalid filter settings" in review.filter_summary.text())
+    assert review.counting_error.text() == review.filter_summary.text()
+    assert not review.counting_error.isHidden()
     assert not panel.scientific_button.isEnabled()
     review.first_tissue_z.setValue(0)
     review.last_tissue_z.setValue(5)
     _wait(qapp, panel.scientific_button.isEnabled)
+    assert review.counting_error.isHidden()
     review.z_guard_mode.setCurrentText("both")
     review.z_guard_um.editor.setValue(10)
     _wait(qapp, lambda: state.quantification_result["density_status"] == "empty sampling volume")

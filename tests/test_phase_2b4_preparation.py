@@ -148,7 +148,7 @@ def test_multichannel_preparation_preview_provenance_cleanup_and_display_isolati
     qapp, tmp_path, monkeypatch
 ):
     window, original = _window(qapp, tmp_path)
-    panel = window.context_panel.preprocessing_page.image_preparation_panel
+    panel = window.context_panel.export_page.image_preparation_panel
     options = {**DEFAULTS, "sigma_planes": 0.0}
     corrected, z_report = correct_z(original[2], options)
     z_report["options"] = options

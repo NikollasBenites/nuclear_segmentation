@@ -217,7 +217,7 @@ class FilteringController(QObject):
             self.state.set_filtering_result(updated)
             if self.filtered_layer is not None: self.filtered_layer.data = updated["filtered_masks"]
             self.panel.update_filter_summary(updated, True); self.panel.update_selected_properties(self.panel._selected_id)
-        except ValueError as error: self.panel.filter_summary.setText(f"Invalid filter settings: {error}")
+        except ValueError as error: self.panel.show_filter_error(f"Invalid filter settings: {error}")
     def _result_with_settings(self, current, settings, roi):
         settings = deepcopy(settings)
         columns = set(current["properties"].columns)

@@ -35,7 +35,7 @@ class ImagePreparationPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         section = CollapsibleSection(
-            "multichannel_preparation", "Multichannel Image Preparation"
+            "multichannel_preparation", "Step 1 — Prepare Channels"
         )
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 8, 10, 10)
@@ -58,6 +58,7 @@ class ImagePreparationPanel(QWidget):
         selection.addWidget(self.clear_selection_button, 0, 1)
         layout.addLayout(selection)
         form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.inspect_combo = QComboBox()
         self.route_combo = QComboBox()
         self.lower = QDoubleSpinBox()
@@ -73,6 +74,10 @@ class ImagePreparationPanel(QWidget):
         self.scope_combo.addItem(
             "Working bounding box (includes exterior fill)", "working_bbox"
         )
+        for combo in (self.inspect_combo, self.route_combo, self.scope_combo):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.currentTextChanged.connect(combo.setToolTip)
+            combo.setToolTip(combo.currentText())
         self.clip = QCheckBox("Clip normalized output to 0–1")
         self.clip.setChecked(True)
         form.addRow("Configure channel", self.inspect_combo)
@@ -87,7 +92,7 @@ class ImagePreparationPanel(QWidget):
         self.clear_button = QPushButton("Clear Prepared Previews")
         self.clear_button.setEnabled(False)
         actions.addWidget(self.preview_button, 0, 0)
-        actions.addWidget(self.clear_button, 0, 1)
+        actions.addWidget(self.clear_button, 1, 0)
         layout.addLayout(actions)
         self.status = QLabel("Load a project image to prepare channels.")
         self.status.setWordWrap(True)
