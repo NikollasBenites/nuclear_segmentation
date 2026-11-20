@@ -30,6 +30,10 @@ class SegmentationPanel(QWidget):
         root.setContentsMargins(0, 8, 0, 0)
 
         section = CollapsibleSection("segmentation_input", "Segmentation Input")
+        self.unsupported_role = QLabel("Cytoplasmic segmentation execution is unavailable.")
+        self.unsupported_role.setWordWrap(True)
+        self.unsupported_role.hide()
+        root.addWidget(self.unsupported_role)
         self.input_section = section
         form = QFormLayout()
         form.setContentsMargins(10, 8, 10, 10)
@@ -392,7 +396,7 @@ class SegmentationPanel(QWidget):
     def refresh(self, *args):
         state = self.project_state
         dataset = state.working_dataset
-        channel = next((item for item in state.channels if item.index == state.segmentation_channel_index), None)
+        channel = next((item for item in state.channels if item.index == state.active_channel_index), None)
         if dataset is None:
             for key in self.input_values:
                 self._set_input_text(key, "—")
@@ -444,7 +448,10 @@ class SegmentationPanel(QWidget):
                 validate_scientific_input(state, config)
         except (TypeError, ValueError) as error:
             missing.append(str(error))
-        if self._busy:
+        supported = state.active_session.scientific_role == "nuclear"
+        if not supported:
+            self.readiness.setText("Cytoplasmic segmentation execution is unavailable.")
+        elif self._busy:
             self.readiness.setText("Cellpose segmentation is running. Project inputs are locked.")
         elif self._external_busy:
             self.readiness.setText("Wait for the active project operation to finish.")
@@ -453,7 +460,7 @@ class SegmentationPanel(QWidget):
         else:
             self.readiness.setText("Scientific input is valid and ready for Cellpose execution.")
         self.execute_button.setEnabled(
-            not self._busy and not self._external_busy and not missing
+            supported and not self._busy and not self._external_busy and not missing
         )
 
     def set_external_busy(self, busy: bool) -> None:
@@ -492,6 +499,7 @@ class SegmentationPanel(QWidget):
 
     def _result_changed(self, result, current: bool) -> None:
         if result is None:
+            self._show_configuration()
             self.execution_summary.setText("No segmentation has run.")
         elif current:
             self.execution_summary.setText(
@@ -505,6 +513,13 @@ class SegmentationPanel(QWidget):
                 "Previous segmentation remains available but is outdated for the current settings."
             )
             self._show_configuration()
+        supported = self.project_state.active_session.scientific_role == "nuclear"
+        self.unsupported_role.setVisible(not supported)
+        self.run_new_button.setVisible(supported)
+        if not supported:
+            for section in self._configuration_sections:
+                section.hide()
+            self.return_to_results_button.hide()
         self.refresh()
 
     def dispose(self):

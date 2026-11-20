@@ -57,6 +57,8 @@ def validate_scientific_input(project_state, config: dict[str, Any]) -> dict[str
 
     channels = validated["CHANNELS"]
     validate_channel_configuration(channels, validated["SEGMENTATION_CHANNEL"])
+    if validated["SEGMENTATION_CHANNEL"] != project_state.segmentation_channel:
+        raise ValueError("The configured source channel does not match the active session.")
     indexes = [int(item["index"]) for item in channels]
     if len(set(indexes)) != len(indexes) or any(
         index < 0 or index >= image.shape[0] for index in indexes

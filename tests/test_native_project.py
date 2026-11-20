@@ -1,5 +1,6 @@
 """Native resume tests use real disk files and the desktop worker lifecycle."""
 from copy import deepcopy
+import json
 import shutil
 from zipfile import ZipFile
 
@@ -79,12 +80,12 @@ def test_imported_project_roundtrip_and_independent_save_as(project, tmp_path):
     assert window.project_directory == other
 
 
-def _segment(window):
+def _segment(window, *, x_start=1):
     state = window.project_state
     config = window.context_panel.segmentation_page.scientific_config()
     prepared = prepare_scientific_input(state, config)
     masks = np.zeros(state.working_dataset.standardized_shape[1:], dtype=np.uint32)
-    masks[:, 1:3, 1:3] = 90000
+    masks[:, 1:3, x_start:x_start + 2] = 90000
     manual = ManualReview(masks, [90000])
     manual.set(90000, "keep", "Reviewed record")
     state.set_segmentation_result({
@@ -162,7 +163,7 @@ def test_processed_checkpoint_reuses_results_with_exact_labels_roi_and_density(p
     assert state.z_correction_applied == {0}
     folder = tmp_path / "Processed"
     save(window, app, folder)
-    assert native_project._manifest(folder)["version"] == 1
+    assert native_project._manifest(folder)["version"] == 2
     assert window.close_project()
     _forbid_calculations(monkeypatch)
     open_saved(window, app, folder)
@@ -374,11 +375,14 @@ def test_relocation_requires_exact_source_bytes(project, tmp_path, monkeypatch):
 def test_corrupt_and_missing_checkpoints_leave_active_project_in_place(project, tmp_path):
     window, app, _, _, warnings = project
     masks = _segment(window)
-    snapshot = build_snapshot(window)
-    snapshot["state"]["segmentation_result"] = dict(
-        snapshot["state"]["segmentation_result"], masks=masks.astype(np.float32)
-    )
+    good = tmp_path / "Good labels"
+    save(window, app, good)
     bad = tmp_path / "Bad labels"
+    snapshot = _read_snapshot(good)
+    session = snapshot["sessions"]["nuclear"]
+    session["segmentation_result"] = dict(
+        session["segmentation_result"], masks=masks.astype(np.float32)
+    )
     native_project.save_project(bad, snapshot)
     active = window.project_state.segmentation_result
     open_saved(window, app, bad, confirm=False)
@@ -443,3 +447,210 @@ def test_source_paths_roundtrip_text_without_platform_specific_parsing(project, 
             payload = native_project._pack(archive, record)
         with ZipFile(tmp_path / "paths.zip") as archive:
             assert native_project._unpack(archive, payload)["source"]["path"] == value
+
+
+def _read_snapshot(folder):
+    with ZipFile(folder / native_project.CHECKPOINT) as archive:
+        source = native_project._unpack(archive, json.loads(archive.read("source.json")))
+        payload = native_project._unpack(archive, json.loads(archive.read("state.json")))
+    return dict(payload, source=source)
+
+
+def _write_v1_checkpoint(folder, snapshot):
+    """Write the Phase 2D.1 archive structure from a populated scientific fixture."""
+    folder.mkdir()
+    session = snapshot["sessions"]["nuclear"]
+    (folder / native_project.MANIFEST).write_text(
+        json.dumps({"format": "NuCytoSeg", "version": 1, "id": "v1-fixture"}), encoding="utf-8"
+    )
+    keys = ("segmentation_settings", "filter_controls", "intensity_controls", "roi_grid_compatible")
+    payload = {
+        key: value for key, value in snapshot.items()
+        if key not in {"source", "state", "sessions", "active_session_id"}
+    }
+    payload["state"] = dict(snapshot["state"], **{
+        key: session[key] for key in native_project.V1_SESSION_FIELDS
+    })
+    payload.update({key: session[key] for key in keys})
+    with ZipFile(folder / native_project.CHECKPOINT, "w") as archive:
+        archive.writestr("source.json", json.dumps(native_project._pack(archive, snapshot["source"])))
+        archive.writestr("state.json", json.dumps(native_project._pack(archive, payload)))
+        archive.writestr("revision.txt", "first")
+        archive.writestr("project-id.txt", "v1-fixture")
+
+
+def _measure_and_review(window, app):
+    assert window.filtering.calculate()
+    _wait(app, lambda: not window.filtering.busy)
+    review = window.context_panel.mask_review_page
+    _wait(app, lambda: not review._filter_timer.isActive())
+    window.filtering.accept_roi()
+    assert window.project_state.quantification_is_current
+
+
+def test_completed_sessions_roundtrip_independently(project, tmp_path, monkeypatch):
+    window, app, _, _, warnings = project
+    state = window.project_state
+    first_masks = _segment(window)
+    _measure_and_review(window, app)
+    first = state.active_session
+    first_identity = state.mask_identity(90000)
+    first_quantification = first.quantification_result
+    shared_grid = state.working_dataset
+    old_layer = window.segmentation.result_layer
+    panel = window.context_panel.project_page
+    segmentation = window.context_panel.segmentation_page
+    segmentation.cellprob.setValue(.83)
+    second = state.create_session("Replicate", channel_index=1)
+    assert second.session_id != first.session_id
+    with pytest.raises(AttributeError):
+        second.session_id = first.session_id
+    panel.session_combo.setCurrentIndex(panel.session_combo.findData(second.session_id))
+    assert state.active_session_id == second.session_id
+    assert state.working_dataset is shared_grid
+    assert not state.segmentation_is_current
+    assert window.segmentation.result_layer is None
+    assert "MAP2" in panel.session_details.text()
+    assert segmentation.cellprob.value() != .83
+    second_masks = _segment(window, x_start=4)
+    _measure_and_review(window, app)
+    second_quantification = second.quantification_result
+    second_identity = state.mask_identity(90000)
+    assert first_identity.geometry_revision == second_identity.geometry_revision
+    assert first_identity != second_identity
+    assert window.segmentation.result_layer.metadata["session_id"] == second.session_id
+    review = window.context_panel.mask_review_page
+    review.set_selection(old_layer, 90000)
+    assert not review.show_selected_button.isEnabled()
+    assert "not available" in review.measurements.text()
+
+    session_revisions = {
+        session.session_id: (session.input_revision, session.geometry_revision, session.measurement_revision)
+        for session in state.sessions.values()
+    }
+    window._update_channel_configuration(0, "colormap", "magenta")
+    window._update_channel_configuration(1, "visible", False)
+    assert all(session.quantification_is_current for session in state.sessions.values())
+    panel.session_combo.setCurrentIndex(panel.session_combo.findData(first.session_id))
+    assert state.quantification_result is first_quantification
+    assert segmentation.cellprob.value() == pytest.approx(.83)
+    np.testing.assert_array_equal(window.segmentation.result_layer.data, first_masks)
+    panel.session_combo.setCurrentIndex(panel.session_combo.findData(second.session_id))
+    assert state.quantification_result is second_quantification
+    assert state.session_revision().session_id == second.session_id
+
+    state.rename_session(second.session_id, "MAP2 replicate")
+    folder = tmp_path / "Two analyses"
+    save(window, app, folder)
+    assert window.close_project()
+    _forbid_calculations(monkeypatch)
+    open_saved(window, app, folder)
+    assert not warnings
+    assert list(state.sessions) == ["nuclear", second.session_id]
+    assert state.active_session_id == second.session_id
+    assert state.active_session.display_name == "MAP2 replicate"
+    assert "MAP2 replicate" in window.active_session_title.text()
+    for session_id, masks, quant in (
+        ("nuclear", first_masks, first_quantification),
+        (second.session_id, second_masks, second_quantification),
+    ):
+        session = state.sessions[session_id]
+        assert (session.input_revision, session.geometry_revision,
+                session.measurement_revision) == session_revisions[session_id]
+        assert session.filtering_is_current and session.scientific_roi_reviewed
+        assert session.quantification_is_current and session.quantification_result == quant
+        np.testing.assert_array_equal(session.segmentation_result["masks"], masks)
+        np.testing.assert_array_equal(session.segmentation_result["edited_masks"], masks)
+    np.testing.assert_array_equal(window.segmentation.result_layer.data, second_masks)
+    assert window.context_panel.export_page.scientific_button.isEnabled()
+
+
+def test_v1_migration_keeps_original_and_scientific_results(project, tmp_path):
+    window, app, _, _, warnings = project
+    masks = _segment(window)
+    _measure_and_review(window, app)
+    original_density = deepcopy(window.project_state.quantification_result)
+    intermediate = tmp_path / "Fixture data"
+    save(window, app, intermediate)
+    old = tmp_path / "Phase 2D.1"
+    _write_v1_checkpoint(old, _read_snapshot(intermediate))
+    before = {path.name: path.read_bytes() for path in old.iterdir()}
+    open_saved(window, app, old)
+    state = window.project_state
+    assert state.active_session_id == "nuclear"
+    assert list(state.sessions) == ["nuclear"]
+    assert state.quantification_is_current and state.scientific_roi_reviewed
+    assert state.quantification_result == original_density
+    np.testing.assert_array_equal(state.segmentation_result["masks"], masks)
+    converted = tmp_path / "Version 2"
+    save(window, app, converted, save_as=True)
+    assert not warnings
+    assert {path.name: path.read_bytes() for path in old.iterdir()} == before
+    assert native_project._manifest(converted)["version"] == 2
+    open_saved(window, app, converted)
+    assert state.active_session_id == "nuclear"
+    assert state.quantification_is_current and state.quantification_result == original_density
+
+
+def test_invalid_inactive_session_leaves_open_analysis_unchanged(project, tmp_path):
+    window, app, _, _, warnings = project
+    state = window.project_state
+    _segment(window)
+    original_session = state.active_session
+    second = state.create_session("Empty")
+    state.select_session(second.session_id)
+    folder = tmp_path / "Valid"
+    save(window, app, folder)
+    snapshot = _read_snapshot(folder)
+    snapshot["sessions"]["nuclear"]["geometry_revision"] = -1
+    bad = tmp_path / "Invalid inactive record"
+    native_project.save_project(bad, snapshot)
+    open_saved(window, app, bad, confirm=False)
+    assert "incompatible session metadata" in warnings[-1]
+    assert state.active_session is second
+    assert state.sessions["nuclear"] is original_session
+    assert window.project_directory == folder
+
+
+def test_project_actions_are_accessible_at_narrow_width_before_and_after_resume(project, tmp_path):
+    window, app, _, _, _ = project
+    window.show()
+    window.set_workflow("project")
+    panel = window.context_panel.project_page
+    scroll = window.context_panel.stack.currentWidget()
+    buttons = [panel.project_actions.itemAt(i).widget() for i in range(panel.project_actions.count())]
+    buttons.extend([panel.open_button, panel.load_button, panel.close_button])
+
+    def assert_narrow_actions():
+        window.resize(1024, 680)
+        window.splitter.setSizes([210, 490, 320])
+        app.processEvents()
+        viewport = scroll.viewport()
+        assert 0 < viewport.width() < 310
+        assert scroll.verticalScrollBar().maximum() > 0
+        for button in buttons:
+            scroll.ensureWidgetVisible(button, 0, 0)
+            app.processEvents()
+            rect = button.rect().translated(button.mapTo(viewport, button.rect().topLeft()))
+            assert viewport.rect().contains(rect), button.text()
+
+    assert_narrow_actions()
+    _segment(window)
+    folder = tmp_path / "Narrow project"
+    save(window, app, folder)
+    open_saved(window, app, folder)
+    assert window.project_state.segmentation_is_current
+    assert_narrow_actions()
+
+
+def test_empty_cytoplasmic_session_has_no_nuclear_execution_or_density(project):
+    window, _, _, _, _ = project
+    state = window.project_state
+    session = state.create_session("Cytoplasm", scientific_role="cytoplasmic", channel_index=1)
+    state.select_session(session.session_id)
+    assert "Cytoplasmic · MAP2 · Empty" == window.context_panel.project_page.session_details.text()
+    segmentation = window.context_panel.segmentation_page
+    assert not segmentation.execute_button.isEnabled()
+    assert not window.segmentation.run()
+    assert not state.quantification_is_current
+    assert "nuclear sessions" in window.context_panel.quantification_page.status.text()

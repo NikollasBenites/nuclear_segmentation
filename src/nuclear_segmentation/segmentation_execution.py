@@ -135,6 +135,9 @@ class SegmentationController(QObject):
         return layer if layer is not None and layer in self.viewer.layers else None
 
     def run(self) -> bool:
+        if self.project_state.active_session.scientific_role != "nuclear":
+            self._status("Cytoplasmic segmentation execution is unavailable.")
+            return False
         if self.busy:
             self._status("Cellpose segmentation is already running.")
             return False
@@ -265,15 +268,26 @@ class SegmentationController(QObject):
         if result is None:
             self.clear_project()
             return
-        if current:
+        state = self.project_state
+        provenance = result.get("input_provenance") or {}
+        display_outdated = (
+            self.result_layer is None and state.working_dataset is not None
+            and provenance.get("source_path") == str(state.working_dataset.source_path)
+            and provenance.get("source_series") == state.working_dataset.series_index
+            and provenance.get("working_shape_czyx") == state.working_dataset.standardized_shape
+            and provenance.get("working_offset_yx") == state.working_offset_yx
+            and provenance.get("voxel_spacing_zyx_um") == state.voxel_spacing_zyx_um
+            and np.shape(result["masks"]) == state.working_dataset.standardized_shape[1:]
+        )
+        if current or display_outdated:
             if self._result_layer is not None and self._result_layer in self.viewer.layers:
                 self.viewer.layers.remove(self._result_layer)
             spacing = tuple(self.project_state.voxel_spacing_zyx_um)
             offset_y, offset_x = self.project_state.working_offset_yx
             self._result_layer = self.viewer.add_labels(
-                result["masks"], name="Raw Cellpose masks", scale=spacing,
+                result["masks"], name="Raw Cellpose masks" if current else "Raw Cellpose masks — outdated", scale=spacing,
                 translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
-                metadata={"mask_type": "nuclear", "nucytoseg_raw_segmentation": True},
+                metadata={**state.mask_layer_metadata(), "nucytoseg_raw_segmentation": True},
             )
             self._result_layer.editable = False
         elif self._result_layer is not None and self._result_layer in self.viewer.layers:

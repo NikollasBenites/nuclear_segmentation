@@ -17,6 +17,8 @@ from .normalization import mask_digest
 
 def calculate_quantification_result(project_state):
     """Assemble current desktop state for the existing density function."""
+    if project_state.active_session.scientific_role != "nuclear":
+        raise ValueError("Nuclear density requires a nuclear session.")
     segmentation = project_state.segmentation_result
     filtering = project_state.filtering_result
     if segmentation is None or not project_state.segmentation_is_current:
@@ -221,6 +223,9 @@ class QuantificationPanel(QWidget):
         if state.restoring_project:
             return
         self._show_historical_density()
+        if state.active_session.scientific_role != "nuclear":
+            self._clear("Nuclear density is available for nuclear sessions.")
+            return
         segmentation = state.segmentation_result
         filtering = state.filtering_result
         if segmentation is None or not state.segmentation_is_current:
@@ -248,10 +253,16 @@ class QuantificationPanel(QWidget):
     def show_restored_result(self):
         state = self.project_state
         self._show_historical_density()
+        if state.active_session.scientific_role != "nuclear":
+            self._clear("Nuclear density is available for nuclear sessions.")
+            return
         if state.quantification_is_current:
             self._display(state.quantification_result)
             return
-        self._clear("Quantification pending: review the restored measurements and ROI.")
+        if not state.segmentation_is_current:
+            self._clear("Quantification unavailable: a current segmentation is required.")
+            return
+        self._clear("Quantification pending: review the measurements and ROI.")
         if state.segmentation_is_current:
             self.summary_values["total"].setText(f"{state.segmentation_result['object_count']:,}")
         if state.filtering_is_current:

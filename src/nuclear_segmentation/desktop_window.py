@@ -6,7 +6,7 @@ from functools import partial
 from pathlib import Path
 import logging
 
-from qtpy.QtCore import QSize, Qt, QThread
+from qtpy.QtCore import QSignalBlocker, QSize, Qt, QThread
 from qtpy.QtGui import QAction, QKeySequence
 from qtpy.QtWidgets import (
     QDialog,
@@ -17,6 +17,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QSplitter,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -34,7 +35,7 @@ from .layer_panel import LayerPanel
 from .legacy_import import import_legacy_analysis
 from .lif_import import LifEnumerationWorker, LifImportWorker
 from .mask_selection import MaskSelectionController
-from .native_project import ProjectWorker, open_project, save_project, snapshot_state
+from .native_project import VERSION, ProjectWorker, open_project, save_project, snapshot_state
 from .napari_embedding import DISPLAY_NAME, EmbeddedNapariWidget
 from .normalization_workspace import NormalizationController
 from .selected_mask_panel import SelectedMaskPanel
@@ -80,6 +81,7 @@ class DesktopWindow(QMainWindow):
         self._project_job = None
         self.project_directory = None
         self._project_revision = None
+        self._project_version = None
         self.project_dirty = False
         self._pending_import_path: Path | None = None
         self._pending_lif_series = None
@@ -107,6 +109,7 @@ class DesktopWindow(QMainWindow):
         viewer_layout.addWidget(self.viewer_toolbar)
         viewer_layout.addWidget(self.embedding, 1)
         self.context_panel = ContextPanel(self.project_state)
+        self._default_session_settings = self.context_panel.segmentation_page.pending_config()
         self.graph_window = QDialog(self)
         self.graph_window.setWindowTitle("NuCytoSeg — Quality Control")
         self.graph_window.resize(780, 620)
@@ -253,6 +256,14 @@ class DesktopWindow(QMainWindow):
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
         self._connect_project_actions()
+        project_panel = self.context_panel.project_page
+        project_panel.session_selected.connect(self._select_session)
+        project_panel.session_creation_requested.connect(self._create_session)
+        state = self.project_state
+        state.active_session_about_to_change.connect(self._capture_session_controls)
+        state.active_session_changed.connect(self._display_active_session)
+        state.sessions_changed.connect(self._update_session_title)
+        state.active_session_changed.connect(self._update_session_title)
         self.context_panel.project_page.availability_changed.connect(
             self.close_project_action.setEnabled
         )
@@ -452,6 +463,12 @@ class DesktopWindow(QMainWindow):
 
     def _create_status_widgets(self) -> None:
         self.workflow_status = QLabel()
+        self.active_session_title = QLabel()
+        self.active_session_title.setTextFormat(Qt.TextFormat.PlainText)
+        self.active_session_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.active_session_title.setMaximumWidth(240)
+        self.statusBar().addPermanentWidget(self.active_session_title, 1)
+        self._update_session_title()
         self.layer_status = QLabel("Layer: none")
         self.z_status = QLabel("Z: —")
         for widget in (self.workflow_status, self.layer_status, self.z_status):
@@ -504,29 +521,30 @@ class DesktopWindow(QMainWindow):
     def _connect_project_actions(self):
         panel = self.context_panel.project_page
         self.project_actions = []
-        for position, (name, shortcut, handler) in enumerate((
+        for name, shortcut, handler in (
             ("New Project", QKeySequence.StandardKey.New, self.new_project),
             ("Open Project…", QKeySequence.StandardKey.Open, self.open_project),
             ("Save Project", QKeySequence.StandardKey.Save, self.save_project),
             ("Save Project As…", QKeySequence.StandardKey.SaveAs, partial(self.save_project, save_as=True)),
-        )):
+        ):
             action = QAction(name, self)
             action.setShortcut(shortcut)
             action.triggered.connect(lambda checked=False, callback=handler: callback())
             button = QToolButton()
             button.setDefaultAction(action)
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-            panel.project_actions.addWidget(button, position // 2, position % 2)
+            panel.project_actions.addWidget(button, alignment=Qt.AlignmentFlag.AlignLeft)
             self.project_actions.append(action)
         self.import_legacy_action = QAction("Import Legacy Analysis…", self)
         self.import_legacy_action.triggered.connect(lambda: self.import_legacy_project())
         legacy_button = QToolButton()
         legacy_button.setDefaultAction(self.import_legacy_action)
-        panel.project_actions.addWidget(legacy_button, 2, 0, 1, 2)
+        panel.project_actions.addWidget(legacy_button, alignment=Qt.AlignmentFlag.AlignLeft)
         state = self.project_state
         prep = self.context_panel.preprocessing_page
         for signal in (
             state.changed, state.channels_changed, state.calibration_changed,
+            state.sessions_changed, state.active_session_changed,
             state.normalization_changed, state.normalization_roi_changed,
             state.z_correction_changed, state.segmentation_result_changed,
             state.filtering_result_changed, state.scientific_roi_changed,
@@ -608,29 +626,24 @@ class DesktopWindow(QMainWindow):
         if state.filtering_result is not None and review._filter_timer.isActive():
             self.statusBar().showMessage("Wait for the filter settings to settle before saving.", 5000)
             return False
-        active = self._project_revision if not save_as and (
+        active = self._project_revision if not save_as and self._project_version == VERSION and (
             directory is None or Path(directory).expanduser().absolute() == self.project_directory
         ) else None
         directory = directory or (self.project_directory if active else None)
         if directory is None:
-            directory, _ = QFileDialog.getSaveFileName(
-                self, "Name the New Project Folder", str(state.original_dataset.source_path.with_suffix(".ncs-project"))
-            )
+            suggested = state.original_dataset.source_path.with_suffix(".ncs-project")
+            if self._project_version == 1 and self.project_directory is not None:
+                suggested = self.project_directory.with_name(f"{self.project_directory.name}-v2")
+            directory, _ = QFileDialog.getSaveFileName(self, "Name the New Project Folder", str(suggested))
         if not directory:
             return False
         folder = Path(directory).expanduser().absolute()
         prep = self.context_panel.preprocessing_page
         z_panel = prep.z_correction_panel
+        self._capture_session_controls()
         snapshot = snapshot_state(state)
-        roi_grid_compatible = True
-        if self.filtering.roi_layer is not None:
-            try:
-                self.filtering.validate_roi_layer()
-            except ValueError:
-                roi_grid_compatible = False
         snapshot.update(
             projection_settings=(prep.channel_combo.currentData(), prep.method_combo.currentData()),
-            roi_grid_compatible=roi_grid_compatible,
             z_settings={channel.index: z_panel.options_for(channel.index) for channel in state.channels},
             z_inspected=z_panel.current_index(),
             z_selected=z_panel.selected_indexes(),
@@ -640,9 +653,6 @@ class DesktopWindow(QMainWindow):
             normalization_settings=prep.normalization_settings(),
             normalization_pixels=(self.normalization.preview_layer.data
                                   if self.normalization.preview_layer is not None else None),
-            segmentation_settings=self.context_panel.segmentation_page.pending_config(),
-            filter_controls=review.filter_settings(),
-            intensity_controls=review.intensity_control_settings(),
         )
         return self._start_project_job("save", folder, partial(save_project, folder, snapshot, active), after)
 
@@ -758,6 +768,7 @@ class DesktopWindow(QMainWindow):
             state.dataset = state.working_dataset
         self.project_directory = folder
         self._project_revision = revision
+        self._project_version = payload["checkpoint_version"] if job["kind"] == "open" else VERSION
         self.project_dirty = job["relocated"]
         self._update_project_actions()
         self.statusBar().showMessage(f"Project {'opened' if job['kind'] == 'open' else 'saved'} · {folder.name}", 5000)
@@ -776,8 +787,9 @@ class DesktopWindow(QMainWindow):
             # Channel/calibration notifications must precede restored preprocessing.
             state.set_calibration(restored["voxel_spacing_zyx_um"], restored["calibration_source"])
             normalization_keys = ("normalization_configuration", "normalization_preview", "normalization_is_current")
+            session_keys = ("sessions", "active_session_id")
             for key, value in restored.items():
-                if key not in normalization_keys:
+                if key not in normalization_keys + session_keys:
                     setattr(state, key, value)
             state.dataset = state.working_dataset
             state.z_correction_changed.emit(None)
@@ -790,7 +802,6 @@ class DesktopWindow(QMainWindow):
             for field, spacing in zip(project.spacing_fields, state.voxel_spacing_zyx_um, strict=True):
                 field.setText(f"{spacing:g}")
             project.calibration_source.setText(state.calibration_source)
-            state.perinuclear_markers_changed.emit(tuple(state.perinuclear_markers))
             prep = self.context_panel.preprocessing_page
             channel, method = payload["projection_settings"]
             prep.channel_combo.setCurrentIndex(prep.channel_combo.findData(channel))
@@ -829,32 +840,102 @@ class DesktopWindow(QMainWindow):
                     "Applied normalization restored.", preview_ready=self.normalization.preview_layer is not None
                 )
             state.normalization_changed.emit(state.normalization_configuration, state.normalization_is_current)
-            segmentation_panel = self.context_panel.segmentation_page
-            segmentation_panel.restore_settings(payload["segmentation_settings"])
-            state.segmentation_result_changed.emit(state.segmentation_result, state.segmentation_is_current)
-            filtering = state.filtering_result
-            review = self.context_panel.mask_review_page
-            state.filtering_result_changed.emit(filtering, state.filtering_is_current)
-            if filtering is not None:
-                if state.segmentation_is_current and payload["roi_grid_compatible"]:
-                    self.filtering._create_layers(filtering)
-                    if not state.filtering_is_current:
-                        self.filtering.filtered_layer.name = "Live filtered masks — outdated"
-                review.configure_filtering(dict(filtering, settings=payload["filter_controls"]), state.filtering_is_current)
-                review.restore_intensity_controls(payload["intensity_controls"])
-                if not payload["roi_grid_compatible"]:
-                    review.accept_roi_button.setEnabled(False)
-                    review.roi_status.setText("Saved ROI layer geometry was incompatible. Recalculate measurements to review a new ROI.")
-                review._filter_timer.stop()
-            elif state.scientific_roi is not None and state.segmentation_is_current:
-                self.filtering._create_roi_layer(state.scientific_roi, state.scientific_roi_reviewed)
-            state.scientific_roi_changed.emit(state.scientific_roi, state.scientific_roi_reviewed)
-            state.quantification_result_changed.emit(state.quantification_result, state.quantification_is_current)
-            self.context_panel.quantification_page.show_restored_result()
+            state.restore_sessions(restored["sessions"], restored["active_session_id"])
+            self._display_active_session()
             self.set_workflow("project")
             return True
         finally:
             state.restoring_project = False
+
+    def _update_session_title(self):
+        state = self.project_state
+        name = state.active_session.display_name
+        label = self.active_session_title
+        text = f"Session · {name}"
+        label.setText(label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, label.maximumWidth()))
+        label.setToolTip(text)
+        self.active_session_title.setVisible(state.dataset_ready)
+
+    def _select_session(self, session_id):
+        review = self.context_panel.mask_review_page
+        if not self._project_idle():
+            self.context_panel.project_page.refresh_sessions()
+            return
+        if review._filter_timer.isActive():
+            self.statusBar().showMessage("Wait for the filter settings to settle before switching sessions.", 5000)
+            self.context_panel.project_page.refresh_sessions()
+            return
+        self.project_state.select_session(session_id)
+
+    def _create_session(self, name, role, channel_index):
+        if not self._project_idle():
+            return
+        session = self.project_state.create_session(
+            name, scientific_role=role, channel_index=channel_index
+        )
+        self._select_session(session.session_id)
+
+    def _capture_session_controls(self):
+        session = self.project_state.active_session
+        review = self.context_panel.mask_review_page
+        session.segmentation_settings = self.context_panel.segmentation_page.pending_config()
+        if session.filtering_result is not None:
+            session.filter_controls = review.filter_settings()
+            session.intensity_controls = review.intensity_control_settings()
+            if self.filtering.roi_layer is not None:
+                try:
+                    self.filtering.validate_roi_layer()
+                except ValueError:
+                    session.roi_grid_compatible = False
+                else:
+                    session.roi_grid_compatible = True
+        review._filter_timer.stop()
+
+    def _display_active_session(self):
+        state = self.project_state
+        session = state.active_session
+        was_restoring = state.restoring_project
+        state.restoring_project = True
+        try:
+            self.mask_selection.clear_all()
+            self.segmentation.clear_project()
+            self.filtering.clear_project()
+            self.context_panel.export_page.clear_scientific_history()
+            segmentation_panel = self.context_panel.segmentation_page
+            with QSignalBlocker(segmentation_panel):
+                segmentation_panel.restore_settings(
+                    session.segmentation_settings or self._default_session_settings
+                )
+            segmentation_panel.execution_log.clear()
+            state.perinuclear_markers_changed.emit(tuple(state.perinuclear_markers))
+            state.segmentation_result_changed.emit(state.segmentation_result, state.segmentation_is_current)
+            filtering = state.filtering_result
+            review = self.context_panel.mask_review_page
+            review.set_visualization_status("")
+            state.filtering_result_changed.emit(filtering, state.filtering_is_current)
+            if filtering is not None:
+                if state.segmentation_is_current and session.roi_grid_compatible:
+                    self.filtering._create_layers(filtering)
+                    if not state.filtering_is_current:
+                        self.filtering.filtered_layer.name = "Live filtered masks — outdated"
+                controls = session.filter_controls
+                review.configure_filtering(
+                    filtering if controls is None else dict(filtering, settings=controls),
+                    state.filtering_is_current,
+                )
+                if session.intensity_controls is not None:
+                    review.restore_intensity_controls(session.intensity_controls)
+                if not session.roi_grid_compatible:
+                    review.accept_roi_button.setEnabled(False)
+                    review.roi_status.setText("ROI geometry was incompatible. Recalculate measurements to review a new ROI.")
+            elif state.scientific_roi is not None and state.segmentation_is_current:
+                self.filtering._create_roi_layer(state.scientific_roi, state.scientific_roi_reviewed)
+            review._filter_timer.stop()
+            state.scientific_roi_changed.emit(state.scientific_roi, state.scientific_roi_reviewed)
+            state.quantification_result_changed.emit(state.quantification_result, state.quantification_is_current)
+            self.context_panel.quantification_page.show_restored_result()
+        finally:
+            state.restoring_project = was_restoring
 
     def close_project(self, *, confirm: bool = True) -> bool:
         if self._import_thread is not None:
@@ -900,7 +981,7 @@ class DesktopWindow(QMainWindow):
         self._load_after_worker_finished = False
         self._finish_loading_dialog()
         self.project_state.clear_project()
-        self.project_directory = self._project_revision = None
+        self.project_directory = self._project_revision = self._project_version = None
         self.project_dirty = False
         self._update_project_actions()
         self.context_panel.project_page.clear_project()
@@ -1124,7 +1205,7 @@ class DesktopWindow(QMainWindow):
         viewer.dims.axis_labels = ("Z", "Y", "X")
         viewer.layers.selection.active = added[0] if added else None
         viewer.canvas.overlays.scale_bar.visible = True
-        self.project_directory = self._project_revision = None
+        self.project_directory = self._project_revision = self._project_version = None
         self.project_state.set_dataset(dataset)
         self._connect_channel_layers(added)
         self._pending_import_path = None
@@ -1281,6 +1362,8 @@ class DesktopWindow(QMainWindow):
 
     def _mask_selection_changed(self, layer, mask_id) -> None:
         self.selected_mask_panel.set_selection(layer, mask_id)
+        if layer is None or layer not in (self.segmentation.result_layer, self.filtering.filtered_layer):
+            layer = mask_id = None
         self.context_panel.mask_review_page.set_selection(layer, mask_id)
 
     def _show_all_review_masks(self) -> None:
@@ -1300,7 +1383,7 @@ class DesktopWindow(QMainWindow):
         layer = self.mask_selection.selected_layer
         mask_id = self.mask_selection.selected_mask_id
         valid_layers = (self.segmentation.result_layer, self.filtering.filtered_layer)
-        if layer is None or mask_id is None or layer not in valid_layers:
+        if layer is None or mask_id is None or layer not in valid_layers or not self.project_state.owns_mask_layer(layer):
             self.context_panel.mask_review_page.set_visualization_status(
                 "Select a raw or live filtered mask with Review / Select first."
             )

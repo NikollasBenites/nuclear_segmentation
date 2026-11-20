@@ -176,7 +176,7 @@ class FilteringController(QObject):
         legacy = self.state.legacy_import
         if self._pending_filter_settings is None and legacy and self.state.segmentation_result.get("legacy_imported"):
             self._pending_filter_settings = deepcopy(legacy["settings"])
-        worker = FilteringWorker(job, self.state.nuclear_session.measurement_revision,
+        worker = FilteringWorker(job, self.state.active_session.measurement_revision,
                                  self.state.segmentation_result)
         thread = QThread(self); worker.moveToThread(thread)
         thread.started.connect(worker.run); worker.succeeded.connect(self._measurement_succeeded); worker.failed.connect(self._failed)
@@ -207,7 +207,7 @@ class FilteringController(QObject):
     @Slot(object, int, object)
     def _measurement_succeeded(self, job, measurement_revision, result):
         if (job is not self._job or job.owner != self.state.session_revision()
-                or measurement_revision != self.state.nuclear_session.measurement_revision):
+                or measurement_revision != self.state.active_session.measurement_revision):
             message = "Measurements discarded because the project or scientific inputs changed."
             self.panel.measurement_status.setText(message)
             self.status_changed.emit(message)
@@ -230,6 +230,7 @@ class FilteringController(QObject):
             result = self._result_with_settings(
                 result, self._pending_filter_settings, result["scientific_roi"]
             )
+        self.state.active_session.roi_grid_compatible = True
         self.state.set_filtering_result(result); self._create_layers(result)
         self.panel.configure_filtering(result, True); self.status_changed.emit("Scientific measurements and preliminary filters are ready.")
     def _failed(self, text):
@@ -241,7 +242,7 @@ class FilteringController(QObject):
         spacing = tuple(self.state.voxel_spacing_zyx_um); oy, ox = self.state.working_offset_yx; translate = (0, oy * spacing[1], ox * spacing[2])
         self.clear_layers()
         self.filtered_layer = self.viewer.add_labels(result["filtered_masks"], name="Live filtered masks", scale=spacing, translate=translate,
-            metadata={"mask_type": "nuclear", "nucytoseg_filtered_segmentation": True})
+            metadata={**self.state.mask_layer_metadata(), "nucytoseg_filtered_segmentation": True})
         self.filtered_layer.editable = False
         if result["scientific_roi"] is not None:
             self._create_roi_layer(result["scientific_roi"], result.get("roi_reviewed"), editable=True)
@@ -254,7 +255,7 @@ class FilteringController(QObject):
             else "MNTB ROI — provisional review"
         )
         self.roi_layer = self.viewer.add_labels(roi.astype(np.uint8), name=roi_name, scale=spacing, translate=(0, oy * spacing[1], ox * spacing[2]),
-            opacity=.35, visible=False, metadata={"nucytoseg_scientific_roi": True})
+            opacity=.35, visible=False, metadata={**self.state.mask_layer_metadata(), "nucytoseg_scientific_roi": True})
         self.roi_layer.editable = editable
         if editable:
             self._roi_callback = lambda event=None: self.invalidate_roi()
@@ -264,7 +265,11 @@ class FilteringController(QObject):
         current = self.state.filtering_result
         if current is None or not self.state.filtering_is_current or self.busy: return
         try:
-            settings = self.panel.filter_settings(); roi = np.asarray(self.roi_layer.data) > 0 if self.roi_layer is not None else current["scientific_roi"]
+            settings = self.panel.filter_settings()
+            roi = current["scientific_roi"]
+            if self.roi_layer is not None:
+                self.validate_roi_layer()
+                roi = np.asarray(self.roi_layer.data) > 0
             updated = self._result_with_settings(current, settings, roi)
             self.state.set_filtering_result(updated)
             if self.filtered_layer is not None: self.filtered_layer.data = updated["filtered_masks"]
@@ -319,6 +324,8 @@ class FilteringController(QObject):
     def validate_roi_layer(self):
         if self.roi_layer is None or self.roi_layer not in self.viewer.layers:
             raise ValueError("The scientific ROI layer is missing.")
+        if not self.state.owns_mask_layer(self.roi_layer):
+            raise ValueError("The scientific ROI belongs to a different segmentation revision.")
         spacing = self.state.voxel_spacing_zyx_um
         oy, ox = self.state.working_offset_yx
         validate_roi_geometry(
@@ -353,7 +360,7 @@ class FilteringController(QObject):
         if self.state.filtering_is_current:
             self.apply_filters()
     def invalidate_roi(self):
-        if self.state.filtering_result is None or self.roi_layer is None:
+        if self.state.filtering_result is None or not self.state.owns_mask_layer(self.roi_layer):
             return
         roi = np.asarray(self.roi_layer.data) > 0
         if roi.shape != tuple(self.state.filtering_result["raw_mask_shape"]) or not roi.any():

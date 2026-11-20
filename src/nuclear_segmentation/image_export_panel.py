@@ -373,6 +373,13 @@ class ImageExportPanel(QWidget):
         else:
             self.results.set_results(f"Multichannel TIFF\nStatus: Completed\n{text}")
 
+    def clear_scientific_history(self) -> None:
+        self.scientific_results.set_results("No scientific export completed.")
+        self._scientific_folder = None
+        self.open_export_folder.hide()
+        self.scientific_status.clear()
+        self.scientific_status.hide()
+
     def reset(self) -> None:
         self.channels.clear()
         self._busy = False
@@ -380,11 +387,7 @@ class ImageExportPanel(QWidget):
         self.pixel_type_combo.setCurrentIndex(0)
         self.export_button.setEnabled(False)
         self.status.setText("Generate prepared channel previews before exporting.")
-        self.scientific_results.set_results("No scientific export completed.")
         self.results.set_results("No export completed.")
-        self._scientific_folder = None
-        self.open_export_folder.hide()
         self._check_scientific_options(True)
-        self.scientific_status.clear()
-        self.scientific_status.hide()
+        self.clear_scientific_history()
         self._update_selection_state()

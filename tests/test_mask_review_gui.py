@@ -268,7 +268,8 @@ def test_reviewed_roi_survives_measurement_invalidation(review_window):
     assert controller.roi_layer.name == "MNTB ROI — reviewed"
 
 
-def test_measurement_worker_keeps_raw_reference_and_rejects_old_geometry(review_window, qapp, monkeypatch):
+@pytest.mark.parametrize("change", ["geometry", "session"])
+def test_measurement_worker_keeps_raw_reference_and_rejects_old_owner(review_window, qapp, monkeypatch, change):
     window, masks = review_window
     state = window.project_state
     controller = window.filtering
@@ -286,12 +287,19 @@ def test_measurement_worker_keeps_raw_reference_and_rejects_old_geometry(review_
     try:
         assert controller.calculate()
         _wait(qapp, entered.is_set)
-        replacement = np.where(masks > 0, masks + 10, 0)
-        state.set_segmentation_result(dict(state.segmentation_result, masks=replacement))
+        if change == "geometry":
+            replacement = np.where(masks > 0, masks + 10, 0)
+            state.set_segmentation_result(dict(state.segmentation_result, masks=replacement))
+        else:
+            state.select_session(state.create_session("Second").session_id)
         release.set()
         _wait(qapp, lambda: not controller.busy)
         assert captured[0] is masks
-        assert state.segmentation_result["masks"] is replacement
+        if change == "geometry":
+            assert state.segmentation_result["masks"] is replacement
+        else:
+            assert state.segmentation_result is None
+            assert state.nuclear_session.filtering_result is None
         assert state.filtering_result is None and state.scientific_roi is None
         assert "Measurements discarded" in window.context_panel.mask_review_page.measurement_status.text()
     finally:

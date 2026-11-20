@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 from uuid import UUID, uuid4
 
 import numpy as np
@@ -63,10 +64,17 @@ class CropProvenance:
 
 @dataclass
 class SegmentationSession:
-    """The project's nuclear analysis and its existing scientific records."""
+    """Scientific records and editable controls for one segmentation."""
 
-    session_id: str = field(init=False, default="nuclear")
-    scientific_role: str = field(init=False, default="nuclear")
+    _session_id: str = field(default="nuclear", repr=False)
+    display_name: str = "Nuclear"
+    scientific_role: str = "nuclear"
+    configured_channel_index: int | None = None
+    segmentation_settings: dict[str, Any] | None = None
+    filter_controls: dict[str, Any] | None = None
+    intensity_controls: dict | None = None
+    roi_grid_compatible: bool = True
+    legacy_import: dict[str, Any] | None = None
     input_revision: int = 0
     geometry_revision: int = 0
     measurement_revision: int = 0
@@ -82,12 +90,16 @@ class SegmentationSession:
     quantification_is_current: bool = False
 
     @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
     def source_channel_index(self) -> int | None:
         config = (self.segmentation_result or {}).get("scientific_config") or {}
         return next(
             (int(channel["index"]) for channel in config.get("CHANNELS", ())
              if channel["name"] == config.get("SEGMENTATION_CHANNEL")),
-            None,
+            self.configured_channel_index,
         )
 
 
@@ -99,17 +111,28 @@ class SessionRevision:
     geometry_revision: int
 
 
+@dataclass(frozen=True)
+class MaskIdentity:
+    project_id: UUID
+    session_id: str
+    geometry_revision: int
+    label_id: int
+
+
 def _session_property(name):
-    """Keep the existing workspace and version 1 checkpoint field names."""
+    """Route existing workspace fields to the explicitly active session."""
     return property(
-        lambda state: getattr(state.nuclear_session, name),
-        lambda state, value: setattr(state.nuclear_session, name, value),
+        lambda state: getattr(state.active_session, name),
+        lambda state, value: setattr(state.active_session, name, value),
     )
 
 
 class ProjectState(QObject):
-    """Own the imported dataset and its nuclear analysis session."""
+    """Own the shared image grid and independent analysis sessions."""
 
+    sessions_changed = Signal()
+    active_session_about_to_change = Signal()
+    active_session_changed = Signal()
     changed = Signal(object)
     import_status_changed = Signal(str)
     channels_changed = Signal(object)
@@ -124,6 +147,7 @@ class ProjectState(QObject):
     scientific_roi_changed = Signal(object, bool)
     quantification_result_changed = Signal(object, bool)
 
+    legacy_import = _session_property("legacy_import")
     segmentation_is_current = _session_property("segmentation_is_current")
     filtering_result = _session_property("filtering_result")
     filtering_is_current = _session_property("filtering_is_current")
@@ -137,7 +161,7 @@ class ProjectState(QObject):
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
         self._project_id = uuid4()
-        self.nuclear_session = SegmentationSession()
+        self._reset_sessions()
         self.dataset: ImportedDataset | None = None
         self.original_dataset: ImportedDataset | None = None
         self.working_dataset: ImportedDataset | None = None
@@ -160,10 +184,91 @@ class ProjectState(QObject):
         self.z_correction_reports: dict[int, dict[str, Any]] = {}
         self.z_correction_applied: set[int] = set()
         self.restoring_project = False
-        self.legacy_import = None
+
+    def _reset_sessions(self) -> None:
+        self._sessions = {"nuclear": SegmentationSession()}
+        self._active_session_id = "nuclear"
+
+    @property
+    def sessions(self) -> Mapping[str, SegmentationSession]:
+        return MappingProxyType(self._sessions)
+
+    @property
+    def active_session_id(self) -> str:
+        return self._active_session_id
+
+    @property
+    def active_session(self) -> SegmentationSession:
+        return self._sessions[self.active_session_id]
+
+    @property
+    def nuclear_session(self) -> SegmentationSession:
+        return self._sessions["nuclear"]
+
+    def restore_sessions(
+        self, sessions: Mapping[str, SegmentationSession], active_session_id: str
+    ) -> None:
+        self._sessions = dict(sessions)
+        self._active_session_id = active_session_id
+        self.sessions_changed.emit()
+
+    @staticmethod
+    def _session_name(name) -> str:
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+            raise ValueError("Enter a session name of 1 to 80 characters.")
+        return name.strip()
+
+    def create_session(
+        self, name: str, *, scientific_role: str = "nuclear", channel_index: int | None = None
+    ) -> SegmentationSession:
+        if not self.dataset_ready:
+            raise ValueError("Load an image before creating a segmentation session.")
+        if scientific_role not in {"nuclear", "cytoplasmic"}:
+            raise ValueError("Unsupported scientific session role.")
+        if channel_index is None:
+            channel_index = self.segmentation_channel_index
+        if channel_index not in {channel.index for channel in self.channels}:
+            raise ValueError("Select a source channel from the project image.")
+        session = SegmentationSession(uuid4().hex, self._session_name(name),
+                                      scientific_role, channel_index)
+        self._sessions[session.session_id] = session
+        self.sessions_changed.emit()
+        return session
+
+    def rename_session(self, session_id: str, name: str) -> None:
+        session = self._sessions[session_id]
+        name = self._session_name(name)
+        if name != session.display_name:
+            session.display_name = name
+            self.sessions_changed.emit()
+
+    def select_session(self, session_id: str) -> None:
+        if session_id not in self._sessions:
+            raise ValueError("Unknown segmentation session.")
+        if session_id != self.active_session_id:
+            self.active_session_about_to_change.emit()
+            self._active_session_id = session_id
+            self.active_session_changed.emit()
+
+    def mask_identity(self, label_id: int) -> MaskIdentity:
+        session = self.active_session
+        return MaskIdentity(self._project_id, session.session_id, session.geometry_revision, int(label_id))
+
+    def mask_layer_metadata(self) -> dict[str, Any]:
+        session = self.active_session
+        return {
+            "project_id": self._project_id.hex,
+            "session_id": session.session_id,
+            "geometry_revision": session.geometry_revision,
+            "mask_type": session.scientific_role,
+        }
+
+    def owns_mask_layer(self, layer) -> bool:
+        metadata = getattr(layer, "metadata", {}) or {}
+        return all(metadata.get(key) == value for key, value in self.mask_layer_metadata().items())
 
     def session_revision(self) -> SessionRevision:
-        session = self.nuclear_session
+        session = self.active_session
         return SessionRevision(
             self._project_id, session.session_id,
             session.input_revision, session.geometry_revision,
@@ -171,11 +276,11 @@ class ProjectState(QObject):
 
     @property
     def segmentation_result(self) -> dict[str, Any] | None:
-        return self.nuclear_session.segmentation_result
+        return self.active_session.segmentation_result
 
     @segmentation_result.setter
     def segmentation_result(self, value: dict[str, Any] | None) -> None:
-        session = self.nuclear_session
+        session = self.active_session
         if session.segmentation_result is not value:
             session.geometry_revision += 1
         session.segmentation_result = value
@@ -190,9 +295,8 @@ class ProjectState(QObject):
 
     def set_dataset(self, dataset: ImportedDataset) -> None:
         self._project_id = uuid4()
-        self.legacy_import = None
         self.clear_segmentation_result()
-        self.nuclear_session = SegmentationSession()
+        self._reset_sessions()
         self.dataset = dataset
         self.original_dataset = dataset
         self.working_dataset = dataset
@@ -231,6 +335,7 @@ class ProjectState(QObject):
         self.clear_normalization_roi(emit=False)
         self.reset_all_z_corrections(emit=False)
         self.set_import_status("Dataset ready")
+        self.sessions_changed.emit()
         self.changed.emit(dataset)
         self.channels_changed.emit(tuple(self.channels))
         self.perinuclear_markers_changed.emit(
@@ -444,9 +549,8 @@ class ProjectState(QObject):
 
     def clear_project(self) -> None:
         self._project_id = uuid4()
-        self.legacy_import = None
         self.clear_segmentation_result(emit=False)
-        self.nuclear_session = SegmentationSession()
+        self._reset_sessions()
         self.dataset = None
         self.original_dataset = None
         self.working_dataset = None
@@ -473,6 +577,7 @@ class ProjectState(QObject):
         self.normalization_roi_changed.emit(None)
         self.z_correction_changed.emit(None)
         self.segmentation_result_changed.emit(None, False)
+        self.sessions_changed.emit()
         self.changed.emit(None)
 
     def set_calibration(self, spacing, source: str = "manual override") -> None:
@@ -553,13 +658,24 @@ class ProjectState(QObject):
         self.segmentation_result_changed.emit(stored, True)
 
     def invalidate_segmentation(self) -> None:
-        self.nuclear_session.input_revision += 1
-        if self.segmentation_result is None or not self.segmentation_is_current:
-            return
-        self.segmentation_is_current = False
-        self.invalidate_filtering()
-        self.clear_scientific_roi()
-        self.segmentation_result_changed.emit(self.segmentation_result, False)
+        """Shared preprocessing or grid changes affect every session."""
+        active_was_current = self.segmentation_is_current
+        for session in self._sessions.values():
+            session.input_revision += 1
+            if not session.segmentation_is_current:
+                continue
+            session.segmentation_is_current = False
+            session.measurement_revision += 1
+            session.filtering_is_current = False
+            session.quantification_is_current = False
+            session.scientific_roi = None
+            session.scientific_roi_reviewed = False
+            session.scientific_roi_provenance = None
+        if active_was_current:
+            self.filtering_result_changed.emit(self.filtering_result, False)
+            self.scientific_roi_changed.emit(None, False)
+            self.segmentation_result_changed.emit(self.segmentation_result, False)
+            self.quantification_result_changed.emit(self.quantification_result, False)
 
     def clear_segmentation_result(self, *, emit: bool = True) -> None:
         self.clear_filtering_result(emit=emit)
@@ -575,13 +691,13 @@ class ProjectState(QObject):
         filtered = np.asarray(stored["filtered_masks"])
         filtered.setflags(write=False)
         stored["filtered_masks"] = filtered
-        self.nuclear_session.measurement_revision += 1
+        self.active_session.measurement_revision += 1
         self.filtering_result = stored
         self.filtering_is_current = True
         self.filtering_result_changed.emit(stored, True)
 
     def invalidate_filtering(self) -> None:
-        self.nuclear_session.measurement_revision += 1
+        self.active_session.measurement_revision += 1
         if self.filtering_result is None or not self.filtering_is_current:
             return
         self.filtering_is_current = False
@@ -589,7 +705,7 @@ class ProjectState(QObject):
         self.filtering_result_changed.emit(self.filtering_result, False)
 
     def clear_filtering_result(self, *, emit: bool = True) -> None:
-        self.nuclear_session.measurement_revision += 1
+        self.active_session.measurement_revision += 1
         self.clear_quantification_result(emit=emit)
         self.filtering_result = None
         self.filtering_is_current = False
@@ -644,12 +760,17 @@ class ProjectState(QObject):
         self.filtering_result_changed.emit(stored, self.filtering_is_current)
 
     @property
+    def active_channel_index(self) -> int | None:
+        index = self.active_session.configured_channel_index
+        return self.segmentation_channel_index if index is None else index
+
+    @property
     def segmentation_channel(self) -> str | None:
         return next(
             (
                 channel.name
                 for channel in self.channels
-                if channel.index == self.segmentation_channel_index
+                if channel.index == self.active_channel_index
             ),
             None,
         )
@@ -660,7 +781,10 @@ class ProjectState(QObject):
             {
                 "index": channel.index,
                 "name": channel.name,
-                "role": channel.role,
+                "role": (
+                    "segmentation" if channel.index == self.active_channel_index
+                    else "measurement" if channel.role == "segmentation" else channel.role
+                ),
                 "colormap": channel.colormap,
                 "measure": True,
                 "filter_enabled": True,

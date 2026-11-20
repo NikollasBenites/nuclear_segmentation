@@ -1,5 +1,5 @@
 """Versioned native checkpoints. No scientific stages are run on open."""
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from functools import partial
 import json
 import os
@@ -18,22 +18,26 @@ from .lif_import import load_lif_dataset
 from .manual_review import ManualReview
 from .normalization import mask_digest
 from .normalization_workspace import _options_from_report, cellpose_configuration, normalization_fingerprint
-from .project_state import ChannelDescriptor, ProjectState
+from .project_state import ChannelDescriptor, ProjectState, SegmentationSession
 from .scientific_input import validate_scientific_input
 from .z_correction import validate_options
 
 MANIFEST = "project.json"
 CHECKPOINT = "checkpoint.ncs"
-STATE_FIELDS = (
+VERSION = 2
+SHARED_FIELDS = (
     "voxel_spacing_zyx_um", "calibration_source", "segmentation_channel_index",
-    "analysis_mode", "perinuclear_markers", "roi_mask_yx", "working_offset_yx",
+    "analysis_mode", "roi_mask_yx", "working_offset_yx",
     "normalization_configuration", "normalization_preview", "normalization_is_current",
     "normalization_roi_mask_yx", "normalization_roi_vertices_yx", "normalization_roi_provenance",
     "z_correction_options", "z_correction_reports", "z_correction_applied",
-    "segmentation_result", "segmentation_is_current", "filtering_result", "filtering_is_current",
-    "scientific_roi", "scientific_roi_provenance", "scientific_roi_reviewed",
-    "quantification_result", "quantification_is_current", "legacy_import",
 )
+V1_SESSION_FIELDS = (
+    "perinuclear_markers", "segmentation_result", "segmentation_is_current",
+    "filtering_result", "filtering_is_current", "scientific_roi", "scientific_roi_provenance",
+    "scientific_roi_reviewed", "quantification_result", "quantification_is_current", "legacy_import",
+)
+SESSION_FIELDS = tuple(field.name for field in fields(SegmentationSession) if field.name != "_session_id")
 SOURCE_FIELDS = (
     "source_format", "series_index", "series_identifier", "series_name", "reported_axes",
     "reported_shape", "standardized_shape", "dtype", "voxel_spacing_zyx_um",
@@ -94,7 +98,12 @@ def _unpack(archive, value):
             for name, dtype, values in item["columns"]
         }, index=index)
     if kind == "map":
-        return {key: _unpack(archive, val) for key, val in item}
+        result = {}
+        for key, val in item:
+            if key in result:
+                raise ValueError("The checkpoint contains a duplicate record key.")
+            result[key] = _unpack(archive, val)
+        return result
     if kind in ("set", "tuple"):
         return (set if kind == "set" else tuple)(_unpack(archive, x) for x in item)
     if kind == "missing":
@@ -106,13 +115,18 @@ def _unpack(archive, value):
 
 def snapshot_state(state):
     """Snapshot references after workers stop. Project I/O holds the editor closed."""
-    result = {key: getattr(state, key) for key in STATE_FIELDS}
-    segmentation = result["segmentation_result"]
-    if segmentation is not None:
-        model_input = segmentation.get("model_input_volume")
-        if model_input is not None and any(np.shares_memory(model_input, dataset.data_czyx)
-                                           for dataset in (state.original_dataset, state.working_dataset)):
-            result["segmentation_result"] = dict(segmentation, model_input_volume=None)
+    sessions = {}
+    for session_id, session in state.sessions.items():
+        record = {key: getattr(session, key) for key in SESSION_FIELDS}
+        segmentation = session.segmentation_result
+        if segmentation is not None:
+            model_input = segmentation.get("model_input_volume")
+            if model_input is not None and any(
+                np.shares_memory(model_input, dataset.data_czyx)
+                for dataset in (state.original_dataset, state.working_dataset)
+            ):
+                record["segmentation_result"] = dict(segmentation, model_input_volume=None)
+        sessions[session_id] = record
     return {
         "source": {
             **{key: getattr(state.original_dataset, key) for key in SOURCE_FIELDS},
@@ -122,14 +136,21 @@ def snapshot_state(state):
         },
         "channels": [asdict(channel) for channel in state.channels],
         "crop": asdict(state.crop_provenance) if state.crop_provenance else None,
-        "state": result,
+        "state": {key: getattr(state, key) for key in SHARED_FIELDS},
+        "sessions": sessions,
+        "active_session_id": state.active_session_id,
     }
 
 
 def _manifest(folder):
     with (folder / MANIFEST).open(encoding="utf-8") as stream:
         record = json.load(stream)
-    if record.get("format") != "NuCytoSeg" or record.get("version") != 1 or not record.get("id"):
+    version = record.get("version")
+    if (
+        record.get("format") != "NuCytoSeg" or type(version) is not int
+        or version not in (1, VERSION) or not isinstance(record.get("id"), str)
+        or not record["id"]
+    ):
         raise ValueError("This is not a supported native NuCytoSeg project.")
     return record
 
@@ -137,9 +158,10 @@ def _manifest(folder):
 def save_project(folder, snapshot, active=None):
     """Publish one closed archive atomically, leaving the old file on any failure."""
     folder = Path(folder)
-    legacy = snapshot["state"].get("legacy_import")
-    if legacy and folder.resolve().is_relative_to(Path(legacy["folder"]).resolve()):
-        raise ValueError("Save the native project outside the legacy results directory.")
+    for session in snapshot["sessions"].values():
+        legacy = session["legacy_import"]
+        if legacy and folder.resolve().is_relative_to(Path(legacy["folder"]).resolve()):
+            raise ValueError("Save the native project outside the legacy results directory.")
     source = snapshot["source"]
     digest = source_digest(Path(source["path"]))
     if source["sha256"] is not None and source["sha256"] != digest:
@@ -159,15 +181,18 @@ def save_project(folder, snapshot, active=None):
         if created:
             project_id = uuid4().hex
             with (folder / MANIFEST).open("x", encoding="utf-8") as stream:
-                json.dump({"format": "NuCytoSeg", "version": 1, "id": project_id}, stream)
+                json.dump({"format": "NuCytoSeg", "version": VERSION, "id": project_id}, stream)
                 stream.flush()
                 os.fsync(stream.fileno())
         else:
             project_id, expected_revision = active
+            manifest = _manifest(folder)
+            if manifest["version"] != VERSION:
+                raise ValueError("Use Save Project As to convert a version 1 project.")
             with ZipFile(folder / CHECKPOINT) as previous:
                 revision = previous.read("revision.txt").decode("ascii")
                 archive_id = previous.read("project-id.txt").decode("ascii")
-            if _manifest(folder)["id"] != project_id or archive_id != project_id or revision != expected_revision:
+            if manifest["id"] != project_id or archive_id != project_id or revision != expected_revision:
                 raise ValueError("The project changed on disk. Open it again or choose Save Project As.")
         revision = uuid4().hex
         with NamedTemporaryFile(dir=folder, prefix=".save-", delete=False) as stream:
@@ -221,7 +246,8 @@ def open_project(folder, replacement=None, bioimage_factory=None):
         dataset = _open_source(source, replacement, bioimage_factory)
         payload = _unpack(archive, json.loads(archive.read("state.json")))
     _rebase_source(payload, source["path"], str(dataset.source_path))
-    state = _validated_state(dataset, payload)
+    state = _validated_state(dataset, payload, record["version"])
+    payload["checkpoint_version"] = record["version"]
     return (record["id"], revision), dataset, state, payload
 
 
@@ -261,7 +287,7 @@ def _open_source(source, replacement, bioimage_factory):
     )
 
 
-def _validate_controls(payload, indexes):
+def _validate_shared_controls(payload, indexes):
     """Check editable fields before the open worker hands records to Qt widgets."""
     projection_channel, projection_method = payload["projection_settings"]
     if projection_channel not in indexes or projection_method not in {"maximum", "mean"}:
@@ -282,7 +308,9 @@ def _validate_controls(payload, indexes):
         or not all(0 <= normalization[key] <= 100 for key in ("lower", "upper"))
     ):
         raise ValueError("The checkpoint contains invalid normalization controls.")
-    segmentation = payload["segmentation_settings"]
+
+
+def _validate_segmentation_controls(segmentation):
     if (
         not isinstance(segmentation["MODEL_NAME"], str)
         or segmentation["PROCESSING_DEVICE"] not in {"auto", "cpu"}
@@ -298,13 +326,18 @@ def _validate_controls(payload, indexes):
         raise ValueError("The checkpoint contains invalid segmentation controls.")
 
 
+def _validate_controls(payload, indexes):
+    _validate_shared_controls(payload, indexes)
+    _validate_segmentation_controls(payload["segmentation_settings"])
+
+
 def _label_ids(array, shape):
     if len(shape) != 3 or array.shape != shape or not array.size or array.dtype.kind not in "ui" or array.min() < 0:
         raise ValueError("The checkpoint contains incompatible label mask data.")
     return set(map(int, np.unique(array))) - {0}
 
 
-def _validated_state(dataset, payload):
+def _validated_state(dataset, payload, version):
     # A detached state lets existing grid and configuration validators run in the worker.
     state = ProjectState()
     stored = payload["state"]
@@ -330,32 +363,78 @@ def _validated_state(dataset, payload):
     ] or stored["segmentation_channel_index"] not in {c.index for c in channels}:
         raise ValueError("The checkpoint contains incompatible channel identities.")
     state.channels = channels
-    for key in STATE_FIELDS:
-        setattr(state, key, stored.get(key) if key == "legacy_import" else stored[key])
-    _validate_results(state, payload)
-    _validate_controls(payload, {channel.index for channel in channels})
+    for key in SHARED_FIELDS:
+        setattr(state, key, stored[key])
+
+    indexes = {channel.index for channel in channels}
+    _validate_shared_controls(payload, indexes)
+    if version == 1:
+        sessions = {"nuclear": SegmentationSession(
+            geometry_revision=int(stored["segmentation_result"] is not None),
+            measurement_revision=int(stored["filtering_result"] is not None),
+            **{key: stored.get(key) if key == "legacy_import" else stored[key]
+               for key in V1_SESSION_FIELDS},
+            **{key: payload[key] for key in ("segmentation_settings", "filter_controls",
+                                           "intensity_controls", "roi_grid_compatible")},
+        )}
+        active_id = "nuclear"
+    else:
+        sessions = {}
+        for session_id, record in payload["sessions"].items():
+            if session_id != "nuclear" and (
+                not isinstance(session_id, str) or len(session_id) != 32
+                or any(char not in "0123456789abcdef" for char in session_id)
+            ):
+                raise ValueError("The checkpoint contains an invalid session ID.")
+            if set(record) != set(SESSION_FIELDS):
+                raise ValueError("The checkpoint contains an incomplete session record.")
+            session = SegmentationSession(session_id, **record)
+            if (
+                ProjectState._session_name(session.display_name) != session.display_name
+                or session.scientific_role not in {"nuclear", "cytoplasmic"}
+                or (session_id == "nuclear" and session.scientific_role != "nuclear")
+                or (session.configured_channel_index is not None
+                    and (type(session.configured_channel_index) is not int
+                         or session.configured_channel_index not in indexes))
+                or any(type(value) is not int or value < 0 for value in (
+                    session.input_revision, session.geometry_revision, session.measurement_revision
+                ))
+                or any(type(value) is not bool for value in (
+                    session.segmentation_is_current, session.filtering_is_current,
+                    session.scientific_roi_reviewed, session.quantification_is_current,
+                    session.roi_grid_compatible,
+                ))
+            ):
+                raise ValueError("The checkpoint contains incompatible session metadata.")
+            sessions[session_id] = session
+        active_id = payload["active_session_id"]
+        if active_id not in sessions or "nuclear" not in sessions:
+            raise ValueError("The checkpoint contains an unknown active or missing original session.")
+
+    # Shared historical preprocessing uses the original nuclear import provenance.
+    state.restore_sessions(sessions, "nuclear")
+    shared_inputs_valid = _validate_preprocessing(state, payload)
+    for session_id, session in state.sessions.items():
+        state.select_session(session_id)
+        if session.segmentation_settings is not None:
+            _validate_segmentation_controls(session.segmentation_settings)
+        if not shared_inputs_valid:
+            session.segmentation_is_current = False
+        _validate_results(state)
+    state.select_session(active_id)
     return restored_state(state)
 
 
 def restored_state(state):
     return {"working_dataset": state.working_dataset, "crop_provenance": state.crop_provenance,
-            "channels": state.channels, **{key: getattr(state, key) for key in STATE_FIELDS}}
+            "channels": state.channels, "sessions": dict(state.sessions),
+            "active_session_id": state.active_session_id,
+            **{key: getattr(state, key) for key in SHARED_FIELDS}}
 
 
-def _validate_results(state, payload):
+def _validate_preprocessing(state, payload):
     original = state.original_dataset
     working_shape = state.working_dataset.standardized_shape
-    grid = {
-        "source_path": str(original.source_path), "source_series": original.series_index,
-        "working_shape_czyx": working_shape, "voxel_spacing_zyx_um": state.voxel_spacing_zyx_um,
-        "working_offset_yx": state.working_offset_yx,
-        "crop_type": state.crop_provenance.selection_type if state.crop_provenance else None,
-        "segmentation_channel": state.segmentation_channel,
-    }
-
-    def compatible(provenance):
-        return bool(provenance) and all(provenance.get(key) == value for key, value in grid.items())
-
     normalization_roi = state.normalization_roi_mask_yx
     if normalization_roi is not None:
         vertices = np.asarray(state.normalization_roi_vertices_yx)
@@ -395,10 +474,10 @@ def _validate_results(state, payload):
         and report["options"] == state.legacy_import["configuration"]["z_corrections"].get(channel_names[index])
     }
     valid_applied = state.z_correction_applied.intersection(set(z_previews) | legacy_reports)
-    if valid_applied != state.z_correction_applied:
+    applied_compatible = valid_applied == state.z_correction_applied
+    if not applied_compatible:
         state.z_correction_applied = valid_applied
         state.normalization_is_current = False
-        state.segmentation_is_current = False
 
     normalization = state.normalization_configuration or {}
     applied = normalization.get("provenance")
@@ -436,13 +515,56 @@ def _validate_results(state, payload):
     if preview is not None and (preview.shape != working_shape[1:] or preview.dtype.kind not in "iuf"):
         raise ValueError("The checkpoint contains incompatible normalization preview data.")
 
+    return applied_compatible
+
+
+def _validate_review_controls(filtering, session):
+    if "volume_um3" not in filtering["properties"]:
+        raise ValueError("The checkpoint contains incomplete scientific measurements.")
+    controls = session.filter_controls
+    if controls is None:
+        controls = filtering["settings"]
+    numeric = (
+        "minimum_volume_um3", "minimum_sphericity", "z_guard_um",
+    )
+    if (
+        any(not np.isfinite(controls.get(key, 0)) for key in numeric)
+        or any(type(controls.get(key, 0)) is not int
+               or not -(2**31) <= controls.get(key, 0) < 2**31
+               for key in ("first_tissue_z", "last_tissue_z"))
+        or any(not isinstance(controls.get(key, ""), str)
+               for key in ("z_guard_mode", "intensity_combination", "perinuclear_combination"))
+    ):
+        raise ValueError("The checkpoint contains invalid review controls.")
+
+
+def _validate_results(state):
+    session = state.active_session
+    original = state.original_dataset
+    working_shape = state.working_dataset.standardized_shape
+    channel_names = {channel.index: channel.name for channel in state.channels}
+    grid = {
+        "source_path": str(original.source_path), "source_series": original.series_index,
+        "working_shape_czyx": working_shape, "voxel_spacing_zyx_um": state.voxel_spacing_zyx_um,
+        "working_offset_yx": state.working_offset_yx,
+        "crop_type": state.crop_provenance.selection_type if state.crop_provenance else None,
+        "segmentation_channel": state.segmentation_channel,
+    }
+
+    def compatible(provenance):
+        return bool(provenance) and all(provenance.get(key) == value for key, value in grid.items())
+
     segmentation = state.segmentation_result
     ids = set()
     if segmentation is not None:
         masks = segmentation["masks"]
         shape = segmentation["mask_shape"]
         ids = _label_ids(masks, shape)
-        if not ids or segmentation["object_count"] != len(ids) or segmentation["maximum_label_id"] != max(ids):
+        if (
+            not ids or type(segmentation["object_count"]) is not int
+            or segmentation["object_count"] != len(ids)
+            or segmentation["maximum_label_id"] != max(ids)
+        ):
             raise ValueError("The raw label IDs do not match the segmentation record.")
         for key in ("edited_masks", "model_input_volume", "raw_3d_probs"):
             array = segmentation.get(key)
@@ -464,6 +586,8 @@ def _validate_results(state, payload):
                 )
             except (KeyError, ValueError):
                 state.segmentation_is_current = False
+        if "device" not in segmentation:
+            raise ValueError("The checkpoint contains incomplete segmentation metadata.")
         masks.setflags(write=False)
     else:
         state.segmentation_is_current = False
@@ -472,8 +596,9 @@ def _validate_results(state, payload):
     roi = state.scientific_roi
     effective_planes = None
     if filtering is not None:
-        intensity_controls = payload["intensity_controls"]
-        if (
+        _validate_review_controls(filtering, session)
+        intensity_controls = session.intensity_controls
+        if intensity_controls is not None and (
             set(intensity_controls) != {item["index"] for item in filtering["intensity_definitions"]}
             or any(type(checked) is not bool or not np.isfinite([lower, upper]).all()
                    for checked, lower, upper in intensity_controls.values())
@@ -514,7 +639,7 @@ def _validate_results(state, payload):
         )
         state.scientific_roi_reviewed = bool(
             state.scientific_roi_reviewed and filtering["roi_reviewed"] and matching_roi_grid
-            and payload["roi_grid_compatible"]
+            and session.roi_grid_compatible
         )
         filtering["roi_reviewed"] = state.scientific_roi_reviewed
         state.filtering_is_current = bool(
@@ -523,7 +648,7 @@ def _validate_results(state, payload):
             and provenance == segmentation.get("input_provenance")
             and expected_markers == measured_markers
             and measured_roi is not None
-            and payload["roi_grid_compatible"]
+            and session.roi_grid_compatible
         )
         if state.filtering_is_current:
             try:
@@ -544,7 +669,7 @@ def _validate_results(state, payload):
         state.scientific_roi = None
         state.scientific_roi_provenance = None
         state.scientific_roi_reviewed = False
-    if filtering and not payload["roi_grid_compatible"]:
+    if filtering and not session.roi_grid_compatible:
         # A transformed viewer layer cannot be accepted in the fixed scientific grid.
         state.scientific_roi_provenance = None
 
@@ -559,7 +684,9 @@ def _validate_results(state, payload):
         and quant["scientific_roi_sha256"] == mask_digest(roi)
         and quant["scientific_roi_provenance"] == state.scientific_roi_provenance
         and quant["source_identity"] == filtering["measurement_provenance"]
-        and quant["filter_settings"] == filtering["settings"] == payload["filter_controls"]
+        and quant["filter_settings"] == filtering["settings"]
+        and (session.filter_controls is None or filtering["settings"] == session.filter_controls)
+        and session.scientific_role == "nuclear"
         and quant["retained_mask_ids"] == filtering["retained_ids"]
         and quant["executed_segmentation_config"] == segmentation["scientific_config"]
         and quant["voxel_spacing_zyx_um"] == state.voxel_spacing_zyx_um

@@ -1,12 +1,15 @@
 """Functional Phase 2A project/import controls."""
 from __future__ import annotations
 
-from qtpy.QtCore import Qt, Signal
+from qtpy.QtCore import QSignalBlocker, Qt, Signal
 from qtpy.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QGridLayout,
-    QHBoxLayout,
+    QInputDialog,
+    QMessageBox,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -29,6 +32,8 @@ class ProjectPanel(QWidget):
     section_state_changed = Signal(str, bool)
     close_requested = Signal()
     availability_changed = Signal(bool)
+    session_selected = Signal(str)
+    session_creation_requested = Signal(str, str, int)
 
     def __init__(self, project_state, parent=None):
         super().__init__(parent)
@@ -38,13 +43,33 @@ class ProjectPanel(QWidget):
         self._spacing_manually_edited = False
         self.sections = {}
         layout = QVBoxLayout(self)
-        self.project_actions = QGridLayout()
+        self.project_actions = QVBoxLayout()
         self.project_description = QLabel("No native project directory")
         self.project_description.setWordWrap(True)
         layout.addLayout(self.project_actions)
         layout.addWidget(self.project_description)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
+
+        session_section, session_form = self._section("sessions", "Segmentation Sessions")
+        self.session_combo = QComboBox()
+        self.session_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.session_combo.currentIndexChanged.connect(self._select_session)
+        session_form.addRow(self.session_combo)
+        self.session_details = QLabel()
+        self.session_details.setTextFormat(Qt.TextFormat.PlainText)
+        self.session_details.setWordWrap(True)
+        session_form.addRow(self.session_details)
+        self.new_session_button = QPushButton("New Session…")
+        self.new_session_button.clicked.connect(self._create_session)
+        self.new_session_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        session_form.addRow(self.new_session_button)
+        self.rename_session_button = QPushButton("Rename Session…")
+        self.rename_session_button.clicked.connect(self._rename_session)
+        self.rename_session_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        session_form.addRow(self.rename_session_button)
+        layout.addWidget(session_section)
+        self.session_section = session_section
 
         provenance, provenance_form = self._provenance_section()
         self.provenance_values = {}
@@ -121,7 +146,6 @@ class ProjectPanel(QWidget):
         mode_form.addRow(self.analysis_mode)
         layout.addWidget(mode_section)
 
-        buttons = QHBoxLayout()
         self.open_button = QPushButton("Open Image…")
         self.open_button.clicked.connect(self.open_requested)
         self.load_button = QPushButton("Load Selected File")
@@ -134,10 +158,9 @@ class ProjectPanel(QWidget):
         )
         self.close_button.setEnabled(False)
         self.close_button.clicked.connect(self.close_requested)
-        buttons.addWidget(self.open_button)
-        buttons.addWidget(self.load_button)
-        layout.addLayout(buttons)
-        layout.addWidget(self.close_button)
+        layout.addWidget(self.open_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.load_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.close_button, alignment=Qt.AlignmentFlag.AlignLeft)
         self.status_label = QLabel("No image loaded")
         self.status_label.setObjectName("importStatus")
         self.status_label.setWordWrap(True)
@@ -146,6 +169,72 @@ class ProjectPanel(QWidget):
 
         project_state.changed.connect(self.set_dataset)
         project_state.import_status_changed.connect(self.status_label.setText)
+        project_state.sessions_changed.connect(self.refresh_sessions)
+        project_state.active_session_changed.connect(self.refresh_sessions)
+        project_state.channels_changed.connect(self.refresh_sessions)
+        project_state.segmentation_result_changed.connect(self.refresh_sessions)
+        self.refresh_sessions()
+
+    def refresh_sessions(self, *args) -> None:
+        state = self.project_state
+        self.session_section.setVisible(state.dataset_ready)
+        with QSignalBlocker(self.session_combo):
+            self.session_combo.clear()
+            for session in state.sessions.values():
+                self.session_combo.addItem(session.display_name, session.session_id)
+            self.session_combo.setCurrentIndex(self.session_combo.findData(state.active_session_id))
+        session = state.active_session
+        index = session.source_channel_index
+        if index is None:
+            index = state.active_channel_index
+        channel = next((item.name for item in state.channels if item.index == index), "Unassigned")
+        status = "Empty"
+        if session.segmentation_result is not None:
+            status = "Current masks" if session.segmentation_is_current else "Outdated masks"
+        self.session_details.setText(f"{session.scientific_role.title()} · {channel} · {status}")
+
+    def _select_session(self) -> None:
+        session_id = self.session_combo.currentData()
+        if session_id is not None:
+            self.session_selected.emit(session_id)
+
+    def _create_session(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("New Segmentation Session")
+        form = QFormLayout(dialog)
+        name = QLineEdit()
+        name.setMaxLength(80)
+        role = QComboBox()
+        role.addItem("Nuclear", "nuclear")
+        role.addItem("Cytoplasmic (execution unavailable)", "cytoplasmic")
+        source = QComboBox()
+        for channel in self.project_state.channels:
+            source.addItem(channel.name, channel.index)
+        source.setCurrentIndex(source.findData(self.project_state.segmentation_channel_index))
+        form.addRow("Name", name)
+        form.addRow("Scientific role", role)
+        form.addRow("Source channel", source)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        confirm = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        confirm.setEnabled(False)
+        name.textChanged.connect(lambda text: confirm.setEnabled(bool(text.strip())))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.session_creation_requested.emit(name.text(), role.currentData(), source.currentData())
+
+    def _rename_session(self) -> None:
+        session = self.project_state.active_session
+        name, accepted = QInputDialog.getText(
+            self, "Rename Segmentation Session", "Display name", text=session.display_name
+        )
+        if accepted:
+            try:
+                self.project_state.rename_session(session.session_id, name)
+            except ValueError as error:
+                QMessageBox.warning(self, "Rename Segmentation Session", str(error))
+
 
     def _register_section(self, section: CollapsibleSection) -> None:
         self.sections[section.key] = section

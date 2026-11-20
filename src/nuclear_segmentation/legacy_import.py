@@ -568,6 +568,9 @@ def import_legacy_analysis(folder, replacement=None, bioimage_factory=None):
                                     norm3D=True, input_source="working_original"),
         segmentation_settings=pending, filter_controls=settings, intensity_controls=intensity,
     )
+    state.active_session.segmentation_settings = pending
+    state.active_session.filter_controls = settings
+    state.active_session.intensity_controls = intensity
     _validate_controls(snapshot, {c.index for c in state.channels})
     missing = [f"{name}.csv" for name in TABLES if name not in tables and name not in
                {"z_correction_profiles", "perinuclear_marker_metrics"}]

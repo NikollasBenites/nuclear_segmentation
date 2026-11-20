@@ -123,6 +123,8 @@ class ImageExportController(QObject):
             return "Select at least one scientific export output."
         if not state.segmentation_is_current or not state.filtering_is_current:
             return "Complete a current segmentation and calculate scientific measurements."
+        if state.active_session.scientific_role != "nuclear":
+            return "Scientific density export is available for nuclear sessions."
         if not state.scientific_roi_reviewed:
             return "Review and accept the scientific ROI."
         result = state.quantification_result or {}

@@ -322,7 +322,7 @@ def test_failed_rerun_preserves_previous_valid_result(qapp, tmp_path):
     panel.dispose()
 
 
-@pytest.mark.parametrize("change", ["project", "input", "geometry"])
+@pytest.mark.parametrize("change", ["project", "input", "geometry", "session"])
 def test_running_job_cannot_replace_a_newer_owner(qapp, tmp_path, change):
     state, source = _state(tmp_path)
     panel = SegmentationPanel(state)
@@ -345,6 +345,8 @@ def test_running_job_cannot_replace_a_newer_owner(qapp, tmp_path, change):
             state.set_dataset(dataset)
         elif change == "input":
             state.set_calibration((3.0, 0.5, 0.25))
+        elif change == "session":
+            state.select_session(state.create_session("Second").session_id)
         else:
             state.set_segmentation_result(_fake_result(prepare_scientific_input(state, _config(state))))
         current = state.segmentation_result
@@ -354,6 +356,8 @@ def test_running_job_cannot_replace_a_newer_owner(qapp, tmp_path, change):
         assert state.segmentation_result is current
         assert state.session_revision() == current_owner
         assert "Segmentation discarded" in panel.execution_log.toPlainText()
+        if change == "session":
+            assert state.nuclear_session.segmentation_result is None
         assert seen["image_czyx"] is source
         assert seen["VOXEL_SPACING_UM"] == (2.0, 0.5, 0.25)
     finally:

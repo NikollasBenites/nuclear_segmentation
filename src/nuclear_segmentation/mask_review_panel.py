@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
-from qtpy.QtCore import Qt, QTimer, Signal
+from qtpy.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
     QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
@@ -149,6 +149,7 @@ class MaskReviewPanel(QWidget):
         self._result = None
         self._result_current = False
         self._selected_id = None
+        self._selected_identity = None
         self._selected_is_raw = False
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
@@ -325,9 +326,13 @@ class MaskReviewPanel(QWidget):
     def set_selection(self, layer, mask_id) -> None:
         metadata = {} if layer is None else (getattr(layer, "metadata", {}) or {})
         self._selected_id = None if mask_id is None else int(mask_id)
-        self._selected_is_raw = bool(
+        self._selected_is_raw = self.project_state.owns_mask_layer(layer) and bool(
             metadata.get("nucytoseg_raw_segmentation")
             or metadata.get("nucytoseg_filtered_segmentation")
+        )
+        self._selected_identity = (
+            self.project_state.mask_identity(self._selected_id)
+            if self._selected_is_raw and self._selected_id is not None else None
         )
         self.mask_id.setText(
             "Selected Mask ID: —"
@@ -349,6 +354,21 @@ class MaskReviewPanel(QWidget):
             self.measurement_status.setText("Measurements have not been calculated.")
             self.accept_roi_button.setEnabled(False)
             self.counting_error.hide()
+            self.filter_summary.setText("Live filtering is unavailable.")
+            self.roi_status.setText("Provisional ROI unavailable.")
+            for control, value in (
+                (self.minimum_volume, 0), (self.minimum_sphericity, .45),
+                (self.first_tissue_z, 0), (self.last_tissue_z, 0), (self.z_guard_um, 0),
+            ):
+                with QSignalBlocker(control):
+                    control.setValue(value)
+            for control, value in (
+                (self.z_guard_mode, "first"), (self.intensity_combination, "all"),
+                (self.perinuclear_combination, "all"),
+            ):
+                with QSignalBlocker(control):
+                    control.setCurrentText(value)
+            self._rebuild_filter_controls({})
             return
         table = result["properties"]
         self.measurement_status.setText(f"Measurements available for {len(table):,} masks." + ("" if current else " Results are outdated."))
@@ -458,7 +478,11 @@ class MaskReviewPanel(QWidget):
 
     def update_selected_properties(self, mask_id):
         result = self.project_state.filtering_result
-        if result is None or mask_id is None or int(mask_id) not in result["properties"].index:
+        if (
+            result is None or mask_id is None
+            or self._selected_identity != self.project_state.mask_identity(mask_id)
+            or int(mask_id) not in result["properties"].index
+        ):
             self.measurements.setText("Scientific measurements are not available for this selection."); return
         row = result["properties"].loc[int(mask_id)]
         lines = [f"Volume: {row['volume_um3']:.4g} µm³", f"Sphericity: {row['sphericity']:.4g}",

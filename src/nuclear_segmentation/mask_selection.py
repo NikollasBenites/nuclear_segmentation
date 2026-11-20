@@ -279,6 +279,11 @@ class MaskSelectionController(QObject):
         self._emit_selection()
         self.status_changed.emit("Mask selection cleared")
 
+    def clear_all(self) -> None:
+        self._selected_by_layer.clear()
+        self._remove_highlight()
+        self._emit_selection()
+
     def _emit_selection(self) -> None:
         layer = self.selected_layer
         selected = None if layer is None else self._selected_by_layer.get(layer)
