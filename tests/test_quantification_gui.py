@@ -1,5 +1,7 @@
 import json
 import os
+from shutil import which
+from subprocess import check_output
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -225,7 +227,8 @@ def scientific_export(qapp, tmp_path):
         state = window.project_state
         image = np.arange(1, 2 * 6 * 8 * 9 + 1, dtype=np.uint16).reshape(2, 6, 8, 9)
         source = ImportedDataset(
-            source_path=tmp_path / "source.lif", source_format="LIF", series_index=2,
+            source_path=tmp_path / ("microscopy_" + "sample" * 30) / "source.lif",
+            source_format="LIF", series_index=2,
             series_identifier="series-2", series_name="Selected series",
             reported_axes="TZCYX", reported_shape=(3, 6, 2, 8, 9),
             standardized_shape=image.shape, dtype=str(image.dtype), data_czyx=image,
@@ -299,10 +302,24 @@ def test_scientific_package_preserves_schema_results_and_executed_provenance(
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_: str(tmp_path))
     panel.scientific_button.click()
     assert window.image_export.busy
+    assert not panel.scientific_button.isEnabled()
+    assert not panel.scientific_progress.isHidden()
     assert not window.close_project(confirm=False)
     _wait(qapp, lambda: not window.image_export.busy)
     assert "completed" in panel.scientific_status.text(), panel.scientific_status.text()
+    assert panel.scientific_progress.isHidden()
     path, = tmp_path.glob("test_export_*")
+    results = panel.results.text.toPlainText()
+    assert "Scientific Results\nStatus: Completed" in results
+    assert f"Destination: {path}" in results
+    assert "Scientific PDF report" in results
+    assert not panel.open_export_folder.isHidden()
+    opened = []
+    monkeypatch.setattr("nuclear_segmentation.image_export_panel.QDesktopServices.openUrl", opened.append)
+    panel.open_export_folder.click()
+    assert opened[0].toLocalFile() == str(path)
+    panel.results.copy_results()
+    assert qapp.clipboard().text() == results
     assert {item.name for item in path.iterdir()} == {
         "cellpose_raw_masks.tif", "filtered_masks_syglass.tif", "mntb_roi.tif",
         "perinuclear_marker_associated_dapi_nuclei.tif", "Marker_associated_dapi_nuclei.tif",
@@ -354,7 +371,7 @@ def test_scientific_package_preserves_schema_results_and_executed_provenance(
     assert record["z_corrections"]["DNA"]["percentile"] == 99.0
     assert record["perinuclear_markers"][0]["resolved_pixel_threshold"] == 0
     assert record["nominal_section_thickness_um"] == 72
-    assert record["nominal_section_thickness_source"] == "user-defined"
+    assert record["nominal_section_thickness_source"] == "unknown"
     assert "minimum object Z" in record["counting_rule"]
     density = pd.read_csv(path / "mntb_density_summary.csv").iloc[0]
     summary = pd.read_csv(path / "analysis_summary.csv").iloc[0]
@@ -367,12 +384,29 @@ def test_scientific_package_preserves_schema_results_and_executed_provenance(
         False, True, True, True, True, True,
     ]
     assert (path / "analysis_report.pdf").read_bytes().startswith(b"%PDF")
+    if which("pdftotext"):
+        first_page = check_output(
+            ["pdftotext", "-f", "1", "-l", "1", str(path / "analysis_report.pdf"), "-"],
+            text=True,
+        )
+        for heading in (
+            "Sample and Image Information", "Segmentation Parameters",
+            "Scientific Filtering Configuration", "Scientific ROI and Tissue Thickness",
+            "Quantification Results", "Exclusion Summary", "Scientific Interpretation",
+        ):
+            assert heading in first_page
+        assert "Measured full tissue thickness: 12 µm" in first_page
+        assert "Physical Z guard: 1" in first_page
+        assert "ROI / counting Z: 1" in first_page
+        assert f"Measured nuclear density: {density['retained_nuclei_per_mm3']:,.6g}" in first_page
+        assert f"Nominal-thickness-corrected density: {density['nominal_corrected_nuclei_per_100um_cube']:,.6g}" in first_page
 
 
 def test_scientific_export_zero_retained_and_no_markers(scientific_export, qapp, tmp_path):
     window, measure = scientific_export
     state, _ = measure()
     review = window.context_panel.mask_review_page
+    review.intensity_master.setChecked(False)
     review.last_tissue_z.setValue(1)
     _wait(qapp, lambda: window.context_panel.export_page.scientific_button.isEnabled())
     assert state.filtering_result["retained_ids"] == ()
@@ -389,7 +423,107 @@ def test_scientific_export_zero_retained_and_no_markers(scientific_export, qapp,
     assert pd.read_csv(destination / "perinuclear_marker_metrics.csv").columns.tolist() == ["label"]
     record = json.loads((destination / "analysis_config.json").read_text())
     assert record["perinuclear_markers"] == []
-    assert record["nominal_section_thickness_source"] == "default"
+    assert record["nominal_section_thickness_source"] == "unknown"
+    assert not record["optional_filter_status"]["combined_marker_associated_nuclei_applicable"]
+    assert pd.read_csv(destination / "analysis_summary.csv")["combined_marker_associated_nuclei"].iloc[0] == 2
+    assert not (destination / "perinuclear_marker_associated_dapi_nuclei.tif").exists()
+    assert not (destination / "qc_perinuclear_markers.png").exists()
+    report = (destination / "analysis_summary.txt").read_text()
+    for line in ("Perinuclear markers: Not configured", "Perinuclear filtering: Not applied",
+                 "Combined marker-associated nuclei: N/A", "Intensity filtering: Not applied",
+                 "Intensity measurement mode: raw"):
+        assert line in report
+
+
+def test_floating_qc_resumes_and_reuses_the_z_profile(scientific_export, qapp):
+    window, measure = scientific_export
+    state, _ = measure()
+    window.show()
+    plots = window.context_panel.quality_control_page
+    window.set_workflow("quality_control")
+    plots.kind.setCurrentText("Z profile")
+    plots.redraw()
+    # Compute the first plane, then hide the window before the timer finishes.
+    plots.compute_z_plane()
+    profile = plots.z_profile
+    assert len(profile) == 1
+    window.set_workflow("quantification")
+    assert not plots.z_timer.isActive()
+    window.set_workflow("quality_control")
+    _wait(qapp, lambda: len(profile) == state.segmentation_result["masks"].shape[0])
+    window.set_workflow("project")
+    window.set_workflow("quality_control")
+    assert plots.z_profile is profile
+    assert window.close_project(confirm=False)
+    assert window.graph_window.isHidden() and not plots.z_profile
+
+
+@pytest.mark.parametrize("configured,origin,expected", [
+    (None, None, "default"), (60, None, "unknown"), (72, None, "unknown"),
+    (60, "user-defined", "user-defined"), (60, "default", "default"),
+])
+def test_nominal_thickness_origin_uses_only_explicit_provenance(tmp_path, configured, origin, expected):
+    state, _, _ = _project(tmp_path)
+    segmentation = state.segmentation_result
+    if configured is not None:
+        segmentation["scientific_config"]["NOMINAL_SECTION_THICKNESS_UM"] = configured
+    if origin is not None:
+        segmentation["nominal_section_thickness_source"] = origin
+    result = calculate_quantification_result(state)
+    assert result["nominal_section_thickness_source"] == expected
+    assert result["nominal_section_thickness_um"] == (configured or 60)
+
+
+def test_selective_scientific_export_and_bulk_options(scientific_export, qapp, tmp_path):
+    window, measure = scientific_export
+    measure(max_id=65536)
+    panel = window.context_panel.export_page
+    buttons = {button.text(): button for button in
+               panel.scientific_options_section.findChildren(type(panel.scientific_button))}
+    buttons["Clear Optional"].click()
+    assert not panel.scientific_button.isEnabled()
+    assert "Select at least one" in panel.scientific_button.toolTip()
+    assert not window.image_export.export_scientific(tmp_path / "empty")
+    assert not (tmp_path / "empty").exists()
+    buttons["Select All"].click()
+    assert panel.selected_scientific_outputs() == ("csv", "tiff", "png", "pdf")
+
+    for key, expected in (
+        ("pdf", {"analysis_report.pdf"}),
+        ("png", {"qc_volume_distribution.png", "qc_volume_sphericity.png", "qc_exclusion_reasons.png"}),
+        ("csv", {
+            "analysis_summary.csv", "analysis_summary.txt", "mntb_density_summary.txt",
+            "mntb_density_summary.csv", "mntb_roi_by_z.csv", "filter_settings.csv",
+            "all_mask_properties.csv", "retained_mask_properties.csv", "excluded_mask_properties.csv",
+            "z_guard_excluded_mask_properties.csv", "manual_mask_review.csv",
+            "channel_background_estimates.csv", "perinuclear_marker_metrics.csv",
+        }),
+    ):
+        buttons["Clear Optional"].click()
+        panel.scientific_options[key].setChecked(True)
+        destination = tmp_path / key
+        assert window.image_export.export_scientific(destination)
+        _wait(qapp, lambda: not window.image_export.busy)
+        assert {file.name for file in destination.iterdir()} == expected | {"analysis_config.json"}
+        record = json.loads((destination / "analysis_config.json").read_text())
+        assert record["export_components"] == [key]
+        assert record["mntb_roi"]["mask_file"] is None
+
+
+def test_selective_mask_export(scientific_export, qapp, tmp_path):
+    window, measure = scientific_export
+    state, masks = measure()
+    panel = window.context_panel.export_page
+    for key, field in panel.scientific_options.items():
+        field.setChecked(key == "tiff")
+    destination = tmp_path / "masks"
+    assert window.image_export.export_scientific(destination)
+    _wait(qapp, lambda: not window.image_export.busy)
+    assert {file.name for file in destination.iterdir()} == {
+        "cellpose_raw_masks.tif", "filtered_masks_syglass.tif", "mntb_roi.tif", "analysis_config.json",
+    }
+    np.testing.assert_array_equal(tifffile.imread(destination / "cellpose_raw_masks.tif"), masks)
+    np.testing.assert_array_equal(tifffile.imread(destination / "mntb_roi.tif"), state.scientific_roi)
 
 
 @pytest.mark.parametrize("mode,expected", [

@@ -7,7 +7,143 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.figure import Figure
 
+SCIENTIFIC_OUTPUTS = {
+    "csv": "Scientific CSV tables",
+    "tiff": "Segmentation mask TIFFs",
+    "png": "Quality Control PNG figures",
+    "pdf": "Scientific PDF report",
+}
+
 # Export-folder review patch: only the folder name changes; sample metadata is preserved.
+def _report_value(value, unit=""):
+    return "N/A" if value is None else f"{value:,.6g}{unit}"
+
+
+def _report_sections(config, summary, density, settings, effective_planes, failures, exclusions):
+    def short(value):
+        value = str(value)
+        return value if len(value) <= 64 else value[:63] + "…"
+
+    cellpose = config["cellpose"]
+    markers = config["perinuclear_markers"]
+    intensity = settings["intensity_filters"]
+    mode = settings["z_guard_mode"]
+    counting = density["counting_rule"]
+    if config.get("counting_rule") is None and settings.get("z_counting_rule") == "directional_entry_v1":
+        counting = {
+            "first": "Directional Z entry at minimum object Z with XY centroid tested in the ROI.",
+            "last": "Directional Z entry at maximum object Z with XY centroid tested in the ROI.",
+        }.get(mode, counting)
+    if exclusions is not None:
+        exclusions = dict(exclusions)
+        if not markers:
+            exclusions.pop("Perinuclear association", None)
+        if not intensity:
+            exclusions.pop("Nuclear intensity", None)
+    else:
+        exclusions = {key: failures[key] for key in ("physical volume", "sphericity", "physical Z guard")}
+    spacing = config["calibration"]["voxel_spacing_zyx_um"]
+    thickness = _report_value(density["nominal_section_thickness_um"], " µm")
+    source = config.get("nominal_section_thickness_source", "unknown")
+    marker_count = f"{summary['combined_marker_associated_nuclei']:,}" if markers else "N/A"
+    sections = [
+        ("Sample and Image Information", [
+            f"Sample: {short(summary['sample_name'])} | Segmentation channel: {short(summary['segmentation_channel'])}",
+            f"Source image: {short(Path(summary['input_file']).name)}",
+            f"Working ZYX size: {summary['shape_z']} × {summary['shape_y']} × {summary['shape_x']} voxels",
+            f"Voxel spacing (Z, Y, X): {', '.join(f'{v:g}' for v in spacing)} µm",
+        ]),
+        ("Segmentation Parameters", [
+            f"Cellpose: {short(cellpose['model_name'])} | Device: {short(cellpose['device'])}",
+            f"Mode: {'3D' if cellpose['do_3D'] else '2D with stitching'} | "
+            f"Probability threshold: {cellpose['cellprob_threshold']} | Minimum size: {cellpose['minimum_size_voxels']} voxels",
+            f"Batch size: {cellpose['batch_size']} | Resample: {cellpose['resample']} | "
+            f"Stitch threshold: {cellpose['stitch_threshold']}",
+        ]),
+        ("Scientific Filtering Configuration", [
+            f"Minimum volume: {settings['minimum_volume_um3']:g} µm³ | "
+            f"Minimum sphericity: {settings['minimum_sphericity']:g}",
+            f"Intensity measurement mode: {config['intensity_measurements']['mode']}",
+            f"Intensity filtering: {settings['intensity_combination']} of {len(intensity)} channel(s)"
+            if intensity else "Intensity filtering: Not applied",
+            f"Perinuclear markers: {len(markers)} configured" if markers else "Perinuclear markers: Not configured",
+            f"Perinuclear filtering: {settings['perinuclear_combination']} configured markers"
+            if markers else "Perinuclear filtering: Not applied",
+        ]),
+        ("Scientific ROI and Tissue Thickness", [
+            f"ROI: {short(summary['roi_source'])} | Effective volume: {_report_value(density['roi_effective_volume_um3'], ' µm³')}",
+            f"Tissue Z (0-based): {settings['first_tissue_z']}–{settings['last_tissue_z']} | "
+            f"Z guard: {mode}, {settings['z_guard_um']:g} µm | Eligible planes: {sum(effective_planes)}",
+            f"Measured full tissue thickness: {_report_value(density['measured_full_tissue_thickness_um'], ' µm')}",
+            f"Nominal section thickness: {thickness} ({source}) | "
+            f"Density correction factor: {_report_value(density['thickness_density_correction_factor'])}",
+        ]),
+        ("Quantification Results", [
+            f"Retained nuclei: {summary['retained_masks']:,} | Excluded nuclei: {summary['excluded_masks']:,}",
+            f"Combined marker-associated nuclei: {marker_count}",
+            f"Measured nuclear density: {_report_value(density['retained_nuclei_per_mm3'], ' nuclei/mm³')}",
+            f"Measured nuclear density: {_report_value(density['retained_nuclei_per_100um_cube'], ' nuclei/(100 µm)³')}",
+            f"Nominal-thickness-corrected density: "
+            f"{_report_value(density['nominal_corrected_nuclei_per_100um_cube'], ' nuclei/(100 µm)³')}",
+        ]),
+        ("Exclusion Summary", [
+            " | ".join(f"{label}: {count:,}" for label, count in exclusions.items()),
+            "Exclusion counts can overlap.",
+        ]),
+        ("Scientific Interpretation", [density["interpretation"], f"Counting rule: {counting}"]),
+    ]
+    source_image = config["input"]
+    if "series_index" in source_image and "time_index" in source_image:
+        sections[0][1].append(
+            f"Source series: {source_image['series_index']} | Timepoint: {source_image['time_index']} (0-based)"
+        )
+    details = [f"Source path: {summary['input_file']}", f"Cellpose model: {cellpose['model_name']}"]
+    details.extend(f"{name}: [{item['minimum']:g}, {item['maximum']:g}] ({item['column']})"
+                   for name, item in intensity.items())
+    details.extend(
+        f"{marker['name']}: shell {marker['ring_inner_um']:g}–{marker['ring_outer_um']:g} µm, "
+        f"resolved threshold {marker['resolved_pixel_threshold']:g}, minimum fraction "
+        f"{marker['minimum_positive_fraction']:g}"
+        for marker in markers
+    )
+    details.extend(f"{label}: {count:,}" for label, count in failures.items()
+                   if markers or label != "perinuclear marker association")
+    return [*sections, ("Source and Filter Details", details)]
+
+
+def _write_summary_pages(pdf, sections):
+    """Lay out wrapped text inside fixed A4 page margins."""
+    height = 11.69 * 72
+
+    def new_page(title):
+        figure = Figure(figsize=(8.27, 11.69))
+        figure.text(.077, 1 - 50 / height, title, fontsize=17, weight="bold", va="top")
+        return figure, height - 77
+
+    figure, y = new_page("Scientific Analysis Report")
+    for heading, lines in sections:
+        wrapped_lines = [
+            wrapped for line in lines
+            for wrapped in textwrap.wrap(line, width=87, subsequent_indent="  ", break_on_hyphens=False)
+        ]
+        section_height = 26 + 13 * len(wrapped_lines)
+        if y < 75 or y - 49 < section_height <= height - 126:
+            pdf.savefig(figure)
+            figure, y = new_page("Scientific Analysis Report · continued")
+        figure.text(.077, y / height, heading, fontsize=11, weight="bold", va="top")
+        y -= 17
+        for wrapped in wrapped_lines:
+            if y < 49:
+                pdf.savefig(figure)
+                figure, y = new_page("Scientific Analysis Report · continued")
+            figure.text(
+                .077, y / height, wrapped, fontsize=9, family="monospace", va="top", parse_math=False,
+            )
+            y -= 13
+        y -= 9
+    pdf.savefig(figure)
+
+
 def _export_folder_error(parent, name):
     """Validate a single portable directory name before any files are written."""
     import re
@@ -117,6 +253,8 @@ elif "roi_reviewed" in globals():
 
 if _reviewed_export_destination is not None:
     sample_export_directory = _reviewed_export_destination
+    outputs = desktop_export["outputs"] if desktop_export is not None else SCIENTIFIC_OUTPUTS
+    marker_filters = settings["perinuclear_filters"]
     output_parent = sample_export_directory.parent
     selected_output_folder = str(output_parent)
     # Create only after live-state validation; never overwrite an existing folder.
@@ -124,15 +262,6 @@ if _reviewed_export_destination is not None:
     export_directory_created = True
 
     combined_perinuclear_keep = calculate_perinuclear_filter_keep(settings)
-    combined_perinuclear_labels = filter_properties.index[
-        combined_perinuclear_keep
-    ].to_numpy()
-    combined_perinuclear_masks = np.where(
-        np.isin(masks, combined_perinuclear_labels),
-        masks,
-        0,
-    )
-
     raw_mask_path = sample_export_directory / "cellpose_raw_masks.tif"
     combined_marker_mask_path = (
         sample_export_directory / "perinuclear_marker_associated_dapi_nuclei.tif"
@@ -154,21 +283,17 @@ if _reviewed_export_destination is not None:
     reason_figure_path = sample_export_directory / "qc_exclusion_reasons.png"
     report_path = sample_export_directory / "analysis_report.pdf"
 
-    calibrated_label_tiff(raw_mask_path, masks, VOXEL_SPACING_UM, require_uint16=False)
-    calibrated_label_tiff(
-        combined_marker_mask_path,
-        combined_perinuclear_masks,
-        VOXEL_SPACING_UM,
-        require_uint16=True,
-    )
-    calibrated_label_tiff(
-        filtered_mask_path,
-        export_masks,
-        VOXEL_SPACING_UM,
-        require_uint16=True,
-    )
+    if "tiff" in outputs:
+        calibrated_label_tiff(raw_mask_path, masks, VOXEL_SPACING_UM)
+        calibrated_label_tiff(filtered_mask_path, export_masks, VOXEL_SPACING_UM, require_uint16=True)
+        calibrated_label_tiff(
+            sample_export_directory / "mntb_roi.tif", mntb_roi.astype(np.uint8), VOXEL_SPACING_UM
+        )
+        if marker_filters:
+            combined_labels = filter_properties.index[combined_perinuclear_keep].to_numpy()
+            combined_masks = np.where(np.isin(masks, combined_labels), masks, 0)
+            calibrated_label_tiff(combined_marker_mask_path, combined_masks, VOXEL_SPACING_UM, require_uint16=True)
 
-    individual_marker_mask_paths = []
     individual_marker_keep = {}
     for marker_name, marker_filter in settings["perinuclear_filters"].items():
         marker_keep = (
@@ -176,18 +301,11 @@ if _reviewed_export_destination is not None:
             >= marker_filter["minimum_positive_fraction"]
         )
         individual_marker_keep[marker_name] = marker_keep
-        marker_labels = filter_properties.index[marker_keep].to_numpy()
-        marker_masks = np.where(np.isin(masks, marker_labels), masks, 0)
-        marker_path = sample_export_directory / (
-            f"{safe_filename(marker_name)}_associated_dapi_nuclei.tif"
-        )
-        calibrated_label_tiff(
-            marker_path,
-            marker_masks,
-            VOXEL_SPACING_UM,
-            require_uint16=True,
-        )
-        individual_marker_mask_paths.append(marker_path)
+        if "tiff" in outputs:
+            marker_labels = filter_properties.index[marker_keep].to_numpy()
+            marker_masks = np.where(np.isin(masks, marker_labels), masks, 0)
+            marker_path = sample_export_directory / f"{safe_filename(marker_name)}_associated_dapi_nuclei.tif"
+            calibrated_label_tiff(marker_path, marker_masks, VOXEL_SPACING_UM, require_uint16=True)
 
     mask_results = filter_properties.copy()
     mask_results["retained"] = final_keep.astype(bool)
@@ -328,7 +446,7 @@ if _reviewed_export_destination is not None:
         "schema_version": 8,
         "manual_review": manual_review.to_record(),
         "nominal_section_thickness_um": float(NOMINAL_SECTION_THICKNESS_UM),
-        "mntb_roi": {"source": roi_source, "mask_file": "mntb_roi.tif", "reviewed": True},
+        "mntb_roi": {"source": roi_source, "mask_file": "mntb_roi.tif" if "tiff" in outputs else None, "reviewed": True},
         "analysis_date": datetime.now().isoformat(timespec="seconds"),
         "export_corrected_images": EXPORT_CORRECTED_IMAGES,
         "z_corrections": Z_CORRECTIONS,
@@ -382,25 +500,42 @@ if _reviewed_export_destination is not None:
         configuration.update(desktop_export["provenance"])
         configuration["cellpose"]["executed_parameters"] = desktop_export["executed_parameters"]
         configuration["mntb_roi"].update(desktop_export["roi_provenance"])
+    elif RUN_MODE == "resume":
+        origin = previous_config.get("nominal_section_thickness_source")
+        if origin in ("default", "user-defined"):
+            configuration["nominal_section_thickness_source"] = origin
+    configuration["export_components"] = list(outputs)
+    configuration["optional_filter_status"] = {
+        "intensity_filtering_applied": bool(settings["intensity_filters"]),
+        "perinuclear_markers_configured": bool(perinuclear_records),
+        "perinuclear_filtering_applied": bool(marker_filters),
+        "combined_marker_associated_nuclei_applicable": bool(marker_filters),
+    }
+    if not marker_filters:
+        configuration["optional_filter_status"]["legacy_combined_count_note"] = (
+            "With no active marker filters, combined_marker_associated_nuclei in analysis_summary.csv "
+            "retains the legacy count of masks passing the empty filter. Marker association is unavailable."
+        )
     config_json_path.write_text(json.dumps(configuration, indent=2), encoding="utf-8")
 
-    mask_results.reset_index().to_csv(all_masks_csv_path, index=False)
-    manual_table = filter_properties[['manual_decision', 'manual_reason', 'automatic_keep',
-                                      'automatic_failure_reasons', 'excluded_by_z_guard',
-                                      'excluded_by_sampling_roi']].copy()
-    manual_table['retained'] = final_keep
-    manual_table.index.name = 'mask_id'
-    manual_table.reset_index().to_csv(sample_export_directory / 'manual_mask_review.csv', index=False)
-    retained_results.reset_index().to_csv(retained_csv_path, index=False)
-    excluded_results.reset_index().to_csv(excluded_csv_path, index=False)
-    guard_results.reset_index().to_csv(guard_csv_path, index=False)
-    perinuclear_columns = [column for column in mask_results if "_ring_" in column]
-    mask_results[perinuclear_columns].reset_index().to_csv(
-        perinuclear_csv_path,
-        index=False,
-    )
-    background_table.to_csv(background_csv_path, index=False)
-    filter_table.to_csv(filters_csv_path, index=False)
+    if "csv" in outputs:
+        mask_results.reset_index().to_csv(all_masks_csv_path, index=False)
+        manual_table = filter_properties[['manual_decision', 'manual_reason', 'automatic_keep',
+                                          'automatic_failure_reasons', 'excluded_by_z_guard',
+                                          'excluded_by_sampling_roi']].copy()
+        manual_table['retained'] = final_keep
+        manual_table.index.name = 'mask_id'
+        manual_table.reset_index().to_csv(sample_export_directory / 'manual_mask_review.csv', index=False)
+        retained_results.reset_index().to_csv(retained_csv_path, index=False)
+        excluded_results.reset_index().to_csv(excluded_csv_path, index=False)
+        guard_results.reset_index().to_csv(guard_csv_path, index=False)
+        perinuclear_columns = [column for column in mask_results if "_ring_" in column]
+        mask_results[perinuclear_columns].reset_index().to_csv(
+            perinuclear_csv_path,
+            index=False,
+        )
+        background_table.to_csv(background_csv_path, index=False)
+        filter_table.to_csv(filters_csv_path, index=False)
 
     failure_counts = {
         description: int(mask_results[column].sum())
@@ -459,229 +594,156 @@ if _reviewed_export_destination is not None:
         effective_planes = desktop_export["effective_planes"]
     summary.update(density_summary)
     summary["roi_source"] = roi_source
-    pd.DataFrame([summary]).to_csv(summary_csv_path, index=False)
-    roi_export_path = sample_export_directory / "mntb_roi.tif"
-    calibrated_label_tiff(roi_export_path, mntb_roi.astype(np.uint8), VOXEL_SPACING_UM)
-    density_csv_path = sample_export_directory / "mntb_density_summary.csv"
-    pd.DataFrame([{**density_summary, "roi_source": roi_source}]).to_csv(density_csv_path, index=False)
-    roi_planes_path = sample_export_directory / "mntb_roi_by_z.csv"
-    pd.DataFrame({"z_index": np.arange(masks.shape[0]), "roi_voxels": roi_plane_counts,
-                  "area_um2": roi_plane_counts * VOXEL_SPACING_UM[1] * VOXEL_SPACING_UM[2],
-                  "included_in_density": effective_planes}).to_csv(roi_planes_path, index=False)
-
-    summary_lines = [
-        "GENERAL CELLPPOSE-SAM 3D DAPI NUCLEI SEGMENTATION",
-        "",
-        f"Input: {DEFAULT_INPUT}",
-        f"Segmentation channel: {SEGMENTATION_CHANNEL}",
-        f"Perinuclear combination: {settings['perinuclear_combination']}",
-        f"Voxel spacing ZYX: {VOXEL_SPACING_UM[0]:.4f}, {VOXEL_SPACING_UM[1]:.4f}, {VOXEL_SPACING_UM[2]:.4f} µm",
-        "",
-        "PERINUCLEAR MARKERS",
-    ]
-    for marker_record in perinuclear_records:
-        summary_lines.append(
-            f"{marker_record['name']}: shell {marker_record['ring_inner_um']:.2f}–"
-            f"{marker_record['ring_outer_um']:.2f} µm; pixel threshold "
-            f"{marker_record['resolved_pixel_threshold']:.3f}; minimum fraction "
-            f"{marker_record['minimum_positive_fraction']:.3f}"
+    if "csv" in outputs:
+        pd.DataFrame([summary]).to_csv(summary_csv_path, index=False)
+        pd.DataFrame([{**density_summary, "roi_source": roi_source}]).to_csv(
+            sample_export_directory / "mntb_density_summary.csv", index=False
         )
-    summary_lines.extend(
-        [
-            "",
-            "CURRENT FILTERS",
-            f"Minimum volume: {settings['minimum_volume_um3']:.2f} µm³",
-            f"Minimum sphericity: {settings['minimum_sphericity']:.3f}",
-            f"Tissue Z range: {settings['first_tissue_z']} to {settings['last_tissue_z']}",
-            f"Z guard: {settings['z_guard_mode']} at {settings['z_guard_um']:.2f} µm",
-            f"Nuclear intensity mode: {INTENSITY_MODE}",
-            "",
-            "RESULTS",
-            f"Total Cellpose masks: {len(mask_results)}",
-            f"Combined marker-associated nuclei: {int(combined_perinuclear_keep.sum())}",
-            f"Retained masks: {len(retained_results)}",
-            f"Excluded masks: {len(excluded_results)}",
-            f"Excluded by Z guard: {len(guard_results)}",
-        ]
-    )
-    if desktop_export is not None:
-        summary_lines.extend([
-            "",
-            density_summary["interpretation"],
-            f"Counting rule: {density_summary['counting_rule']}",
-            f"Measured density: {density_summary['retained_nuclei_per_mm3']:.6g} nuclei/mm³",
-            f"Measured density: {density_summary['retained_nuclei_per_100um_cube']:.6g} nuclei/(100 µm)³",
-            f"Nominal thickness: {NOMINAL_SECTION_THICKNESS_UM:g} µm "
-            f"({configuration['nominal_section_thickness_source']})",
-            f"Nominal-thickness-corrected density: "
-            f"{density_summary['nominal_corrected_nuclei_per_100um_cube']:.6g} nuclei/(100 µm)³",
-        ])
-    summary_txt_path.write_text("\n".join(summary_lines), encoding="utf-8")
-
-    all_volumes = mask_results["volume_um3"].dropna()
-    retained_volumes = retained_results["volume_um3"].dropna()
-    volume_bins = np.histogram_bin_edges(all_volumes, bins=40)
-    volume_figure = Figure(figsize=(9, 5.5))
-    FigureCanvasAgg(volume_figure)
-    volume_axis = volume_figure.subplots()
-    volume_axis.hist(
-        all_volumes,
-        bins=volume_bins,
-        color="gray",
-        edgecolor="black",
-        alpha=0.40,
-        label=f"All masks (n={len(all_volumes)})",
-    )
-    volume_axis.hist(
-        retained_volumes,
-        bins=volume_bins,
-        color="royalblue",
-        edgecolor="navy",
-        alpha=0.70,
-        label=f"Retained (n={len(retained_volumes)})",
-    )
-    volume_axis.set_xlabel("Mask volume (µm³)")
-    volume_axis.set_ylabel("Number of masks")
-    volume_axis.set_title("Mask volumes before and after filtering")
-    volume_axis.legend()
-    volume_axis.grid(alpha=0.2)
-    volume_figure.tight_layout()
-    volume_figure.savefig(volume_figure_path, dpi=300, bbox_inches="tight")
-
-    scatter_figure = Figure(figsize=(9, 5.5))
-    FigureCanvasAgg(scatter_figure)
-    scatter_axis = scatter_figure.subplots()
-    scatter_axis.scatter(
-        excluded_results["volume_um3"],
-        excluded_results["sphericity"],
-        s=14,
-        alpha=0.35,
-        color="gray",
-        label="Excluded",
-    )
-    scatter_axis.scatter(
-        retained_results["volume_um3"],
-        retained_results["sphericity"],
-        s=18,
-        alpha=0.65,
-        color="royalblue",
-        label="Retained",
-    )
-    scatter_axis.set_xlabel("Mask volume (µm³)")
-    scatter_axis.set_ylabel("Sphericity")
-    scatter_axis.set_ylim(0, 1.05)
-    scatter_axis.set_title("Retained and excluded mask morphology")
-    scatter_axis.legend()
-    scatter_axis.grid(alpha=0.2)
-    scatter_figure.tight_layout()
-    scatter_figure.savefig(scatter_figure_path, dpi=300, bbox_inches="tight")
-
-    marker_figure = Figure(figsize=(9, 5.5))
-    FigureCanvasAgg(marker_figure)
-    marker_axis = marker_figure.subplots()
-    for marker_name, marker_filter in settings["perinuclear_filters"].items():
-        marker_axis.hist(
-            mask_results[marker_filter["column"]].dropna(),
-            bins=np.linspace(0, 1, 41),
-            alpha=0.45,
-            label=marker_name,
+        pd.DataFrame({
+            "z_index": np.arange(masks.shape[0]), "roi_voxels": roi_plane_counts,
+            "area_um2": roi_plane_counts * VOXEL_SPACING_UM[1] * VOXEL_SPACING_UM[2],
+            "included_in_density": effective_planes,
+        }).to_csv(sample_export_directory / "mntb_roi_by_z.csv", index=False)
+        (sample_export_directory / "mntb_density_summary.txt").write_text(
+            "\n".join(f"{key}: {value}" for key, value in density_summary.items()), encoding="utf-8"
         )
-        marker_axis.axvline(
-            marker_filter["minimum_positive_fraction"],
-            linestyle="--",
-            linewidth=1.5,
+
+    if "csv" in outputs or "pdf" in outputs:
+        report_sections = _report_sections(
+            configuration, summary, density_summary, settings, effective_planes, failure_counts,
+            desktop_export["exclusions"] if desktop_export is not None else None,
         )
-    marker_axis.set_xlabel("Marker-positive perinuclear-shell fraction")
-    marker_axis.set_ylabel("Number of DAPI nuclei")
-    marker_axis.set_title("Perinuclear marker association")
-    marker_axis.set_xlim(0, 1)
-    if settings["perinuclear_filters"]:
-        marker_axis.legend()
-    marker_axis.grid(alpha=0.2)
-    marker_figure.tight_layout()
-    marker_figure.savefig(marker_figure_path, dpi=300, bbox_inches="tight")
+        if "csv" in outputs:
+            summary_txt_path.write_text(
+                "\n\n".join("\n".join((heading, *lines)) for heading, lines in report_sections),
+                encoding="utf-8",
+            )
 
-    reason_figure = Figure(figsize=(9, 5.5))
-    FigureCanvasAgg(reason_figure)
-    reason_axis = reason_figure.subplots()
-    labels = list(failure_counts)
-    counts = [failure_counts[label] for label in labels]
-    reason_axis.barh(labels, counts, color="slateblue", edgecolor="navy")
-    reason_axis.invert_yaxis()
-    reason_axis.set_xlabel("Number of masks")
-    reason_axis.set_title("Masks failing each exclusion criterion")
-    reason_axis.grid(axis="x", alpha=0.2)
-    reason_figure.tight_layout()
-    reason_figure.savefig(reason_figure_path, dpi=300, bbox_inches="tight")
-
-    with PdfPages(report_path) as pdf:
-        metadata = pdf.infodict()
-        metadata["Title"] = "General Cellpose-SAM DAPI nuclei report"
-        metadata["Author"] = PDF_AUTHOR
-        metadata["Subject"] = "3D nuclei and configurable perinuclear markers"
-        text_figure = Figure(figsize=(8.27, 11.69))
-        FigureCanvasAgg(text_figure)
-        text_axis = text_figure.add_subplot(111)
-        text_axis.axis("off")
-        wrapped_text = "\n".join(
-            textwrap.fill(line, width=95) if len(line) > 95 else line
-            for line in summary_lines
+    if "png" in outputs or "pdf" in outputs:
+        figures = []
+        all_volumes = mask_results["volume_um3"].dropna()
+        retained_volumes = retained_results["volume_um3"].dropna()
+        volume_bins = np.histogram_bin_edges(all_volumes, bins=40)
+        volume_figure = Figure(figsize=(9, 5.5))
+        FigureCanvasAgg(volume_figure)
+        volume_axis = volume_figure.subplots()
+        volume_axis.hist(
+            all_volumes,
+            bins=volume_bins,
+            color="gray",
+            edgecolor="black",
+            alpha=0.40,
+            label=f"All masks (n={len(all_volumes)})",
         )
-        text_axis.text(
-            0.03,
-            0.98,
-            wrapped_text,
-            transform=text_axis.transAxes,
-            va="top",
-            ha="left",
-            fontsize=9.5,
-            family="monospace",
+        volume_axis.hist(
+            retained_volumes,
+            bins=volume_bins,
+            color="royalblue",
+            edgecolor="navy",
+            alpha=0.70,
+            label=f"Retained (n={len(retained_volumes)})",
         )
-        pdf.savefig(text_figure, bbox_inches="tight")
-        pdf.savefig(volume_figure, bbox_inches="tight")
-        pdf.savefig(scatter_figure, bbox_inches="tight")
-        pdf.savefig(marker_figure, bbox_inches="tight")
-        pdf.savefig(reason_figure, bbox_inches="tight")
+        volume_axis.set_xlabel("Mask volume (µm³)")
+        volume_axis.set_ylabel("Number of masks")
+        volume_axis.set_title("Mask volumes before and after filtering")
+        volume_axis.legend()
+        volume_axis.grid(alpha=0.2)
+        volume_figure.tight_layout()
+        figures.append((volume_figure, volume_figure_path))
 
-    for figure in (text_figure, volume_figure, scatter_figure, marker_figure, reason_figure):
-        figure.clear()
+        scatter_figure = Figure(figsize=(9, 5.5))
+        FigureCanvasAgg(scatter_figure)
+        scatter_axis = scatter_figure.subplots()
+        scatter_axis.scatter(
+            excluded_results["volume_um3"],
+            excluded_results["sphericity"],
+            s=14,
+            alpha=0.35,
+            color="gray",
+            label="Excluded",
+        )
+        scatter_axis.scatter(
+            retained_results["volume_um3"],
+            retained_results["sphericity"],
+            s=18,
+            alpha=0.65,
+            color="royalblue",
+            label="Retained",
+        )
+        scatter_axis.set_xlabel("Mask volume (µm³)")
+        scatter_axis.set_ylabel("Sphericity")
+        scatter_axis.set_ylim(0, 1.05)
+        scatter_axis.set_title("Retained and excluded mask morphology")
+        scatter_axis.legend()
+        scatter_axis.grid(alpha=0.2)
+        scatter_figure.tight_layout()
+        figures.append((scatter_figure, scatter_figure_path))
 
-    density_txt_path = sample_export_directory / "mntb_density_summary.txt"
-    density_txt_path.write_text("\n".join(f"{k}: {v}" for k, v in density_summary.items()), encoding="utf-8")
-    created_files = [
-        roi_export_path, density_csv_path, roi_planes_path, density_txt_path,
-        raw_mask_path,
-        *individual_marker_mask_paths,
-        combined_marker_mask_path,
-        filtered_mask_path,
-        all_masks_csv_path,
-        retained_csv_path,
-        excluded_csv_path,
-        guard_csv_path,
-        perinuclear_csv_path,
-        background_csv_path,
-        filters_csv_path,
-        summary_csv_path,
-        summary_txt_path,
-        config_json_path,
-        volume_figure_path,
-        scatter_figure_path,
-        marker_figure_path,
-        reason_figure_path,
-        report_path,
-    ]
+        if marker_filters:
+            marker_figure = Figure(figsize=(9, 5.5))
+            FigureCanvasAgg(marker_figure)
+            marker_axis = marker_figure.subplots()
+            for marker_name, marker_filter in settings["perinuclear_filters"].items():
+                marker_axis.hist(
+                    mask_results[marker_filter["column"]].dropna(),
+                    bins=np.linspace(0, 1, 41),
+                    alpha=0.45,
+                    label=marker_name,
+                )
+                marker_axis.axvline(
+                    marker_filter["minimum_positive_fraction"],
+                    linestyle="--",
+                    linewidth=1.5,
+                )
+            marker_axis.set_xlabel("Marker-positive perinuclear-shell fraction")
+            marker_axis.set_ylabel("Number of DAPI nuclei")
+            marker_axis.set_title("Perinuclear marker association")
+            marker_axis.set_xlim(0, 1)
+            marker_axis.legend()
+            marker_axis.grid(alpha=0.2)
+            marker_figure.tight_layout()
+            figures.append((marker_figure, marker_figure_path))
+
+        reason_figure = Figure(figsize=(9, 5.5))
+        FigureCanvasAgg(reason_figure)
+        reason_axis = reason_figure.subplots()
+        labels = [label for label in failure_counts if marker_filters or label != "perinuclear marker association"]
+        counts = [failure_counts[label] for label in labels]
+        reason_axis.barh(labels, counts, color="slateblue", edgecolor="navy")
+        reason_axis.invert_yaxis()
+        reason_axis.set_xlabel("Number of masks")
+        reason_axis.set_title("Masks failing each exclusion criterion")
+        reason_axis.grid(axis="x", alpha=0.2)
+        reason_figure.tight_layout()
+        figures.append((reason_figure, reason_figure_path))
+
+        if "png" in outputs:
+            for figure, path in figures:
+                figure.savefig(path, dpi=300, bbox_inches="tight")
+        if "pdf" in outputs:
+            with PdfPages(report_path) as pdf:
+                metadata = pdf.infodict()
+                metadata["Title"] = "NuCytoSeg scientific analysis report"
+                metadata["Author"] = PDF_AUTHOR
+                metadata["Subject"] = "3D nuclear segmentation, filtering, and quantification"
+                _write_summary_pages(pdf, report_sections)
+                for figure, _ in figures:
+                    pdf.savefig(figure, bbox_inches="tight")
+        for figure, _ in figures:
+            figure.clear()
 
     # Explicit per-plane provenance for corrected intensities.
-    z_rows = []
-    for name, report in globals().get('z_correction_reports', {}).items():
-        for z, gain in enumerate(report['gain']):
-            z_rows.append(dict(channel=name, z_index=z, gain=gain,
-                               reference_intensity=report['observed_profile'][z],
-                               smoothed_reference=report['smoothed_profile'][z],
-                               measurement_corrected=report['options']['measurement'],
-                               segmentation_corrected=report['options']['segmentation']))
-    if z_rows:
-        pd.DataFrame(z_rows).to_csv(sample_export_directory / 'z_correction_profiles.csv', index=False)
+    if "csv" in outputs:
+        z_rows = []
+        for name, report in globals().get('z_correction_reports', {}).items():
+            for z, gain in enumerate(report['gain']):
+                z_rows.append(dict(channel=name, z_index=z, gain=gain,
+                                   reference_intensity=report['observed_profile'][z],
+                                   smoothed_reference=report['smoothed_profile'][z],
+                                   measurement_corrected=report['options']['measurement'],
+                                   segmentation_corrected=report['options']['segmentation']))
+        if z_rows:
+            pd.DataFrame(z_rows).to_csv(sample_export_directory / 'z_correction_profiles.csv', index=False)
 
     if EXPORT_CORRECTED_IMAGES and globals().get('z_corrected_volumes'):
         from nuclear_segmentation.image_export import export_images
@@ -697,5 +759,6 @@ if _reviewed_export_destination is not None:
 
     print(f"Analysis package saved to:\n{sample_export_directory}")
     print("\nCreated files:")
+    created_files = sorted(sample_export_directory.iterdir())
     for created_file in created_files:
         print(f"  {created_file.name}")

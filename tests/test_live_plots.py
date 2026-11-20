@@ -165,5 +165,5 @@ def test_project_live_plots_handles_missing_markers(tmp_path):
     widget = ProjectLivePlots(state); widget.resize(500, 520); widget.show()
     widget.kind.setCurrentText('Perinuclear'); QTest.qWait(450)
     assert widget.column.count() == 0
-    assert 'No measured channels available' in widget.status.text()
+    assert 'Perinuclear markers: Not configured' in widget.status.text()
     widget.dispose(); widget.close()

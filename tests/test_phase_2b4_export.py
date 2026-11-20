@@ -97,6 +97,10 @@ def test_desktop_ome_uint16_default_order_pixels_metadata_and_provenance(tmp_pat
     assert window.image_export.export(output, order, "ome", "uint16")
     assert not window.close_project(confirm=False)
     _wait(qapp, lambda: not window.image_export.busy)
+    results = panel.results.text.toPlainText()
+    assert "Multichannel TIFF\nStatus: Completed" in results
+    assert f"Destination: {output}" in results
+    assert "multichannel image TIFF and provenance JSON" in results
     with tifffile.TiffFile(output) as tif:
         assert tif.series[0].axes == "CZYX"
         saved = tif.series[0].asarray()

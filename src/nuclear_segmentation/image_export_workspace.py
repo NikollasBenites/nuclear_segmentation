@@ -22,24 +22,23 @@ from .image_export import export_images
 from .manual_review import ManualReview
 from .normalization import mask_digest
 from .runtime import execute_stage
-from .stages.export import _choose_export_destination, _export_folder_error
+from .stages.export import SCIENTIFIC_OUTPUTS, _choose_export_destination, _export_folder_error
 
 
 def _write_scientific_package(namespace):
     masks = namespace["masks"]
-    # The ImageJ encoder used for this package requires uint16 label IDs.
-    if masks.dtype.kind not in "iu" or masks.min() < 0 or masks.max() > np.iinfo(np.uint16).max:
-        raise ValueError("Scientific TIFF export requires integer label IDs from 0 to 65,535.")
-    destination = namespace["desktop_export"]["destination"]
+    export = namespace["desktop_export"]
+    destination = export["destination"]
     error = _export_folder_error(destination.parent, destination.name)
     if error:
         raise ValueError(error)
-    names = [
-        safe_filename(name).casefold()
-        for name in namespace["desktop_export"]["settings"]["perinuclear_filters"]
-    ]
-    if len(names) != len(set(names)) or "perinuclear_marker" in names:
-        raise ValueError("Marker names would produce conflicting TIFF filenames.")
+    if "tiff" in export["outputs"]:
+        # The ImageJ encoder used for this package requires uint16 label IDs.
+        if masks.dtype.kind not in "iu" or masks.min() < 0 or masks.max() > np.iinfo(np.uint16).max:
+            raise ValueError("Scientific TIFF export requires integer label IDs from 0 to 65,535.")
+        names = [safe_filename(name).casefold() for name in export["settings"]["perinuclear_filters"]]
+        if len(names) != len(set(names)) or "perinuclear_marker" in names:
+            raise ValueError("Marker names would produce conflicting TIFF filenames.")
 
     namespace["manual_review"] = ManualReview(masks, namespace["filter_properties"].index)
     try:
@@ -100,6 +99,7 @@ class ImageExportController(QObject):
     def bind_filtering(self, filtering) -> None:
         self.filtering = filtering
         self.panel.scientific_button.clicked.connect(self.choose_scientific_directory)
+        self.panel.scientific_options_changed.connect(self.refresh_scientific)
         self.project_state.quantification_result_changed.connect(self.refresh_scientific)
         filtering.panel.filters_edited.connect(self.refresh_scientific)
         filtering.status_changed.connect(self.refresh_scientific)
@@ -112,6 +112,8 @@ class ImageExportController(QObject):
             return "Scientific filtering is unavailable."
         if self.busy:
             return "An export is running."
+        if not self.panel.selected_scientific_outputs():
+            return "Select at least one scientific export output."
         if not state.segmentation_is_current or not state.filtering_is_current:
             return "Complete a current segmentation and calculate scientific measurements."
         if not state.scientific_roi_reviewed:
@@ -167,8 +169,9 @@ class ImageExportController(QObject):
             return False
         self._start(
             ImageExportWorker(partial(_write_scientific_package, namespace)),
-            {"scientific": True},
+            {"scientific": True, "outputs": namespace["desktop_export"]["outputs"]},
         )
+        self.panel.set_scientific_busy(True)
         self._scientific_status("Writing scientific results…")
         return True
 
@@ -235,8 +238,18 @@ class ImageExportController(QObject):
         device_type = segmentation.get("device_type")
         desktop_export = {
             "destination": destination,
+            "outputs": self.panel.selected_scientific_outputs(),
             "settings": settings,
             "density": density,
+            "exclusions": {
+                label: quantification[key] for label, key in (
+                    ("Morphology", "failed_morphology"),
+                    ("Nuclear intensity", "failed_intensity"),
+                    ("Perinuclear association", "failed_perinuclear"),
+                    ("Physical Z guard", "excluded_by_z_guard"),
+                    ("ROI / counting Z", "excluded_by_sampling_roi"),
+                )
+            },
             "effective_planes": quantification["effective_sampling_planes"],
             "device": segmentation.get("device", "not recorded"),
             "used_gpu": device_type != "cpu" if device_type is not None else None,
@@ -440,13 +453,19 @@ class ImageExportController(QObject):
     def _succeeded(self, path) -> None:
         details = self._pending or {}
         if details.get("scientific"):
-            self._scientific_status(f"Scientific export completed: {path}")
+            components = ", ".join(SCIENTIFIC_OUTPUTS[key] for key in details["outputs"])
+            self.panel.set_results(
+                f"Destination: {path}\nComponents: {components}, scientific provenance JSON",
+                scientific_folder=path,
+            )
+            self._scientific_status("Scientific export completed.")
             return
         names = details.get("names", [])
         self.panel.set_results(
             "\n".join(
                 (
-                    f"Saved: {path}",
+                    f"Destination: {path}",
+                    "Components: multichannel image TIFF and provenance JSON",
                     f"Format: {details.get('format')}",
                     f"Pixel type: {details.get('pixel_type')}",
                     f"Channel order: {', '.join(names)}",
@@ -469,6 +488,7 @@ class ImageExportController(QObject):
         self._worker = None
         self._pending = None
         self.panel.set_busy(False)
+        self.panel.set_scientific_busy(False)
         self.preprocessing_page.setEnabled(True)
         self.refresh_channels()
         self.refresh_scientific()
@@ -482,13 +502,16 @@ class ImageExportController(QObject):
         self.status_changed.emit(str(message))
 
     def _scientific_status(self, message: str) -> None:
-        self.panel.scientific_status.setText(message)
+        concise = message if len(message) <= 135 else message[:132].rsplit(" ", 1)[0] + "…"
+        self.panel.scientific_status.setText(concise)
+        self.panel.scientific_status.setToolTip(message if concise != message else "")
         self.panel.scientific_status.show()
-        self.status_changed.emit(message)
+        self.status_changed.emit(concise)
 
     def dispose(self) -> None:
         if self.filtering is not None:
             self.panel.scientific_button.clicked.disconnect(self.choose_scientific_directory)
+            self.panel.scientific_options_changed.disconnect(self.refresh_scientific)
             self.project_state.quantification_result_changed.disconnect(self.refresh_scientific)
             self.filtering.panel.filters_edited.disconnect(self.refresh_scientific)
             self.filtering.status_changed.disconnect(self.refresh_scientific)

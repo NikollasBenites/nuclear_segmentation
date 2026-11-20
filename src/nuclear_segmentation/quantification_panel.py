@@ -9,7 +9,7 @@ from qtpy.QtWidgets import QFormLayout, QLabel, QVBoxLayout, QWidget
 
 from .collapsible_section import CollapsibleSection
 from .core import (
-    NOMINAL_SECTION_THICKNESS_UM, calculate_density_summary, density_z_planes,
+    calculate_density_summary, density_z_planes,
     format_density_panel,
 )
 from .normalization import mask_digest
@@ -69,6 +69,12 @@ def calculate_quantification_result(project_state):
         "none": "Centroid-based sampling in ROI and effective Z",
     }[settings["z_guard_mode"]]
     _, effective_planes = density_z_planes(settings, roi.shape[0], spacing[0])
+    thickness_source = segmentation.get("nominal_section_thickness_source")
+    if thickness_source not in ("default", "user-defined"):
+        thickness_source = (
+            "default" if executed_config.get("NOMINAL_SECTION_THICKNESS_UM") is None
+            else "unknown"
+        )
 
     reasons = properties["automatic_failure_reasons"].fillna("").astype(str)
     reason_sets = reasons.map(
@@ -81,10 +87,7 @@ def calculate_quantification_result(project_state):
         "density": density,
         "roi_plane_counts": tuple(plane_counts.tolist()),
         "effective_sampling_planes": tuple(effective_planes.tolist()),
-        "nominal_section_thickness_source": (
-            "default" if density["nominal_section_thickness_um"] == NOMINAL_SECTION_THICKNESS_UM
-            else "user-defined"
-        ),
+        "nominal_section_thickness_source": thickness_source,
         "total_cellpose_masks": total,
         "retained_masks": retained,
         "excluded_masks": max(0, total - retained),

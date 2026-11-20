@@ -1,14 +1,16 @@
 """Application-owned controls for scientific results and prepared images."""
 from __future__ import annotations
 
-from qtpy.QtCore import QEvent, QLineF, QRect, QRectF, QSize, Qt, Signal
-from qtpy.QtGui import QColor, QPainter, QPen
+from qtpy.QtCore import QEvent, QLineF, QRect, QRectF, QSize, Qt, QUrl, Signal
+from qtpy.QtGui import QColor, QDesktopServices, QPainter, QPen
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QGridLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QProgressBar,
     QPushButton,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -18,6 +20,7 @@ from qtpy.QtWidgets import (
 
 from .collapsible_section import CollapsibleSection
 from .results_panel import ScientificResultsSection
+from .stages.export import SCIENTIFIC_OUTPUTS
 
 
 class _ExportChannelDelegate(QStyledItemDelegate):
@@ -102,20 +105,59 @@ class _ExportChannelDelegate(QStyledItemDelegate):
 
 class ImageExportPanel(QWidget):
     export_requested = Signal(object, str, str)
+    scientific_options_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._busy = False
+        self._export_results = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 8, 0, 0)
+        options = CollapsibleSection("scientific_export_options", "Scientific Export Options")
+        outputs = QVBoxLayout()
+        outputs.setContentsMargins(10, 8, 10, 10)
+        self.scientific_options = {}
+        for key, name in SCIENTIFIC_OUTPUTS.items():
+            checkbox = QCheckBox(name)
+            checkbox.setChecked(True)
+            checkbox.toggled.connect(self.scientific_options_changed)
+            self.scientific_options[key] = checkbox
+            outputs.addWidget(checkbox)
+        bulk = QGridLayout()
+        for column, (title, checked) in enumerate((("Select All", True), ("Clear Optional", False))):
+            button = QPushButton(title)
+            button.clicked.connect(lambda _, value=checked: self._check_scientific_options(value))
+            bulk.addWidget(button, 0, column)
+        outputs.addLayout(bulk)
+        provenance = QLabel("Every export includes scientific provenance JSON.")
+        provenance.setWordWrap(True)
+        outputs.addWidget(provenance)
+        options.set_content_layout(outputs)
+        self.scientific_options_section = options
+        outer.addWidget(options)
         self.scientific_button = QPushButton("Export Scientific Results")
+        self.scientific_button.setStyleSheet("""
+            QPushButton { background: #8ae2d8; color: #102832; font-weight: bold;
+                          border-radius: 5px; padding: 8px; }
+            QPushButton:disabled { background: #253441; color: #9baab5; }
+        """)
         self.scientific_button.setEnabled(False)
         outer.addWidget(self.scientific_button)
+        self.scientific_progress = QProgressBar()
+        self.scientific_progress.setRange(0, 0)
+        self.scientific_progress.setTextVisible(False)
+        self.scientific_progress.hide()
+        outer.addWidget(self.scientific_progress)
         self.scientific_status = QLabel()
         self.scientific_status.setTextFormat(Qt.TextFormat.PlainText)
         self.scientific_status.setWordWrap(True)
         self.scientific_status.hide()
         outer.addWidget(self.scientific_status)
+        self.open_export_folder = QPushButton("Open Export Folder")
+        self.open_export_folder.hide()
+        self.open_export_folder.clicked.connect(self._open_scientific_folder)
+        outer.addWidget(self.open_export_folder)
+        self._scientific_folder = None
         section = CollapsibleSection("multichannel_tiff_export", "Multichannel TIFF Export")
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 8, 10, 10)
@@ -173,6 +215,7 @@ class ImageExportPanel(QWidget):
         section.set_content_layout(layout)
         outer.addWidget(section)
         self.results = ScientificResultsSection("image_export_results", "Export Results")
+        self.results.set_results("No export completed.")
         outer.addWidget(self.results)
         outer.addStretch(1)
 
@@ -260,6 +303,22 @@ class ImageExportPanel(QWidget):
         self.channels.setEnabled(not busy)
         self._update_selection_state()
 
+    def selected_scientific_outputs(self):
+        return tuple(key for key, field in self.scientific_options.items() if field.isChecked())
+
+    def _check_scientific_options(self, checked: bool) -> None:
+        for field in self.scientific_options.values():
+            field.setChecked(checked)
+
+    def set_scientific_busy(self, busy: bool) -> None:
+        self.scientific_options_section.content.setEnabled(not busy)
+        self.scientific_progress.setVisible(busy)
+        self.scientific_button.setText("Exporting Scientific Results…" if busy else "Export Scientific Results")
+
+    def _open_scientific_folder(self) -> None:
+        if self._scientific_folder is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._scientific_folder)))
+
     def _update_selection_state(self, item=None) -> None:
         checked = 0
         total = self.channels.count()
@@ -279,8 +338,13 @@ class ImageExportPanel(QWidget):
     def set_status(self, message: str) -> None:
         self.status.setText(str(message).splitlines()[0])
 
-    def set_results(self, text: str) -> None:
-        self.results.set_results(text)
+    def set_results(self, text: str, *, scientific_folder=None) -> None:
+        key = "Scientific Results" if scientific_folder is not None else "Multichannel TIFF"
+        self._export_results[key] = f"{key}\nStatus: Completed\n{text}"
+        self.results.set_results("\n\n".join(self._export_results.values()))
+        if scientific_folder is not None:
+            self._scientific_folder = scientific_folder
+            self.open_export_folder.show()
 
     def reset(self) -> None:
         self.channels.clear()
@@ -289,7 +353,11 @@ class ImageExportPanel(QWidget):
         self.pixel_type_combo.setCurrentIndex(0)
         self.export_button.setEnabled(False)
         self.status.setText("Generate prepared channel previews before exporting.")
-        self.results.set_results("No image export completed.")
+        self._export_results.clear()
+        self.results.set_results("No export completed.")
+        self._scientific_folder = None
+        self.open_export_folder.hide()
+        self._check_scientific_options(True)
         self.scientific_status.clear()
         self.scientific_status.hide()
         self._update_selection_state()

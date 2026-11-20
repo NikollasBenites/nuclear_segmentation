@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from qtpy.QtCore import Qt, Signal
-from qtpy.QtWidgets import QLabel, QScrollArea, QStackedWidget, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QLabel, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget
 
 from .workflow_navigation import WORKFLOWS
 from .project_panel import ProjectPanel
@@ -99,14 +99,12 @@ class ContextPanel(QWidget):
                 continue
             if workflow.key == "quality_control":
                 self.quality_control_page = ProjectLivePlots(project_state)
-                quality_scroll = QScrollArea()
-                quality_scroll.setWidgetResizable(True)
-                quality_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-                quality_scroll.setHorizontalScrollBarPolicy(
-                    Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-                )
-                quality_scroll.setWidget(self.quality_control_page)
-                self._indexes[workflow.key] = self.stack.addWidget(quality_scroll)
+                page = QWidget()
+                controls = QVBoxLayout(page)
+                self.show_graphs_button = QPushButton("Show Graphs")
+                controls.addWidget(self.show_graphs_button)
+                controls.addStretch(1)
+                self._indexes[workflow.key] = self.stack.addWidget(page)
                 continue
             if workflow.key == "export":
                 self.export_page = ImageExportPanel()

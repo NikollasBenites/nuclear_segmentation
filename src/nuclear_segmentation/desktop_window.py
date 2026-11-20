@@ -7,6 +7,7 @@ import logging
 from qtpy.QtCore import QSize, Qt, QThread
 from qtpy.QtGui import QAction, QKeySequence
 from qtpy.QtWidgets import (
+    QDialog,
     QHBoxLayout,
     QFileDialog,
     QLabel,
@@ -18,6 +19,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from .collapsible_section import CollapsibleSection
 from .context_panel import ContextPanel
 from .crop_workspace import CropWorkspaceController
 from .image_import import TiffImportWorker, inspect_tiff
@@ -96,6 +98,11 @@ class DesktopWindow(QMainWindow):
         viewer_layout.addWidget(self.viewer_toolbar)
         viewer_layout.addWidget(self.embedding, 1)
         self.context_panel = ContextPanel(self.project_state)
+        self.graph_window = QDialog(self)
+        self.graph_window.setWindowTitle("NuCytoSeg — Quality Control")
+        self.graph_window.resize(780, 620)
+        QVBoxLayout(self.graph_window).addWidget(self.context_panel.quality_control_page)
+        self.context_panel.show_graphs_button.clicked.connect(self.graph_window.show)
         self.context_container = self._build_context_container()
         self.mask_selection = MaskSelectionController(self.embedding.viewer, self)
         self.crop_workspace = CropWorkspaceController(
@@ -286,12 +293,16 @@ class DesktopWindow(QMainWindow):
         header_layout.addWidget(self.context_collapse_button)
         layout.addWidget(header)
         layout.addWidget(self.context_panel, 1)
-        layer_title = QLabel("Layers")
-        layer_title.setObjectName("panelTitle")
-        layer_title.setContentsMargins(16, 10, 0, 2)
-        layout.addWidget(layer_title)
+        self.layers_section = CollapsibleSection("layers", "Layers")
         self.layer_panel = LayerPanel(self.embedding.viewer)
-        layout.addWidget(self.layer_panel, 1)
+        layers_layout = QVBoxLayout()
+        layers_layout.setContentsMargins(0, 0, 0, 0)
+        layers_layout.addWidget(self.layer_panel)
+        self.layers_section.set_content_layout(layers_layout)
+        layout.addWidget(self.layers_section, 1)
+        self.layers_section.expanded_changed.connect(
+            lambda _, expanded: layout.setStretchFactor(self.layers_section, int(expanded))
+        )
         self.image_display_panel = ImageDisplayPanel(
             self.embedding.viewer, self.project_state
         )
@@ -322,6 +333,12 @@ class DesktopWindow(QMainWindow):
         self.header_workflow.setObjectName("headerWorkflow")
         layout.addWidget(self.header_workflow)
         layout.addStretch(1)
+
+        self.parameters_button = QToolButton()
+        self.parameters_button.setObjectName("headerActionButton")
+        self.parameters_button.setDefaultAction(self.toggle_context_action)
+        self.parameters_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        layout.addWidget(self.parameters_button)
 
         for action, icon_name, tooltip in (
             (self.focus_action, "focus", "Toggle Focus Mode"),
@@ -378,7 +395,7 @@ class DesktopWindow(QMainWindow):
         self.toggle_navigation_action.setShortcut("Ctrl+Shift+L")
         self.toggle_navigation_action.toggled.connect(self._toggle_navigation)
 
-        self.toggle_context_action = QAction("Contextual Parameters", self)
+        self.toggle_context_action = QAction("Hide Parameters", self)
         self.toggle_context_action.setCheckable(True)
         self.toggle_context_action.setChecked(True)
         self.toggle_context_action.setShortcut("Ctrl+Shift+R")
@@ -516,6 +533,7 @@ class DesktopWindow(QMainWindow):
             return False
         if confirm and not self._confirm_close_project():
             return False
+        self.graph_window.hide()
         self.mask_selection.clear_selection()
         self.selected_mask_panel.set_selection(None, None)
         self.context_panel.mask_review_page.set_selection(None, None)
@@ -951,6 +969,7 @@ class DesktopWindow(QMainWindow):
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
         self.context_panel.set_workflow(key)
+        self.graph_window.setVisible(self.isVisible() and key == "quality_control")
         label = self.context_panel.heading.text()
         if hasattr(self, "workflow_status"):
             self.workflow_status.setText(f"Workflow: {label}")
@@ -966,6 +985,7 @@ class DesktopWindow(QMainWindow):
 
     def _toggle_context(self, visible: bool) -> None:
         self.context_container.setVisible(visible)
+        self.toggle_context_action.setText("Hide Parameters" if visible else "Show Parameters")
 
     def hide_context_panel(self) -> None:
         self.toggle_context_action.setChecked(False)
@@ -1122,6 +1142,11 @@ class DesktopWindow(QMainWindow):
             """
         )
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self.navigation.current_workflow == "quality_control":
+            self.graph_window.show()
+
     def closeEvent(self, event) -> None:
         if self._import_thread is not None and self._import_thread.isRunning():
             self._close_when_import_finishes = True
@@ -1163,6 +1188,7 @@ class DesktopWindow(QMainWindow):
             self.context_panel.segmentation_page.dispose()
             self.context_panel.mask_review_page.dispose()
             self.context_panel.quantification_page.dispose()
+            self.graph_window.close()
             self.context_panel.quality_control_page.dispose()
             self.layer_panel.dispose()
             self.image_display_panel.dispose()

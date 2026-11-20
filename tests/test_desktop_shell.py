@@ -70,17 +70,33 @@ def test_main_window_initialization_and_navigation(window):
 
 def test_quality_control_uses_one_persistent_plot_widget(window, qapp):
     plots = window.context_panel.quality_control_page
+    graphs = window.graph_window
     window.set_workflow("quality_control")
     QTest.qWait(350)
     assert window.context_panel.heading.text() == "Quality Control"
     assert plots.isVisible()
+    assert graphs.isVisible() and graphs.parent() is window
     assert "no current segmentation" in plots.status.text().lower()
-    canvas = plots.canvas
+    canvas, toolbar = plots.canvas, plots.toolbar
+    plots.kind.setCurrentText("Intensity")
+    plots.column.addItems(["Channel A", "Channel B"])
+    plots.column.setCurrentIndex(1)
     window.set_workflow("project")
+    assert graphs.isHidden() and not plots.timer.isActive()
     window.set_workflow("quality_control")
     qapp.processEvents()
     assert window.context_panel.quality_control_page is plots
-    assert plots.canvas is canvas
+    assert plots.canvas is canvas and plots.toolbar is toolbar
+    assert plots.kind.currentText() == "Intensity"
+    assert plots.column.currentText() == "Channel B"
+    graphs.close()
+    assert graphs.isHidden()
+    window.context_panel.show_graphs_button.click()
+    assert window.graph_window is graphs and graphs.isVisible()
+    window.embedding.viewer.add_image(np.ones((2, 3, 4)))
+    assert window.close_project(confirm=False)
+    assert graphs.isHidden() and not plots.z_profile
+    assert not plots.timer.isActive() and not plots.z_timer.isActive()
 
 
 def test_panel_collapse_expansion_and_context_visibility(window, qapp):
@@ -95,9 +111,47 @@ def test_panel_collapse_expansion_and_context_visibility(window, qapp):
     window.hide_context_panel()
     qapp.processEvents()
     assert not window.context_container.isVisible()
-    window.toggle_context_action.setChecked(True)
+    assert window.parameters_button.isVisible()
+    assert window.parameters_button.text() == "Show Parameters"
+    assert window.parameters_button.defaultAction() is window.toggle_context_action
+    assert window.toggle_context_action.shortcut().toString() == "Ctrl+Shift+R"
+    window.parameters_button.click()
     qapp.processEvents()
     assert window.context_container.isVisible()
+    assert window.toggle_context_action.isChecked()
+    assert window.parameters_button.text() == "Hide Parameters"
+
+
+def test_layers_collapse_reuses_panel_and_gives_parameters_more_space(window, qapp):
+    window.resize(1440, 1050)
+    viewer = window.embedding.viewer
+    layers = tuple(viewer.layers)
+    layer_panel = window.layer_panel
+    selected = layers[-1]
+    viewer.layers.selection.active = selected
+    selected.visible = False
+    QTest.qWait(30)
+    parameters_height = window.context_panel.height()
+    display = window.image_display_panel.section
+    display_state = display.expanded
+
+    window.layers_section.header.click()
+    QTest.qWait(30)
+    assert not window.layers_section.expanded
+    assert not layer_panel.isVisible()
+    assert window.selected_mask_panel.isVisible()
+    assert window.context_panel.height() > parameters_height
+    assert display.expanded == display_state
+    window.set_workflow("export")
+    assert not window.layers_section.expanded
+    display.header.click()
+    assert not window.layers_section.expanded
+    window.layers_section.header.click()
+    qapp.processEvents()
+    assert display.expanded != display_state
+    assert window.layer_panel is layer_panel and layer_panel.isVisible()
+    assert tuple(viewer.layers) == layers
+    assert viewer.layers.selection.active is selected and not selected.visible
 
 
 def test_focus_mode_restores_unsaved_normal_layout(window, qapp):
@@ -436,7 +490,7 @@ def test_review_3d_ray_picking_nearest_rotation_spacing_and_persistence(window):
     assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: 22"
     sidebar_layout = window.context_container.layout()
     assert sidebar_layout.indexOf(window.selected_mask_panel) > sidebar_layout.indexOf(
-        window.layer_panel
+        window.layers_section
     )
 
     empty_position = np.asarray(labels.data_to_world((5, 1, 1)), dtype=float)

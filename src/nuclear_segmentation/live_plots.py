@@ -87,6 +87,8 @@ class LivePlots(QWidget):
             self.timer.start()
 
     def hideEvent(self, event):
+        if self.z_timer.isActive():
+            self.dirty = True
         self.timer.stop()
         self.z_timer.stop()
         super().hideEvent(event)
@@ -173,7 +175,10 @@ class LivePlots(QWidget):
         else:
             column = 'volume_um3' if kind == 'Volume' else self.column.currentData()
             if not column or column not in props:
-                self.status.setText('No measured channels available for this graph.')
+                self.status.setText(
+                    'Perinuclear markers: Not configured' if kind == 'Perinuclear'
+                    else 'No measured channels available for this graph.'
+                )
                 self.canvas.draw_idle()
                 return
             values = props[column].to_numpy(float)
