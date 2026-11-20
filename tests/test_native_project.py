@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 import tifffile
 from qtpy.QtCore import QSettings
-from qtpy.QtWidgets import QApplication, QFileDialog, QMessageBox
+from qtpy.QtWidgets import QApplication, QComboBox, QDialog, QFileDialog, QLineEdit, QMessageBox
 
 from nuclear_segmentation import native_project
 from nuclear_segmentation.core import file_sha256
@@ -19,6 +19,7 @@ from nuclear_segmentation.lif_import import load_lif_dataset
 from nuclear_segmentation.manual_review import ManualReview
 from nuclear_segmentation.projection_crop import polygon_roi_mask
 from nuclear_segmentation.scientific_input import prepare_scientific_input
+from test_cellpose_execution import _fake_result
 from test_desktop_normalization import FakeQtViewer, _wait, _window_with_tiff
 from test_lif_import import FakeBioImage
 
@@ -654,3 +655,58 @@ def test_empty_cytoplasmic_session_has_no_nuclear_execution_or_density(project):
     assert not window.segmentation.run()
     assert not state.quantification_is_current
     assert "nuclear sessions" in window.context_panel.quantification_page.status.text()
+
+
+def test_nuclear_session_worker_uses_its_source_channel(project, monkeypatch):
+    window, app, _, image, _ = project
+    state = window.project_state
+    panel = window.context_panel.project_page
+    inputs = []
+
+    def runner(scientific, progress):
+        pixels = scientific.namespace["model_input_volume"]
+        inputs.append(pixels.copy())
+        result = _fake_result(scientific)
+        result["masks"].fill(0)
+        result["masks"][:, 1, 1 if pixels[0, 0, 0] == image[0, 0, 0, 0] else 4] = 1
+        return result
+
+    window.segmentation.runner = runner
+    assert window.segmentation.run()
+    _wait(app, lambda: not window.segmentation.busy)
+    first_result = state.segmentation_result
+    def choose_second_channel(dialog):
+        assert dialog.windowTitle() == "New Segmentation Session"
+        dialog.findChild(QLineEdit).setText("nuclear2")
+        source = next(combo for combo in dialog.findChildren(QComboBox) if combo.findData(1) >= 0)
+        source.setCurrentIndex(source.findData(1))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", choose_second_channel)
+    panel.new_session_button.click()
+    second = state.active_session
+    assert second.display_name == "nuclear2"
+    assert window.segmentation.result_layer is None
+    assert window.segmentation.run()
+    _wait(app, lambda: not window.segmentation.busy)
+
+    np.testing.assert_array_equal(inputs[0], image[0])
+    np.testing.assert_array_equal(inputs[1], image[1])
+    second_result = state.segmentation_result
+    assert first_result["segmentation_channel"] == "DAPI"
+    assert second_result["segmentation_channel"] == "MAP2"
+    assert not np.array_equal(first_result["masks"], second_result["masks"])
+
+    panel.session_combo.setCurrentIndex(panel.session_combo.findData("nuclear"))
+    np.testing.assert_array_equal(window.segmentation.result_layer.data, first_result["masks"])
+    panel.session_combo.setCurrentIndex(panel.session_combo.findData(second.session_id))
+    np.testing.assert_array_equal(window.segmentation.result_layer.data, second_result["masks"])
+    assert window.segmentation.result_layer.name == "nuclear2 · Raw Cellpose masks"
+    summary = window.context_panel.segmentation_page.result_summary
+    assert "Session: nuclear2" in summary.text()
+    assert "Input channel: MAP2" in summary.text()
+    layer = window.segmentation.result_layer
+    state.rename_session(second.session_id, "Replicate")
+    assert window.segmentation.result_layer is layer
+    assert layer.name == "Replicate · Raw Cellpose masks"
+    assert "Session: Replicate" in summary.text()

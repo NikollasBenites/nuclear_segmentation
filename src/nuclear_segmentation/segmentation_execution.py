@@ -124,6 +124,7 @@ class SegmentationController(QObject):
         panel.run_requested.connect(self.run)
         panel.configuration_changed.connect(self._configuration_changed)
         project_state.segmentation_result_changed.connect(self._sync_result_layer)
+        project_state.sessions_changed.connect(self._refresh_result_layer_name)
 
     @property
     def busy(self) -> bool:
@@ -285,13 +286,34 @@ class SegmentationController(QObject):
             spacing = tuple(self.project_state.voxel_spacing_zyx_um)
             offset_y, offset_x = self.project_state.working_offset_yx
             self._result_layer = self.viewer.add_labels(
-                result["masks"], name="Raw Cellpose masks" if current else "Raw Cellpose masks — outdated", scale=spacing,
+                result["masks"], name=self._result_layer_name(current), scale=spacing,
                 translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
-                metadata={**state.mask_layer_metadata(), "nucytoseg_raw_segmentation": True},
+                metadata={
+                    **state.mask_layer_metadata(),
+                    "nucytoseg_raw_segmentation": True,
+                    "session_display_name": state.active_session.display_name,
+                },
             )
             self._result_layer.editable = False
         elif self._result_layer is not None and self._result_layer in self.viewer.layers:
-            self._result_layer.name = "Raw Cellpose masks — outdated"
+            self._result_layer.name = self._result_layer_name(current)
+
+    def _result_layer_name(self, current: bool) -> str:
+        session = self.project_state.active_session
+        name = "Raw Cellpose masks"
+        if (session.session_id, session.display_name) != ("nuclear", "Nuclear"):
+            name = f"{session.display_name} · {name}"
+        return name if current else f"{name} — outdated"
+
+    def _refresh_result_layer_name(self) -> None:
+        layer = self.result_layer
+        state = self.project_state
+        if not state.owns_mask_layer(layer):
+            return
+        display_name = state.active_session.display_name
+        if layer.metadata.get("session_display_name") != display_name:
+            layer.metadata["session_display_name"] = display_name
+            layer.name = self._result_layer_name(state.segmentation_is_current)
 
     def clear_project(self) -> None:
         if self._result_layer is not None and self._result_layer in self.viewer.layers:
@@ -308,6 +330,7 @@ class SegmentationController(QObject):
         self.clear_project()
         self.panel.run_requested.disconnect(self.run)
         self.panel.configuration_changed.disconnect(self._configuration_changed)
+        self.project_state.sessions_changed.disconnect(self._refresh_result_layer_name)
         self.project_state.segmentation_result_changed.disconnect(
             self._sync_result_layer
         )

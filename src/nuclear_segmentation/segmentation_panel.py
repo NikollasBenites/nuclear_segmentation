@@ -210,6 +210,7 @@ class SegmentationPanel(QWidget):
         project_state.normalization_changed.connect(self.refresh)
         project_state.z_correction_changed.connect(self.refresh)
         project_state.segmentation_result_changed.connect(self._result_changed)
+        project_state.sessions_changed.connect(self._refresh_result_summary)
         self.execute_button.clicked.connect(self.run_requested)
         self.view_parameters_button.toggled.connect(
             self.executed_parameters.setVisible
@@ -275,7 +276,8 @@ class SegmentationPanel(QWidget):
         )
         return "\n".join((
             "Status: Completed",
-            "Segmentation type: Nuclear",
+            f"Session: {self.project_state.active_session.display_name}",
+            f"Segmentation type: {self.project_state.active_session.scientific_role.title()}",
             f"Model: {result.get('model_name', config.get('MODEL_NAME', '—'))}",
             f"Device: {result.get('device', config.get('PROCESSING_DEVICE', '—'))}",
             f"Mode: {'3D' if do_3d else '2D + stitching'}",
@@ -284,6 +286,11 @@ class SegmentationPanel(QWidget):
             f"Input processing: {processing}",
             f"Normalization: {normalization}",
         ))
+
+    def _refresh_result_summary(self) -> None:
+        result = self.project_state.segmentation_result
+        if result is not None and self.project_state.segmentation_is_current:
+            self.result_summary.setText(self._format_result_summary(result))
 
     def _format_executed_parameters(self, result) -> str:
         config = self._executed_config(result)
@@ -530,3 +537,4 @@ class SegmentationPanel(QWidget):
         state.normalization_changed.disconnect(self.refresh)
         state.z_correction_changed.disconnect(self.refresh)
         state.segmentation_result_changed.disconnect(self._result_changed)
+        state.sessions_changed.disconnect(self._refresh_result_summary)
