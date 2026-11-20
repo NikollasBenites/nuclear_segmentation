@@ -1116,6 +1116,10 @@ class DesktopWindow(QMainWindow):
                 background: #0f1923; border: 1px solid #314759; border-radius: 4px;
             }
             #contextContainer QListWidget::item:selected { background: #15546b; color: #f2fbfc; }
+            #contextContainer QComboBox QAbstractItemView {
+                background: #0f1923; color: #dce7f1;
+                selection-background-color: #15546b; selection-color: #f2fbfc;
+            }
             QScrollArea QScrollBar:vertical { background: #142431; width: 12px; margin: 0; }
             QScrollArea QScrollBar::handle:vertical { background: #466176; min-height: 24px; border-radius: 4px; }
             QScrollArea QScrollBar::add-line:vertical, QScrollArea QScrollBar::sub-line:vertical { height: 0; }

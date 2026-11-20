@@ -6,12 +6,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
-from qtpy.QtCore import QByteArray, QSettings, Qt
-from qtpy.QtWidgets import QApplication, QWidget
+from qtpy.QtCore import QByteArray, QEvent, QSettings, Qt
+from qtpy.QtGui import QHelpEvent
+from qtpy.QtWidgets import QApplication, QStyle, QStyleOptionComboBox, QToolTip, QWidget
 from qtpy.QtTest import QTest
 
 from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.layer_panel import LAYER_ROLE
+from nuclear_segmentation.project_state import ChannelDescriptor, ImportedDataset
 from nuclear_segmentation.ui_icons import icon
 from nuclear_segmentation.workspace_settings import SETTINGS_GROUP
 
@@ -111,6 +113,103 @@ def test_hierarchical_navigation_at_supported_sizes(window, size):
     navigation.collapse_button.click()
     assert navigation._submenus["mask_review"].isVisible()
     assert navigation._subpage_buttons["mask_review"]["mask_editing"].isChecked()
+
+
+@pytest.mark.parametrize("size", [(1024, 680), (1440, 900)])
+@pytest.mark.parametrize("parameters_width", [320, 540])
+def test_scientific_dropdowns_fit_panel_and_long_popup_options(window, tmp_path, size, parameters_width):
+    window.resize(*size)
+    window.splitter.setSizes([200, size[0] - 208 - parameters_width, parameters_width])
+    names = ("DAPI nuclear reference", "Acquisition channel — " + "long fluorescence name " * 3)
+    pixels = np.zeros((2, 2, 8, 8), dtype=np.uint16)
+    window.project_state.set_dataset(ImportedDataset(
+        source_path=tmp_path / "channels.tif", source_format="TIFF",
+        series_index=0, series_identifier="0", series_name="Channels",
+        reported_axes="CZYX", reported_shape=pixels.shape, standardized_shape=pixels.shape,
+        dtype=str(pixels.dtype), data_czyx=pixels, voxel_spacing_zyx_um=(1., 1., 1.),
+        calibration_source="test",
+        channels=tuple(ChannelDescriptor(i, name, name) for i, name in enumerate(names)),
+    ))
+    context = window.context_panel
+    projection = context.preprocessing_page
+    z_panel = projection.z_correction_panel
+    review = context.mask_review_page
+    review.add_marker()
+    export = context.export_page
+    preparation = export.image_preparation_panel
+    groups = (
+        ("preprocessing", "crop_roi", (projection.channel_combo, projection.method_combo)),
+        ("preprocessing", "z_correction", (z_panel.inspect_combo, z_panel.results_channel_combo)),
+        ("preprocessing", "normalization", (projection.normalization_channel_combo, projection.normalization_mode_combo)),
+        ("mask_review", "filtering", (review.marker_rows[0].channel,)),
+        ("export", "multichannel_images", (preparation.inspect_combo, preparation.scope_combo, export.pixel_type_combo)),
+    )
+    for workflow, subpage, combos in groups:
+        window.set_workflow(workflow)
+        window.navigation.set_subpage(subpage, emit=True)
+        QTest.qWait(30)
+        assert window.context_container.width() == parameters_width
+        scroll = context._subpage_stacks[workflow].currentWidget()
+        assert scroll.horizontalScrollBar().maximum() == 0
+        if subpage == "crop_roi":
+            assert projection.channel_combo.width() == projection.method_combo.width()
+        for combo in combos:
+            option = QStyleOptionComboBox()
+            combo.initStyleOption(option)
+            edit = combo.style().subControlRect(
+                QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, combo,
+            )
+            assert combo.width() >= scroll.viewport().width() - 65
+            assert edit.width() >= combo.fontMetrics().horizontalAdvance(combo.currentText())
+
+        combo = combos[0]
+        data = combo.currentData()
+        scroll.ensureWidgetVisible(combo, 0, 0)
+        combo.showPopup()
+        try:
+            QTest.qWait(20)
+            view = combo.view()
+            assert view.isVisible()
+            assert view.viewport().width() >= view.sizeHintForColumn(0)
+            assert not view.horizontalScrollBar().isVisible()
+            assert view.window().frameGeometry().right() <= combo.screen().availableGeometry().right()
+        finally:
+            combo.hidePopup()
+        point = combo.rect().center()
+        QApplication.sendEvent(combo, QHelpEvent(QEvent.Type.ToolTip, point, combo.mapToGlobal(point)))
+        assert combo.toolTip() == combo.currentText()
+        QToolTip.hideText()
+        assert combo.currentData() == data
+
+
+def test_z_correction_sections_collapse_to_headers_and_expand_in_place(window):
+    window.set_workflow("preprocessing")
+    window.navigation.set_subpage("z_correction", emit=True)
+    context = window.context_panel
+    scroll = context._subpage_stacks["preprocessing"].currentWidget()
+    panel = context.preprocessing_page.z_correction_panel
+    correction = panel.layout().itemAt(0).widget()
+    results = panel.results
+    QTest.qWait(30)
+    for section in (correction, results):
+        assert section.height() > section.header.height()
+        section.header.click()
+    QTest.qWait(30)
+    assert not correction.expanded and not results.expanded
+    assert all(section.height() == section.header.height() for section in (correction, results))
+    assert correction.y() == 0
+    assert results.y() == correction.height() + panel.layout().spacing()
+    assert results.geometry().bottom() < scroll.viewport().height() - 1
+    assert scroll.verticalScrollBar().maximum() == 0
+    results.header.click()
+    QTest.qWait(30)
+    assert correction.height() == correction.header.height()
+    assert results.expanded and results.height() > results.header.height()
+    correction.header.click()
+    QTest.qWait(30)
+    assert correction.expanded and results.expanded
+    assert scroll.verticalScrollBar().maximum() > 0
+    assert panel.results is results
 
 
 def test_quality_control_uses_one_persistent_plot_widget(window, qapp):

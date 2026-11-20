@@ -20,6 +20,7 @@ from qtpy.QtWidgets import (
 from .collapsible_section import CollapsibleSection
 from .image_preparation import ROUTE_LABELS, validate_preparation_options
 from .results_panel import ScientificResultsSection
+from .ui_layout import add_stacked_combo_row
 
 
 class ImagePreparationPanel(QWidget):
@@ -59,6 +60,7 @@ class ImagePreparationPanel(QWidget):
         layout.addLayout(selection)
         form = QFormLayout()
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.inspect_combo = QComboBox()
         self.route_combo = QComboBox()
         self.lower = QDoubleSpinBox()
@@ -74,17 +76,13 @@ class ImagePreparationPanel(QWidget):
         self.scope_combo.addItem(
             "Working bounding box (includes exterior fill)", "working_bbox"
         )
-        for combo in (self.inspect_combo, self.route_combo, self.scope_combo):
-            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-            combo.currentTextChanged.connect(combo.setToolTip)
-            combo.setToolTip(combo.currentText())
         self.clip = QCheckBox("Clip normalized output to 0–1")
         self.clip.setChecked(True)
-        form.addRow("Configure channel", self.inspect_combo)
-        form.addRow("Processing route", self.route_combo)
+        add_stacked_combo_row(form, "Configure channel", self.inspect_combo)
+        add_stacked_combo_row(form, "Processing route", self.route_combo)
         form.addRow("Lower percentile", self.lower)
         form.addRow("Upper percentile", self.upper)
-        form.addRow("Sampling scope", self.scope_combo)
+        add_stacked_combo_row(form, "Sampling scope", self.scope_combo)
         form.addRow(self.clip)
         layout.addLayout(form)
         actions = QGridLayout()

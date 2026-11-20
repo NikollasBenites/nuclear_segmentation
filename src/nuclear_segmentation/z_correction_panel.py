@@ -21,6 +21,7 @@ from qtpy.QtWidgets import (
 
 from .collapsible_section import CollapsibleSection
 from .results_panel import ScientificResultsSection
+from .ui_layout import add_stacked_combo_row
 from .z_correction import DEFAULTS, validate_options
 
 
@@ -67,9 +68,9 @@ class ZCorrectionPanel(QWidget):
         layout.addLayout(selection_buttons)
         form = QFormLayout()
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.inspect_combo = QComboBox()
-        self.inspect_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        form.addRow("Inspect/settings channel", self.inspect_combo)
+        add_stacked_combo_row(form, "Inspect/settings channel", self.inspect_combo)
         self.fields = {}
         for key, label, minimum, maximum in (
             ("percentile", "Reference percentile", 0.001, 100.0),
@@ -135,9 +136,9 @@ class ZCorrectionPanel(QWidget):
         results_selector = QWidget()
         results_selector_layout = QFormLayout(results_selector)
         results_selector_layout.setContentsMargins(0, 0, 0, 0)
+        results_selector_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.results_channel_combo = QComboBox()
-        self.results_channel_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        results_selector_layout.addRow("Results channel", self.results_channel_combo)
+        add_stacked_combo_row(results_selector_layout, "Results channel", self.results_channel_combo)
         self.results.insert_widget(0, results_selector)
 
         from matplotlib.backends.backend_qtagg import (
@@ -161,6 +162,7 @@ class ZCorrectionPanel(QWidget):
         self.results.insert_widget(4, self.profile_note)
         self.clear_profiles()
         outer.addWidget(self.results)
+        outer.addStretch(1)
 
         self.select_all_button.clicked.connect(self.channel_list.selectAll)
         self.clear_selection_button.clicked.connect(self.channel_list.clearSelection)

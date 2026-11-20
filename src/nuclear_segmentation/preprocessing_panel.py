@@ -16,6 +16,7 @@ from qtpy.QtWidgets import (
 
 from .collapsible_section import CollapsibleSection
 from .results_panel import ScientificResultsSection
+from .ui_layout import add_stacked_combo_row, fit_combo_text
 from .z_correction_panel import ZCorrectionPanel
 
 
@@ -53,6 +54,7 @@ class PreprocessingPanel(QWidget):
         normalization_form = QFormLayout()
         normalization_form.setContentsMargins(10, 8, 10, 10)
         normalization_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        normalization_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.normalization_channel_combo = QComboBox()
         self.normalization_input_combo = QComboBox()
         self.normalization_mode_combo = QComboBox()
@@ -66,13 +68,12 @@ class PreprocessingPanel(QWidget):
             "ROI-derived fixed limits", "roi_fixed"
         )
         self.normalization_mode_combo.addItem("Disabled normalization", "disabled")
-        for combo in (
-            self.normalization_channel_combo, self.normalization_input_combo,
-            self.normalization_mode_combo,
+        for label, combo in (
+            ("Source channel", self.normalization_channel_combo),
+            ("Normalization preview input", self.normalization_input_combo),
+            ("Mode", self.normalization_mode_combo),
         ):
-            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-            combo.currentTextChanged.connect(combo.setToolTip)
-            combo.setToolTip(combo.currentText())
+            add_stacked_combo_row(normalization_form, label, combo)
         self.normalization_lower = QDoubleSpinBox()
         self.normalization_upper = QDoubleSpinBox()
         for widget, value in (
@@ -84,13 +85,6 @@ class PreprocessingPanel(QWidget):
             widget.setValue(value)
         self.normalization_norm3d = QCheckBox("Normalize across Z (norm3D)")
         self.normalization_norm3d.setChecked(True)
-        normalization_form.addRow(
-            "Source channel", self.normalization_channel_combo
-        )
-        normalization_form.addRow(
-            "Normalization preview input", self.normalization_input_combo
-        )
-        normalization_form.addRow("Mode", self.normalization_mode_combo)
         normalization_form.addRow("Lower percentile", self.normalization_lower)
         normalization_form.addRow("Upper percentile", self.normalization_upper)
         normalization_form.addRow("norm3D", self.normalization_norm3d)
@@ -197,12 +191,14 @@ class PreprocessingPanel(QWidget):
         projection = CollapsibleSection("projection", "XY Projection")
         projection_form = QFormLayout()
         projection_form.setContentsMargins(10, 8, 10, 10)
-        projection_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        projection_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        projection_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.channel_combo = QComboBox()
-        self.channel_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.method_combo = QComboBox()
         self.method_combo.addItem("Maximum intensity", "maximum")
         self.method_combo.addItem("Mean intensity", "mean")
+        fit_combo_text(self.channel_combo)
+        fit_combo_text(self.method_combo)
         self.generate_button = QPushButton("Generate Projection")
         self.clear_projection_button = QPushButton("Clear Projection")
         self.clear_projection_button.setEnabled(False)

@@ -21,6 +21,7 @@ from qtpy.QtWidgets import (
 from .collapsible_section import CollapsibleSection
 from .image_preparation_panel import ImagePreparationPanel
 from .results_panel import ScientificResultsSection
+from .ui_layout import fit_combo_text
 from .stages.export import SCIENTIFIC_OUTPUTS
 
 
@@ -215,6 +216,8 @@ class ImageExportPanel(QWidget):
         self.pixel_type_combo = QComboBox()
         self.pixel_type_combo.addItem("Uint16 — SyGlass/proofreading", "uint16")
         self.pixel_type_combo.addItem("Float32 — prepared intensity scale", "float32")
+        fit_combo_text(self.format_combo)
+        fit_combo_text(self.pixel_type_combo)
         layout.addWidget(QLabel("Output format"))
         layout.addWidget(self.format_combo)
         layout.addWidget(QLabel("Pixel type"))

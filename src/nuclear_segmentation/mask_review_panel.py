@@ -9,6 +9,7 @@ from qtpy.QtWidgets import (
 )
 
 from .collapsible_section import CollapsibleSection
+from .ui_layout import add_stacked_combo_row
 
 
 class SyncedNumericControl(QWidget):
@@ -85,8 +86,8 @@ class PerinuclearMarkerRow(QGroupBox):
         record = dict(record or {})
         form = QFormLayout(self)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.channel = QComboBox()
-        self.channel.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         for item in channels:
             self.channel.addItem(f"{item.name} (channel {item.index + 1})", int(item.index))
         selected = self.channel.findData(record.get("channel_index"))
@@ -106,7 +107,8 @@ class PerinuclearMarkerRow(QGroupBox):
         self.fraction = SyncedNumericControl(0, 1, 6)
         self.fraction.setValue(float(record.get("initial_min_positive_fraction", 0.1)))
         self.remove_button = QPushButton("Remove Marker")
-        form.addRow("Source channel", self.channel); form.addRow(self.enabled)
+        add_stacked_combo_row(form, "Source channel", self.channel)
+        form.addRow(self.enabled)
         form.addRow("Inner shell distance (µm)", self.inner); form.addRow("Outer shell distance (µm)", self.outer)
         form.addRow(self.manual_threshold, self.threshold); form.addRow("Minimum positive fraction", self.fraction)
         form.addRow(self.remove_button)

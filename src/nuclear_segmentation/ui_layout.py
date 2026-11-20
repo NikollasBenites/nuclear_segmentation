@@ -4,7 +4,59 @@ from qtpy.QtGui import QAction
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QScrollArea, QSizePolicy, QLabel,
     QPushButton, QAbstractButton, QTabWidget, QMenu, QStyle, QComboBox, QListView, QLineEdit, QToolBar,
+    QToolTip,
 )
+
+
+class _ComboTextFit(QObject):
+    def __init__(self, combo):
+        super().__init__(combo)
+        self.combo = combo
+        self.view = combo.view()
+        combo.installEventFilter(self)
+        self.view.installEventFilter(self)
+        self.view.viewport().installEventFilter(self)
+
+    def eventFilter(self, widget, event):
+        if widget is self.view and event.type() == QEvent.Type.Show:
+            popup = self.view.window()
+            bounds = self.combo.screen().availableGeometry()
+            chrome = popup.width() - self.view.viewport().width()
+            content = self.view.sizeHintForColumn(self.combo.modelColumn())
+            scrollbar = self.view.verticalScrollBar().sizeHint().width()
+            width = min(bounds.width(), max(popup.width(), content + max(chrome, scrollbar + 2)))
+            popup.resize(width, popup.height())
+            popup.move(max(bounds.left(), min(popup.x(), bounds.right() - width + 1)), popup.y())
+        elif event.type() == QEvent.Type.ToolTip:
+            if widget is self.combo:
+                # Some panels restore the selection with signals blocked.
+                self.combo.setToolTip(self.combo.currentText())
+            elif widget is self.view.viewport():
+                index = self.view.indexAt(event.pos())
+                if index.isValid():
+                    QToolTip.showText(event.globalPos(), index.data(), widget)
+                    return True
+        return False
+
+
+def fit_combo_text(combo):
+    """Fit the closed control to its layout and widen its Qt popup for long options."""
+    combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+    combo.setSizePolicy(QSizePolicy.Policy.Ignored, combo.sizePolicy().verticalPolicy())
+    combo.setStyleSheet(combo.styleSheet() + "\nQComboBox { combobox-popup: 0; }")
+    combo.view().setTextElideMode(Qt.TextElideMode.ElideRight)
+    combo.view().setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    combo.currentTextChanged.connect(combo.setToolTip)
+    combo.setToolTip(combo.currentText())
+    _ComboTextFit(combo)
+
+
+def add_stacked_combo_row(form, title, combo):
+    fit_combo_text(combo)
+    label = QLabel(title)
+    label.setBuddy(combo)
+    form.addRow(label)
+    form.addRow(combo)
 
 
 class _LabelHeight(QObject):
