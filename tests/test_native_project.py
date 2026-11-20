@@ -150,12 +150,19 @@ def test_processed_checkpoint_reuses_results_with_exact_labels_roi_and_density(p
     assert state.filtering_result["retained_ids"] == (90000,)
     initial_density = deepcopy(state.quantification_result)
     initial_measurements = state.filtering_result["properties"].copy()
+    owner = state.session_revision()
+    session_id = state.nuclear_session.session_id
+    window._update_channel_configuration(0, "colormap", "magenta")
+    window._update_channel_configuration(0, "visible", False)
+    assert state.session_revision() == owner
+    assert state.normalization_is_current and state.quantification_is_current
     corrected = window.z_correction.preview_layers[0].data.copy()
     normalize = window.normalization.preview_layer.data.copy()
     panel.z_correction_panel.fields["percentile"].setValue(93)
     assert state.z_correction_applied == {0}
     folder = tmp_path / "Processed"
     save(window, app, folder)
+    assert native_project._manifest(folder)["version"] == 1
     assert window.close_project()
     _forbid_calculations(monkeypatch)
     open_saved(window, app, folder)
@@ -171,6 +178,13 @@ def test_processed_checkpoint_reuses_results_with_exact_labels_roi_and_density(p
     np.testing.assert_array_equal(state.normalization_roi_mask_yx[y0:y1, x0:x1], crop_mask)
     assert state.segmentation_is_current and state.filtering_is_current
     assert state.quantification_is_current and state.scientific_roi_reviewed
+    session = state.nuclear_session
+    assert session.session_id == session_id == "nuclear"
+    assert session.source_channel_index == 0
+    assert state.session_revision().project_id != owner.project_id
+    assert session.filtering_result is state.filtering_result
+    assert session.scientific_roi is state.scientific_roi
+    assert session.quantification_result is state.quantification_result
     assert state.quantification_result == initial_density
     np.testing.assert_array_equal(window.segmentation.result_layer.data, masks)
     assert window.segmentation.result_layer.data.dtype == np.uint32

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
 import numpy as np
 from qtpy.QtCore import QObject, Signal
@@ -60,12 +61,59 @@ class CropProvenance:
     roi_area_um2: float
 
 
+@dataclass
+class SegmentationSession:
+    """The project's nuclear analysis and its existing scientific records."""
+
+    session_id: str = field(init=False, default="nuclear")
+    scientific_role: str = field(init=False, default="nuclear")
+    input_revision: int = 0
+    geometry_revision: int = 0
+    measurement_revision: int = 0
+    segmentation_result: dict[str, Any] | None = None
+    segmentation_is_current: bool = False
+    filtering_result: dict[str, Any] | None = None
+    filtering_is_current: bool = False
+    perinuclear_markers: list[dict[str, Any]] = field(default_factory=list)
+    scientific_roi: np.ndarray | None = None
+    scientific_roi_reviewed: bool = False
+    scientific_roi_provenance: dict[str, Any] | None = None
+    quantification_result: dict[str, Any] | None = None
+    quantification_is_current: bool = False
+
+    @property
+    def source_channel_index(self) -> int | None:
+        config = (self.segmentation_result or {}).get("scientific_config") or {}
+        return next(
+            (int(channel["index"]) for channel in config.get("CHANNELS", ())
+             if channel["name"] == config.get("SEGMENTATION_CHANNEL")),
+            None,
+        )
+
+
+@dataclass(frozen=True)
+class SessionRevision:
+    project_id: UUID
+    session_id: str
+    input_revision: int
+    geometry_revision: int
+
+
+def _session_property(name):
+    """Keep the existing workspace and version 1 checkpoint field names."""
+    return property(
+        lambda state: getattr(state.nuclear_session, name),
+        lambda state, value: setattr(state.nuclear_session, name, value),
+    )
+
+
 class ProjectState(QObject):
-    """Own imported-dataset identity without changing analysis schemas."""
+    """Own the imported dataset and its nuclear analysis session."""
 
     changed = Signal(object)
     import_status_changed = Signal(str)
     channels_changed = Signal(object)
+    scientific_channels_changed = Signal()
     calibration_changed = Signal(object, str)
     normalization_changed = Signal(object, bool)
     normalization_roi_changed = Signal(object)
@@ -76,8 +124,20 @@ class ProjectState(QObject):
     scientific_roi_changed = Signal(object, bool)
     quantification_result_changed = Signal(object, bool)
 
+    segmentation_is_current = _session_property("segmentation_is_current")
+    filtering_result = _session_property("filtering_result")
+    filtering_is_current = _session_property("filtering_is_current")
+    perinuclear_markers = _session_property("perinuclear_markers")
+    scientific_roi = _session_property("scientific_roi")
+    scientific_roi_reviewed = _session_property("scientific_roi_reviewed")
+    scientific_roi_provenance = _session_property("scientific_roi_provenance")
+    quantification_result = _session_property("quantification_result")
+    quantification_is_current = _session_property("quantification_is_current")
+
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
+        self._project_id = uuid4()
+        self.nuclear_session = SegmentationSession()
         self.dataset: ImportedDataset | None = None
         self.original_dataset: ImportedDataset | None = None
         self.working_dataset: ImportedDataset | None = None
@@ -99,18 +159,26 @@ class ProjectState(QObject):
         self.z_correction_options: dict[int, dict[str, Any]] = {}
         self.z_correction_reports: dict[int, dict[str, Any]] = {}
         self.z_correction_applied: set[int] = set()
-        self.segmentation_result: dict[str, Any] | None = None
-        self.segmentation_is_current = False
-        self.filtering_result: dict[str, Any] | None = None
-        self.filtering_is_current = False
-        self.perinuclear_markers: list[dict[str, Any]] = []
-        self.scientific_roi: np.ndarray | None = None
-        self.scientific_roi_reviewed = False
-        self.scientific_roi_provenance: dict[str, Any] | None = None
-        self.quantification_result: dict[str, Any] | None = None
-        self.quantification_is_current = False
         self.restoring_project = False
         self.legacy_import = None
+
+    def session_revision(self) -> SessionRevision:
+        session = self.nuclear_session
+        return SessionRevision(
+            self._project_id, session.session_id,
+            session.input_revision, session.geometry_revision,
+        )
+
+    @property
+    def segmentation_result(self) -> dict[str, Any] | None:
+        return self.nuclear_session.segmentation_result
+
+    @segmentation_result.setter
+    def segmentation_result(self, value: dict[str, Any] | None) -> None:
+        session = self.nuclear_session
+        if session.segmentation_result is not value:
+            session.geometry_revision += 1
+        session.segmentation_result = value
 
     @property
     def dataset_ready(self) -> bool:
@@ -121,8 +189,10 @@ class ProjectState(QObject):
         self.import_status_changed.emit(self.import_status)
 
     def set_dataset(self, dataset: ImportedDataset) -> None:
+        self._project_id = uuid4()
         self.legacy_import = None
         self.clear_segmentation_result()
+        self.nuclear_session = SegmentationSession()
         self.dataset = dataset
         self.original_dataset = dataset
         self.working_dataset = dataset
@@ -373,8 +443,10 @@ class ProjectState(QObject):
         return records
 
     def clear_project(self) -> None:
+        self._project_id = uuid4()
         self.legacy_import = None
         self.clear_segmentation_result(emit=False)
+        self.nuclear_session = SegmentationSession()
         self.dataset = None
         self.original_dataset = None
         self.working_dataset = None
@@ -384,7 +456,6 @@ class ProjectState(QObject):
         self.voxel_spacing_zyx_um = None
         self.calibration_source = None
         self.channels = []
-        self.perinuclear_markers = []
         self.segmentation_channel_index = None
         self.normalization_configuration = None
         self.normalization_preview = None
@@ -460,26 +531,29 @@ class ProjectState(QObject):
                 )
         if "colormap" in changes and not str(changes["colormap"]).strip():
             raise ValueError("A channel colormap is required.")
-        self.channels[position] = replace(current, **changes)
-        if {"name", "role"}.intersection(changes):
+        updated = replace(current, **changes)
+        self.channels[position] = updated
+        if (current.name, current.role) != (updated.name, updated.role):
             self.invalidate_segmentation()
-        self.invalidate_normalization()
+            self.invalidate_normalization()
+            self.scientific_channels_changed.emit()
         self.channels_changed.emit(tuple(self.channels))
 
     def set_segmentation_result(self, result: dict[str, Any]) -> None:
-        self.clear_filtering_result()
-        self.clear_scientific_roi()
         masks = np.asarray(result.get("masks"))
         if masks.ndim != 3 or not masks.size or int(masks.max()) == 0:
             raise ValueError("Segmentation results require a nonempty ZYX label mask.")
         masks.setflags(write=False)
         stored = dict(result)
         stored["masks"] = masks
+        self.clear_filtering_result()
+        self.clear_scientific_roi()
         self.segmentation_result = stored
         self.segmentation_is_current = True
         self.segmentation_result_changed.emit(stored, True)
 
     def invalidate_segmentation(self) -> None:
+        self.nuclear_session.input_revision += 1
         if self.segmentation_result is None or not self.segmentation_is_current:
             return
         self.segmentation_is_current = False
@@ -501,11 +575,13 @@ class ProjectState(QObject):
         filtered = np.asarray(stored["filtered_masks"])
         filtered.setflags(write=False)
         stored["filtered_masks"] = filtered
+        self.nuclear_session.measurement_revision += 1
         self.filtering_result = stored
         self.filtering_is_current = True
         self.filtering_result_changed.emit(stored, True)
 
     def invalidate_filtering(self) -> None:
+        self.nuclear_session.measurement_revision += 1
         if self.filtering_result is None or not self.filtering_is_current:
             return
         self.filtering_is_current = False
@@ -513,6 +589,7 @@ class ProjectState(QObject):
         self.filtering_result_changed.emit(self.filtering_result, False)
 
     def clear_filtering_result(self, *, emit: bool = True) -> None:
+        self.nuclear_session.measurement_revision += 1
         self.clear_quantification_result(emit=emit)
         self.filtering_result = None
         self.filtering_is_current = False

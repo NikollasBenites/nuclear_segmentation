@@ -69,6 +69,9 @@ def test_legacy_writer_roundtrip_and_native_conversion(package, project, tmp_pat
     assert state.original_dataset.source_path == source
     assert state.segmentation_is_current and state.filtering_is_current
     assert state.scientific_roi_reviewed and state.quantification_is_current
+    session_id = state.nuclear_session.session_id
+    assert session_id == "nuclear"
+    assert state.nuclear_session.source_channel_index == state.segmentation_channel_index
     np.testing.assert_array_equal(window.segmentation.result_layer.data, masks)
     assert state.segmentation_result["manual_review"]["decisions"]["7"]["decision"] == "exclude"
     assert state.filtering_result["retained_ids"] == (2,)
@@ -95,6 +98,7 @@ def test_legacy_writer_roundtrip_and_native_conversion(package, project, tmp_pat
     assert window.close_project()
     open_saved(window, app, converted)
     assert not warnings
+    assert state.nuclear_session.session_id == session_id
     assert state.quantification_is_current and state.quantification_result == quant
     assert state.legacy_import["configuration"]["input"]["path_at_analysis"] == str(source)
     np.testing.assert_array_equal(state.segmentation_result["masks"], masks)

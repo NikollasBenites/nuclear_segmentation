@@ -10,7 +10,7 @@ import numpy as np
 from qtpy.QtCore import QObject, QThread, QTimer, Signal, Slot
 
 from .runtime import execute_stage
-from .scientific_input import prepare_scientific_input, validate_scientific_input
+from .scientific_input import capture_scientific_input, prepare_captured_scientific_input
 
 
 def execute_cellpose_stage(scientific_input, progress=print):
@@ -68,29 +68,28 @@ def execute_cellpose_stage(scientific_input, progress=print):
 
 class SegmentationWorker(QObject):
     progress = Signal(str)
-    succeeded = Signal(object)
+    succeeded = Signal(object, object)
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, project_state, config, runner=execute_cellpose_stage):
+    def __init__(self, job, runner=execute_cellpose_stage):
         super().__init__()
-        self.project_state = project_state
-        self.config = deepcopy(config)
+        self.job = job
         self.runner = runner
 
     @Slot()
     def run(self):
         try:
             self.progress.emit("Validating and preparing the in-memory scientific input…")
-            scientific_input = prepare_scientific_input(
-                self.project_state, self.config
+            scientific_input = prepare_captured_scientific_input(self.job)
+            result = dict(
+                self.runner(scientific_input, self.progress.emit),
+                scientific_config=self.job.config(),
             )
-            result = self.runner(scientific_input, self.progress.emit)
-            result.setdefault("scientific_config", deepcopy(self.config))
         except Exception:
             self.failed.emit(traceback.format_exc())
         else:
-            self.succeeded.emit(result)
+            self.succeeded.emit(self.job, result)
         finally:
             self.finished.emit()
 
@@ -111,6 +110,7 @@ class SegmentationController(QObject):
         self.runner = runner
         self._thread = None
         self._worker = None
+        self._job = None
         self._result_layer = None
         self._started = None
         self._timer = QTimer(self)
@@ -144,12 +144,12 @@ class SegmentationController(QObject):
             return False
         try:
             config = self.panel.scientific_config()
-            validate_scientific_input(self.project_state, config)
+            job = capture_scientific_input(self.project_state, config)
         except (TypeError, ValueError) as error:
             self._status(f"Segmentation input is not ready: {error}")
             return False
 
-        worker = SegmentationWorker(self.project_state, config, self.runner)
+        worker = SegmentationWorker(job, self.runner)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -161,6 +161,7 @@ class SegmentationController(QObject):
         thread.finished.connect(self._finished)
         thread.finished.connect(thread.deleteLater)
         self._worker = worker
+        self._job = job
         self._thread = thread
         self._started = perf_counter()
         self.panel.execution_log.clear()
@@ -206,22 +207,29 @@ class SegmentationController(QObject):
         self.panel.set_execution_status(message, append=False)
         self.status_changed.emit(message)
 
-    def _succeeded(self, result) -> None:
+    @Slot(object, object)
+    def _succeeded(self, job, result) -> None:
+        if job is not self._job or job.owner != self.project_state.session_revision():
+            self._status("Segmentation discarded because the project or scientific inputs changed.")
+            return
         try:
-            expected = tuple(self.project_state.working_dataset.data_czyx.shape[1:])
-            if tuple(result.get("mask_shape", ())) != expected:
+            provenance = job.provenance()
+            if (result.get("input_provenance") != provenance
+                    or result.get("segmentation_channel") != provenance["segmentation_channel"]):
+                raise ValueError("Segmentation provenance does not match the captured input.")
+            expected = provenance["working_shape_czyx"][1:]
+            if (tuple(result.get("mask_shape", ())) != expected
+                    or np.shape(result.get("masks")) != expected):
                 raise ValueError(
                     f"Segmentation mask shape {result.get('mask_shape')} does not "
                     f"match {expected}."
                 )
+            message = f"Segmentation complete: {result['object_count']:,} objects on {result['device']}."
             self.project_state.set_segmentation_result(result)
-        except (AttributeError, TypeError, ValueError) as error:
+        except (KeyError, TypeError, ValueError) as error:
             self._failed(f"Invalid segmentation result: {error}")
             return
-        self._status(
-            f"Segmentation complete: {result['object_count']:,} objects on "
-            f"{result['device']}."
-        )
+        self._status(message)
 
     def _failed(self, traceback_text: str) -> None:
         message = str(traceback_text).strip()
@@ -235,6 +243,7 @@ class SegmentationController(QObject):
         self._update_elapsed()
         self._thread = None
         self._worker = None
+        self._job = None
         self._started = None
         for widget, enabled in zip(
             self.conflict_widgets, self._conflict_enabled, strict=True

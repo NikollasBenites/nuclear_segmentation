@@ -14,14 +14,22 @@ from .filtering import apply_filter_settings
 from .manual_review import ManualReview
 from .normalization import mask_digest
 from .runtime import validate_roi_geometry
-from .scientific_input import prepare_scientific_input
+from .scientific_input import capture_scientific_input, prepare_captured_scientific_input
 
 
 def calculate_filtering_prerequisites(project_state, config):
     """Measure current raw masks with the same functions as legacy stages."""
-    scientific = prepare_scientific_input(project_state, config)
+    segmentation = project_state.segmentation_result
+    return _measure(
+        capture_scientific_input(project_state, config), segmentation["masks"],
+        segmentation.get("input_provenance", {}),
+    )
+
+
+def _measure(job, raw_masks, segmentation_provenance):
+    scientific = prepare_captured_scientific_input(job)
     ns = scientific.namespace
-    masks = np.asarray(project_state.segmentation_result["masks"])
+    masks = np.asarray(raw_masks)
     if masks.shape != ns["segmentation_volume"].shape:
         raise ValueError("Raw masks do not match the current working ZYX grid.")
     properties, background = calculate_mask_properties(
@@ -106,21 +114,34 @@ def calculate_filtering_prerequisites(project_state, config):
         "raw_mask_shape": tuple(masks.shape), "scientific_roi": np.array(ns["mntb_roi"], copy=True),
         "roi_reviewed": False, "intensity_definitions": intensity_definitions,
         "perinuclear_definitions": perinuclear_definitions, "ring_labels": ring_labels,
-        "input_segmentation_provenance": deepcopy(project_state.segmentation_result.get("input_provenance", {})),
+        "input_segmentation_provenance": deepcopy(segmentation_provenance),
         "measurement_provenance": deepcopy(scientific.provenance),
         "roi_source": ns["roi_source"],
     }
 
 
 class FilteringWorker(QObject):
-    succeeded = Signal(object); failed = Signal(str); finished = Signal()
-    def __init__(self, state, config):
-        super().__init__(); self.state = state; self.config = deepcopy(config)
+    succeeded = Signal(object, int, object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, job, measurement_revision, segmentation):
+        super().__init__()
+        self.job = job
+        self.measurement_revision = measurement_revision
+        self.raw_masks = segmentation["masks"]
+        self.segmentation_provenance = deepcopy(segmentation.get("input_provenance", {}))
+
     @Slot()
     def run(self):
-        try: self.succeeded.emit(calculate_filtering_prerequisites(self.state, self.config))
-        except Exception: self.failed.emit(traceback.format_exc())
-        finally: self.finished.emit()
+        try:
+            result = _measure(self.job, self.raw_masks, self.segmentation_provenance)
+        except Exception:
+            self.failed.emit(traceback.format_exc())
+        else:
+            self.succeeded.emit(self.job, self.measurement_revision, result)
+        finally:
+            self.finished.emit()
 
 
 class FilteringController(QObject):
@@ -133,6 +154,7 @@ class FilteringController(QObject):
         self.filtered_layer = None; self.roi_layer = None; self._roi_callback = None
         self._pending_filter_settings = None
         self._manual_review_cache = None
+        self._job = None
         panel.calculate_measurements_requested.connect(self.calculate)
         panel.filters_changed.connect(self.apply_filters)
         panel.accept_roi_requested.connect(self.accept_roi)
@@ -142,8 +164,11 @@ class FilteringController(QObject):
     def busy(self): return self._thread is not None
     def calculate(self):
         if self.busy or any(item.busy for item in self.conflict_operations) or not self.state.segmentation_is_current: return False
-        try: config = self._measurement_config()
-        except Exception as error: self.status_changed.emit(f"Measurements unavailable: {error}"); return False
+        try:
+            job = capture_scientific_input(self.state, self._measurement_config())
+        except Exception as error:
+            self.status_changed.emit(f"Measurements unavailable: {error}")
+            return False
         self._pending_filter_settings = (
             deepcopy(self.panel.filter_settings())
             if self.state.filtering_result is not None else None
@@ -151,10 +176,13 @@ class FilteringController(QObject):
         legacy = self.state.legacy_import
         if self._pending_filter_settings is None and legacy and self.state.segmentation_result.get("legacy_imported"):
             self._pending_filter_settings = deepcopy(legacy["settings"])
-        worker = FilteringWorker(self.state, config); thread = QThread(self); worker.moveToThread(thread)
-        thread.started.connect(worker.run); worker.succeeded.connect(self._calculated); worker.failed.connect(self._failed)
+        worker = FilteringWorker(job, self.state.nuclear_session.measurement_revision,
+                                 self.state.segmentation_result)
+        thread = QThread(self); worker.moveToThread(thread)
+        thread.started.connect(worker.run); worker.succeeded.connect(self._measurement_succeeded); worker.failed.connect(self._failed)
         worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater); thread.finished.connect(self._finished); thread.finished.connect(thread.deleteLater)
         self._worker, self._thread = worker, thread; self.panel.calculate_button.setEnabled(False)
+        self._job = job
         self.panel.measurement_status.setText("Calculating existing scientific measurements…")
         thread.start(); return True
     def _measurement_config(self):
@@ -176,6 +204,16 @@ class FilteringController(QObject):
             and self.state.scientific_roi_provenance
             == self._roi_provenance(result)
         )
+    @Slot(object, int, object)
+    def _measurement_succeeded(self, job, measurement_revision, result):
+        if (job is not self._job or job.owner != self.state.session_revision()
+                or measurement_revision != self.state.nuclear_session.measurement_revision):
+            message = "Measurements discarded because the project or scientific inputs changed."
+            self.panel.measurement_status.setText(message)
+            self.status_changed.emit(message)
+            return
+        self._calculated(result)
+
     def _calculated(self, result):
         if self._roi_is_compatible(result):
             result = dict(
@@ -198,6 +236,7 @@ class FilteringController(QObject):
         message = str(text).strip().splitlines()[-1]; self.panel.measurement_status.setText("Measurement failed: " + message); self.status_changed.emit("Measurement failed: " + message)
     def _finished(self):
         self._thread = None; self._worker = None; self._pending_filter_settings = None; self.panel.calculate_button.setEnabled(self.state.segmentation_is_current)
+        self._job = None
     def _create_layers(self, result):
         spacing = tuple(self.state.voxel_spacing_zyx_um); oy, ox = self.state.working_offset_yx; translate = (0, oy * spacing[1], ox * spacing[2])
         self.clear_layers()

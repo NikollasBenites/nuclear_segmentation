@@ -1,4 +1,5 @@
 import os
+from threading import Event
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -10,7 +11,9 @@ from qtpy.QtTest import QTest
 from qtpy.QtWidgets import QApplication, QLabel, QWidget
 
 from nuclear_segmentation.desktop_window import DesktopWindow
+from nuclear_segmentation import filtering_workspace
 from nuclear_segmentation.project_state import ChannelDescriptor, ImportedDataset
+from test_desktop_normalization import _wait
 
 
 class FakeQtViewer(QWidget):
@@ -243,6 +246,7 @@ def test_reviewed_roi_survives_measurement_invalidation(review_window):
     assert not state.filtering_is_current
     assert state.scientific_roi_reviewed
     assert controller.roi_layer.name == "MNTB ROI — reviewed"
+
     assert panel.accept_roi_button.isEnabled()
 
     controller.accept_roi()
@@ -263,6 +267,36 @@ def test_reviewed_roi_survives_measurement_invalidation(review_window):
     )
     assert controller.roi_layer.name == "MNTB ROI — reviewed"
 
+
+def test_measurement_worker_keeps_raw_reference_and_rejects_old_geometry(review_window, qapp, monkeypatch):
+    window, masks = review_window
+    state = window.project_state
+    controller = window.filtering
+    measure = filtering_workspace._measure
+    entered, release = Event(), Event()
+    captured = []
+
+    def blocked(job, raw_masks, provenance):
+        captured.append(raw_masks)
+        entered.set()
+        assert release.wait(5)
+        return measure(job, raw_masks, provenance)
+
+    monkeypatch.setattr(filtering_workspace, "_measure", blocked)
+    try:
+        assert controller.calculate()
+        _wait(qapp, entered.is_set)
+        replacement = np.where(masks > 0, masks + 10, 0)
+        state.set_segmentation_result(dict(state.segmentation_result, masks=replacement))
+        release.set()
+        _wait(qapp, lambda: not controller.busy)
+        assert captured[0] is masks
+        assert state.segmentation_result["masks"] is replacement
+        assert state.filtering_result is None and state.scientific_roi is None
+        assert "Measurements discarded" in window.context_panel.mask_review_page.measurement_status.text()
+    finally:
+        release.set()
+        _wait(qapp, lambda: not controller.busy)
 
 def test_segmentation_result_can_navigate_to_existing_mask_review(review_window):
     window, _ = review_window

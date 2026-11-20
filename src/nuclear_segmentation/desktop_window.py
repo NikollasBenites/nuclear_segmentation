@@ -191,9 +191,7 @@ class DesktopWindow(QMainWindow):
         self.image_export.bind_filtering(self.filtering)
         self.filtering.status_changed.connect(self.statusBar().showMessage)
         self.z_correction.correction_applied.connect(self.normalization.invalidate)
-        self.project_state.channels_changed.connect(
-            lambda channels: self.normalization.invalidate()
-        )
+        self.project_state.scientific_channels_changed.connect(self.normalization.invalidate)
         self.project_state.calibration_changed.connect(
             lambda spacing, source: self.normalization.invalidate()
         )

@@ -1,5 +1,6 @@
 import os
 import sys
+from threading import Event
 from time import monotonic, sleep
 from types import SimpleNamespace
 
@@ -247,8 +248,15 @@ def test_controller_runs_off_main_thread_retains_result_and_locks_conflicts(
     assert calls["shares"]
     assert state.segmentation_is_current
     assert state.segmentation_result["mask_shape"] == source.shape[1:]
+    session = state.nuclear_session
+    assert (session.session_id, session.scientific_role, session.source_channel_index) == ("nuclear", "nuclear", 0)
+    assert session.segmentation_result is state.segmentation_result
+    assert session.geometry_revision == 1
     assert len(viewer.layers) == 1
     assert viewer.layers[0].editable is False
+    assert viewer.layers[0].data is session.segmentation_result["masks"]
+    assert not viewer.layers[0].data.flags.writeable
+    np.testing.assert_array_equal(np.unique(viewer.layers[0].data), [0, 1])
     assert conflict.isEnabled()
     np.testing.assert_array_equal(state.original_dataset.data_czyx, source)
     executed_cellprob = state.segmentation_result["scientific_config"][
@@ -270,9 +278,13 @@ def test_controller_runs_off_main_thread_retains_result_and_locks_conflicts(
 def test_display_only_channel_change_does_not_invalidate_result(tmp_path):
     state, _ = _state(tmp_path)
     scientific = prepare_scientific_input(state, _config(state))
+    state.apply_normalization({"mode": "cellpose_default", "cellpose_normalize": True})
     state.set_segmentation_result(_fake_result(scientific))
+    owner = state.session_revision()
     state.update_channel(0, visible=False, colormap="magenta")
     assert state.segmentation_is_current
+    assert state.normalization_is_current
+    assert state.session_revision() == owner
 
 
 def test_failed_rerun_preserves_previous_valid_result(qapp, tmp_path):
@@ -287,6 +299,7 @@ def test_failed_rerun_preserves_previous_valid_result(qapp, tmp_path):
     assert controller.run()
     _wait(qapp, lambda: not controller.busy)
     previous = state.segmentation_result
+    owner = state.session_revision()
 
     def failing(scientific, progress):
         raise RuntimeError("simulated model failure")
@@ -296,6 +309,7 @@ def test_failed_rerun_preserves_previous_valid_result(qapp, tmp_path):
     _wait(qapp, lambda: not controller.busy)
     assert state.segmentation_result is previous
     assert state.segmentation_is_current
+    assert state.session_revision() == owner
     assert "simulated model failure" in panel.execution_log.toPlainText()
     assert len(viewer.layers) == 1
 
@@ -306,6 +320,84 @@ def test_failed_rerun_preserves_previous_valid_result(qapp, tmp_path):
     assert not viewer.layers
     controller.dispose()
     panel.dispose()
+
+
+@pytest.mark.parametrize("change", ["project", "input", "geometry"])
+def test_running_job_cannot_replace_a_newer_owner(qapp, tmp_path, change):
+    state, source = _state(tmp_path)
+    panel = SegmentationPanel(state)
+    started, release = Event(), Event()
+    dataset = state.original_dataset
+    seen = {}
+
+    def runner(scientific, progress):
+        started.set()
+        assert release.wait(5)
+        seen.update(scientific.namespace)
+        return _fake_result(scientific)
+
+    controller = SegmentationController(_Viewer(), state, panel, runner=runner)
+    try:
+        assert controller.run()
+        _wait(qapp, started.is_set)
+        assert not controller.run()
+        if change == "project":
+            state.set_dataset(dataset)
+        elif change == "input":
+            state.set_calibration((3.0, 0.5, 0.25))
+        else:
+            state.set_segmentation_result(_fake_result(prepare_scientific_input(state, _config(state))))
+        current = state.segmentation_result
+        current_owner = state.session_revision()
+        release.set()
+        _wait(qapp, lambda: not controller.busy)
+        assert state.segmentation_result is current
+        assert state.session_revision() == current_owner
+        assert "Segmentation discarded" in panel.execution_log.toPlainText()
+        assert seen["image_czyx"] is source
+        assert seen["VOXEL_SPACING_UM"] == (2.0, 0.5, 0.25)
+    finally:
+        release.set()
+        _wait(qapp, lambda: not controller.busy)
+        controller.dispose()
+        panel.dispose()
+
+
+@pytest.mark.parametrize("defect", ["provenance", "empty masks"])
+def test_invalid_completion_preserves_previous_analysis(qapp, tmp_path, defect):
+    state, _ = _state(tmp_path)
+    panel = SegmentationPanel(state)
+    previous = _fake_result(prepare_scientific_input(state, _config(state)))
+    state.set_segmentation_result(previous)
+    state.set_filtering_result({"filtered_masks": previous["masks"]})
+    state.set_scientific_roi(previous["masks"] > 0, {}, reviewed=True)
+    state.set_quantification_result({"retained_count": 1})
+    session = state.nuclear_session
+    raw, filtered, roi, quant = (session.segmentation_result, session.filtering_result,
+                                 session.scientific_roi, session.quantification_result)
+    owner = state.session_revision()
+
+    def runner(scientific, progress):
+        result = _fake_result(scientific)
+        if defect == "provenance":
+            result["input_provenance"] = dict(scientific.provenance, source_series=42)
+        else:
+            result["masks"].fill(0)
+        return result
+
+    controller = SegmentationController(_Viewer(), state, panel, runner=runner)
+    try:
+        assert controller.run()
+        _wait(qapp, lambda: not controller.busy)
+        assert "Invalid segmentation result" in panel.execution_log.toPlainText()
+        assert session.segmentation_result is raw and session.segmentation_is_current
+        assert session.filtering_result is filtered and session.filtering_is_current
+        assert session.scientific_roi is roi and session.scientific_roi_reviewed
+        assert session.quantification_result is quant and session.quantification_is_current
+        assert state.session_revision() == owner
+    finally:
+        controller.dispose()
+        panel.dispose()
 
 
 def test_completed_results_use_executed_values_and_future_settings_are_separate(

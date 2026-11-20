@@ -10,6 +10,7 @@ import numpy as np
 
 from .config import validate_config
 from .core import reconstruct_mntb_roi, validate_channel_configuration
+from .project_state import SessionRevision
 from .z_correction import prepare_volumes, validate_options
 
 
@@ -19,6 +20,23 @@ class ScientificInput:
 
     namespace: dict[str, Any]
     provenance: dict[str, Any]
+
+
+@dataclass(frozen=True, eq=False)
+class ScientificInputSnapshot:
+    """Capture the job on the GUI thread, sharing only the existing pixel arrays."""
+
+    owner: SessionRevision
+    image_czyx: np.ndarray
+    crop_mask_yx: np.ndarray | None
+    _config: dict[str, Any]
+    _provenance: dict[str, Any]
+
+    def config(self) -> dict[str, Any]:
+        return deepcopy(self._config)
+
+    def provenance(self) -> dict[str, Any]:
+        return deepcopy(self._provenance)
 
 
 def validate_scientific_input(project_state, config: dict[str, Any]) -> dict[str, Any]:
@@ -108,12 +126,29 @@ def validate_scientific_input(project_state, config: dict[str, Any]) -> dict[str
     return validated
 
 
+def capture_scientific_input(project_state, config: dict[str, Any]) -> ScientificInputSnapshot:
+    validated = validate_scientific_input(project_state, config)
+    crop_mask = project_state.roi_mask_yx
+    return ScientificInputSnapshot(
+        owner=project_state.session_revision(),
+        image_czyx=np.asarray(project_state.working_dataset.data_czyx),
+        crop_mask_yx=None if crop_mask is None else np.asarray(crop_mask, dtype=bool),
+        _config=validated,
+        _provenance=scientific_input_provenance(project_state, validated),
+    )
+
+
 def prepare_scientific_input(project_state, config: dict[str, Any]) -> ScientificInput:
     """Prepare legacy inputs from the current CZYX data; never execute Cellpose."""
-    validated = validate_scientific_input(project_state, config)
-    dataset = project_state.working_dataset
-    image = np.asarray(dataset.data_czyx)
-    spacing = tuple(float(value) for value in project_state.voxel_spacing_zyx_um)
+    return prepare_captured_scientific_input(capture_scientific_input(project_state, config))
+
+
+def prepare_captured_scientific_input(snapshot: ScientificInputSnapshot) -> ScientificInput:
+    """Perform pixel work using the captured inputs, without reading project state."""
+    validated = snapshot.config()
+    provenance = snapshot.provenance()
+    image = snapshot.image_czyx
+    spacing = provenance["voxel_spacing_zyx_um"]
     channels = validated["CHANNELS"]
     volumes = {item["name"]: image[int(item["index"])] for item in channels}
     segmentation = volumes[validated["SEGMENTATION_CHANNEL"]]
@@ -137,14 +172,10 @@ def prepare_scientific_input(project_state, config: dict[str, Any]) -> Scientifi
         ANISOTROPY=float(spacing[0] / xy_spacing),
         mntb_roi=roi,
         roi_source="inferred_" + validated["MNTB_ROI_MODE"],
-        crop_inclusion_mask_yx=(
-            None
-            if project_state.roi_mask_yx is None
-            else np.asarray(project_state.roi_mask_yx, dtype=bool)
-        ),
+        crop_inclusion_mask_yx=snapshot.crop_mask_yx,
     )
     prepare_volumes(namespace)
-    return ScientificInput(namespace=namespace, provenance=scientific_input_provenance(project_state, validated))
+    return ScientificInput(namespace=namespace, provenance=provenance)
 
 
 def scientific_input_provenance(project_state, validated):
