@@ -110,6 +110,7 @@ class ProjectState(QObject):
         self.quantification_result: dict[str, Any] | None = None
         self.quantification_is_current = False
         self.restoring_project = False
+        self.legacy_import = None
 
     @property
     def dataset_ready(self) -> bool:
@@ -120,6 +121,7 @@ class ProjectState(QObject):
         self.import_status_changed.emit(self.import_status)
 
     def set_dataset(self, dataset: ImportedDataset) -> None:
+        self.legacy_import = None
         self.clear_segmentation_result()
         self.dataset = dataset
         self.original_dataset = dataset
@@ -371,6 +373,7 @@ class ProjectState(QObject):
         return records
 
     def clear_project(self) -> None:
+        self.legacy_import = None
         self.clear_segmentation_result(emit=False)
         self.dataset = None
         self.original_dataset = None

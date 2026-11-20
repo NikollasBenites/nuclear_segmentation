@@ -32,7 +32,7 @@ STATE_FIELDS = (
     "z_correction_options", "z_correction_reports", "z_correction_applied",
     "segmentation_result", "segmentation_is_current", "filtering_result", "filtering_is_current",
     "scientific_roi", "scientific_roi_provenance", "scientific_roi_reviewed",
-    "quantification_result", "quantification_is_current",
+    "quantification_result", "quantification_is_current", "legacy_import",
 )
 SOURCE_FIELDS = (
     "source_format", "series_index", "series_identifier", "series_name", "reported_axes",
@@ -137,6 +137,9 @@ def _manifest(folder):
 def save_project(folder, snapshot, active=None):
     """Publish one closed archive atomically, leaving the old file on any failure."""
     folder = Path(folder)
+    legacy = snapshot["state"].get("legacy_import")
+    if legacy and folder.resolve().is_relative_to(Path(legacy["folder"]).resolve()):
+        raise ValueError("Save the native project outside the legacy results directory.")
     source = snapshot["source"]
     digest = source_digest(Path(source["path"]))
     if source["sha256"] is not None and source["sha256"] != digest:
@@ -197,6 +200,8 @@ def save_project(folder, snapshot, active=None):
 def _rebase_source(value, old, new):
     if isinstance(value, dict):
         for key, item in value.items():
+            if key == "legacy_import":
+                continue
             if key in ("source_path", "source", "path") and isinstance(item, str) and item == old:
                 value[key] = new
             _rebase_source(item, old, new)
@@ -326,9 +331,13 @@ def _validated_state(dataset, payload):
         raise ValueError("The checkpoint contains incompatible channel identities.")
     state.channels = channels
     for key in STATE_FIELDS:
-        setattr(state, key, stored[key])
+        setattr(state, key, stored.get(key) if key == "legacy_import" else stored[key])
     _validate_results(state, payload)
     _validate_controls(payload, {channel.index for channel in channels})
+    return restored_state(state)
+
+
+def restored_state(state):
     return {"working_dataset": state.working_dataset, "crop_provenance": state.crop_provenance,
             "channels": state.channels, **{key: getattr(state, key) for key in STATE_FIELDS}}
 
@@ -379,7 +388,13 @@ def _validate_results(state, payload):
         if index not in channel_names or any(report.get(key) != value for key, value in expected.items()):
             state.z_correction_reports.pop(index)
             z_previews.pop(index, None)
-    valid_applied = state.z_correction_applied.intersection(z_previews)
+    legacy_reports = {
+        index for index, report in state.z_correction_reports.items()
+        if state.legacy_import and report.get("legacy_recorded")
+        and len(report["gain"]) == working_shape[1]
+        and report["options"] == state.legacy_import["configuration"]["z_corrections"].get(channel_names[index])
+    }
+    valid_applied = state.z_correction_applied.intersection(set(z_previews) | legacy_reports)
     if valid_applied != state.z_correction_applied:
         state.z_correction_applied = valid_applied
         state.normalization_is_current = False
@@ -389,7 +404,13 @@ def _validate_results(state, payload):
     applied = normalization.get("provenance")
     if state.normalization_is_current:
         try:
-            state.normalization_is_current = bool(applied and cellpose_configuration(applied) == normalization)
+            if state.legacy_import and normalization["mode"] == "legacy_recorded":
+                state.normalization_is_current = (
+                    normalization["cellpose_normalize"]
+                    == state.legacy_import["configuration"]["cellpose"].get("normalize", True)
+                )
+            else:
+                state.normalization_is_current = bool(applied and cellpose_configuration(applied) == normalization)
         except (KeyError, TypeError, ValueError):
             state.normalization_is_current = False
     reports = (applied, state.normalization_preview)
@@ -472,7 +493,7 @@ def _validate_results(state, payload):
             raise ValueError("Filtered label geometry does not match the raw masks.")
         filtered.setflags(write=False)
         measured_roi = filtering["scientific_roi"]
-        if measured_roi.shape != filtering["raw_mask_shape"] or measured_roi.dtype != bool:
+        if measured_roi is not None and (measured_roi.shape != filtering["raw_mask_shape"] or measured_roi.dtype != bool):
             raise ValueError("The checkpoint contains incompatible measurement ROI geometry.")
         provenance = filtering.get("measurement_provenance", {})
         expected_markers = {
@@ -501,6 +522,7 @@ def _validate_results(state, payload):
             and filtering["input_segmentation_provenance"] == segmentation.get("input_provenance")
             and provenance == segmentation.get("input_provenance")
             and expected_markers == measured_markers
+            and measured_roi is not None
             and payload["roi_grid_compatible"]
         )
         if state.filtering_is_current:
@@ -511,7 +533,13 @@ def _validate_results(state, payload):
             except ValueError:
                 state.filtering_is_current = False
     else:
-        state.filtering_is_current = state.scientific_roi_reviewed = False
+        state.filtering_is_current = False
+        state.scientific_roi_reviewed = bool(
+            state.legacy_import and state.scientific_roi_reviewed and roi is not None
+            and state.legacy_import.get("roi_sha256") == mask_digest(roi)
+            and state.segmentation_is_current and state.scientific_roi_provenance
+            == dict(segmentation["input_provenance"], mask_shape=roi.shape)
+        )
     if roi is not None and (roi.shape != working_shape[1:] or roi.dtype != bool):
         state.scientific_roi = None
         state.scientific_roi_provenance = None

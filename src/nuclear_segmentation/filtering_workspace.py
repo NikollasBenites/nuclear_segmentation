@@ -11,6 +11,8 @@ from .core import (
     calculate_mask_properties, calculate_perinuclear_marker_metrics, safe_key,
 )
 from .filtering import apply_filter_settings
+from .manual_review import ManualReview
+from .normalization import mask_digest
 from .runtime import validate_roi_geometry
 from .scientific_input import prepare_scientific_input
 
@@ -130,6 +132,7 @@ class FilteringController(QObject):
         self.config_provider = config_provider; self.conflict_operations = tuple(conflict_operations); self._thread = None; self._worker = None
         self.filtered_layer = None; self.roi_layer = None; self._roi_callback = None
         self._pending_filter_settings = None
+        self._manual_review_cache = None
         panel.calculate_measurements_requested.connect(self.calculate)
         panel.filters_changed.connect(self.apply_filters)
         panel.accept_roi_requested.connect(self.accept_roi)
@@ -145,6 +148,9 @@ class FilteringController(QObject):
             deepcopy(self.panel.filter_settings())
             if self.state.filtering_result is not None else None
         )
+        legacy = self.state.legacy_import
+        if self._pending_filter_settings is None and legacy and self.state.segmentation_result.get("legacy_imported"):
+            self._pending_filter_settings = deepcopy(legacy["settings"])
         worker = FilteringWorker(self.state, config); thread = QThread(self); worker.moveToThread(thread)
         thread.started.connect(worker.run); worker.succeeded.connect(self._calculated); worker.failed.connect(self._failed)
         worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater); thread.finished.connect(self._finished); thread.finished.connect(thread.deleteLater)
@@ -198,16 +204,23 @@ class FilteringController(QObject):
         self.filtered_layer = self.viewer.add_labels(result["filtered_masks"], name="Live filtered masks", scale=spacing, translate=translate,
             metadata={"mask_type": "nuclear", "nucytoseg_filtered_segmentation": True})
         self.filtered_layer.editable = False
+        if result["scientific_roi"] is not None:
+            self._create_roi_layer(result["scientific_roi"], result.get("roi_reviewed"), editable=True)
+
+    def _create_roi_layer(self, roi, reviewed, *, editable=False):
+        spacing = self.state.voxel_spacing_zyx_um
+        oy, ox = self.state.working_offset_yx
         roi_name = (
-            "MNTB ROI — reviewed" if result.get("roi_reviewed")
+            "MNTB ROI — reviewed" if reviewed
             else "MNTB ROI — provisional review"
         )
-        self.roi_layer = self.viewer.add_labels(result["scientific_roi"].astype(np.uint8), name=roi_name, scale=spacing, translate=translate,
+        self.roi_layer = self.viewer.add_labels(roi.astype(np.uint8), name=roi_name, scale=spacing, translate=(0, oy * spacing[1], ox * spacing[2]),
             opacity=.35, visible=False, metadata={"nucytoseg_scientific_roi": True})
-        self.roi_layer.editable = True
-        self._roi_callback = lambda event=None: self.invalidate_roi()
-        for name in self._roi_events:
-            getattr(self.roi_layer.events, name).connect(self._roi_callback)
+        self.roi_layer.editable = editable
+        if editable:
+            self._roi_callback = lambda event=None: self.invalidate_roi()
+            for name in self._roi_events:
+                getattr(self.roi_layer.events, name).connect(self._roi_callback)
     def apply_filters(self, *args):
         current = self.state.filtering_result
         if current is None or not self.state.filtering_is_current or self.busy: return
@@ -230,9 +243,13 @@ class FilteringController(QObject):
             if item["column"] in columns
         }
         masks = self.state.segmentation_result["masks"]
+        # Explicit recalculation uses the desktop counting rule regardless of the
+        # historical rule. Keep the original settings in legacy provenance.
+        settings["z_counting_rule"] = "directional_entry_v1"
         properties, keep = apply_filter_settings(
             current["properties"], masks, roi, settings,
             self.state.voxel_spacing_zyx_um[0],
+            manual_review=self._compatible_manual_review(masks, current["properties"].index, settings, roi),
         )
         retained = properties.index[keep].to_numpy(dtype=int)
         return dict(
@@ -241,6 +258,25 @@ class FilteringController(QObject):
             retained_count=len(retained),
             filtered_masks=np.where(np.isin(masks, retained), masks, 0),
         )
+
+    def _compatible_manual_review(self, masks, ids, settings, roi):
+        record = self.state.segmentation_result.get("manual_review")
+        legacy = self.state.legacy_import
+        if not legacy or not record or not record["decisions"]:
+            return None
+        original = legacy["settings"]
+        if (
+            any(settings[key] != original.get(key) for key in (
+                "z_counting_rule", "first_tissue_z", "last_tissue_z", "z_guard_um", "z_guard_mode"
+            ))
+            or legacy.get("roi_sha256") != mask_digest(roi)
+        ):
+            self.status_changed.emit("Legacy manual decisions retained as history for the original counting settings and ROI.")
+            return None
+        cached = self._manual_review_cache
+        if cached is None or cached[0] is not masks or cached[1] is not record:
+            cached = self._manual_review_cache = (masks, record, ManualReview(masks, ids, record))
+        return cached[2]
     def validate_roi_layer(self):
         if self.roi_layer is None or self.roi_layer not in self.viewer.layers:
             raise ValueError("The scientific ROI layer is missing.")
@@ -297,7 +333,9 @@ class FilteringController(QObject):
             self.state.filtering_result, self.state.filtering_is_current
         )
     def _state_changed(self, result, current):
-        if result is None: self.clear_layers(); self.panel.configure_filtering(None, False)
+        if result is None:
+            self.clear_project()
+            self.panel.configure_filtering(None, False)
         elif not current:
             if self.filtered_layer is not None: self.filtered_layer.name = "Live filtered masks — outdated"
             if self.roi_layer is not None:
@@ -329,6 +367,8 @@ class FilteringController(QObject):
         for layer in (self.filtered_layer, self.roi_layer):
             if layer is not None and layer in self.viewer.layers: self.viewer.layers.remove(layer)
         self.filtered_layer = self.roi_layer = None
-    def clear_project(self): self.clear_layers()
+    def clear_project(self):
+        self.clear_layers()
+        self._manual_review_cache = None
     def dispose(self):
         self.clear_layers(); self.panel.calculate_measurements_requested.disconnect(self.calculate); self.panel.filters_changed.disconnect(self.apply_filters); self.panel.accept_roi_requested.disconnect(self.accept_roi); self.panel.marker_configuration_changed.disconnect(self.update_marker_configuration); self.state.filtering_result_changed.disconnect(self._state_changed)

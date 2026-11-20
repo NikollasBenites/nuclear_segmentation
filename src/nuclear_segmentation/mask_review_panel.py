@@ -356,9 +356,10 @@ class MaskReviewPanel(QWidget):
         for control in (self.first_tissue_z, self.last_tissue_z):
             control.blockSignals(True); control.setRange(0, nz - 1); control.blockSignals(False)
         settings = result.get("settings") or {}
-        volume_high = max(1.0, float(np.ceil(table["volume_um3"].max())))
+        volume_high = max(1.0, settings.get("minimum_volume_um3", 0.0), float(np.ceil(table["volume_um3"].max())))
         self.minimum_volume.setRange(0.0, volume_high)
-        z_high = max(1.0, (nz - 1) * float(self.project_state.voxel_spacing_zyx_um[0]))
+        z_high = max(1.0, settings.get("z_guard_um", 0.0),
+                     (nz - 1) * float(self.project_state.voxel_spacing_zyx_um[0]))
         self.z_guard_um.setRange(0.0, z_high)
         values = (
             (self.minimum_volume, settings.get("minimum_volume_um3", 0.0)),

@@ -429,9 +429,11 @@ class ZCorrectionController(QObject):
                 f"Observed reference: {np.nanmin(observed):.6g}–{np.nanmax(observed):.6g}",
                 f"Smoothed reference: {np.nanmin(smooth):.6g}–{np.nanmax(smooth):.6g}",
                 f"Applied gain: {np.nanmin(gain):.6g}–{np.nanmax(gain):.6g}",
-                f"Processing duration: {report['processing_seconds']:.3f} s",
-                f"Diagnostic sampling: {report['diagnostic_scope']}",
-                f"Preview status: {'current' if current else 'outdated settings'}",
+                ("Legacy applied profile. Corrected preview and diagnostics are unavailable."
+                 if report.get("legacy_recorded") else
+                 f"Processing duration: {report['processing_seconds']:.3f} s\n"
+                 f"Diagnostic sampling: {report['diagnostic_scope']}\n"
+                 f"Preview status: {'current' if current else 'outdated settings'}"),
                 f"Applied configuration: {'yes' if applied else 'no'}",
                 "Segmentation routing: "
                 + (
@@ -443,6 +445,9 @@ class ZCorrectionController(QObject):
             )
         )
         self.panel.set_results(index, text)
+        if report.get("legacy_recorded"):
+            self.panel.clear_profiles()
+            return
         self.panel.set_profiles(
             self._channel(index).name,
             report,
@@ -469,7 +474,7 @@ class ZCorrectionController(QObject):
     def show_profiles(self, channel_index: int, include_zeros: bool) -> bool:
         index = int(channel_index)
         report = self.project_state.z_correction_reports.get(index)
-        if report is None:
+        if report is None or report.get("legacy_recorded"):
             self._status("Calculate this channel before opening Z profiles.")
             return False
         if report["diagnostic_include_zeros"] != bool(include_zeros):

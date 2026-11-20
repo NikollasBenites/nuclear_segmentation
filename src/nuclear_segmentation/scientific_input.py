@@ -144,16 +144,21 @@ def prepare_scientific_input(project_state, config: dict[str, Any]) -> Scientifi
         ),
     )
     prepare_volumes(namespace)
+    return ScientificInput(namespace=namespace, provenance=scientific_input_provenance(project_state, validated))
+
+
+def scientific_input_provenance(project_state, validated):
+    """Describe the existing grid and executed settings without preparing pixels."""
+    dataset = project_state.working_dataset
     crop = project_state.crop_provenance
-    provenance = {
+    return {
         "source_path": str(dataset.source_path),
         "source_series": int(dataset.series_index),
-        "working_shape_czyx": tuple(int(value) for value in image.shape),
-        "voxel_spacing_zyx_um": spacing,
+        "working_shape_czyx": tuple(dataset.standardized_shape),
+        "voxel_spacing_zyx_um": tuple(float(value) for value in project_state.voxel_spacing_zyx_um),
         "working_offset_yx": tuple(int(value) for value in project_state.working_offset_yx),
         "crop_type": None if crop is None else crop.selection_type,
         "segmentation_channel": validated["SEGMENTATION_CHANNEL"],
         "z_corrections": deepcopy(validated["Z_CORRECTIONS"]),
         "cellpose_normalize": deepcopy(validated["CELLPOSE_NORMALIZE"]),
     }
-    return ScientificInput(namespace=namespace, provenance=provenance)

@@ -175,6 +175,9 @@ class QuantificationPanel(QWidget):
             "Descriptive retained-nucleus density; not an unbiased stereological estimator."
         )
         root.addWidget(self.interpretation)
+        self.historical_density = self._label()
+        root.addWidget(self.historical_density)
+        self.historical_density.hide()
         root.addStretch(1)
 
         project_state.segmentation_result_changed.connect(self.refresh)
@@ -217,6 +220,7 @@ class QuantificationPanel(QWidget):
         state = self.project_state
         if state.restoring_project:
             return
+        self._show_historical_density()
         segmentation = state.segmentation_result
         filtering = state.filtering_result
         if segmentation is None or not state.segmentation_is_current:
@@ -243,6 +247,7 @@ class QuantificationPanel(QWidget):
 
     def show_restored_result(self):
         state = self.project_state
+        self._show_historical_density()
         if state.quantification_is_current:
             self._display(state.quantification_result)
             return
@@ -254,6 +259,41 @@ class QuantificationPanel(QWidget):
             total = len(state.filtering_result["properties"])
             self.summary_values["retained"].setText(f"{retained:,}")
             self.summary_values["excluded"].setText(f"{total - retained:,}")
+
+    def _show_historical_density(self):
+        legacy = self.project_state.legacy_import or {}
+        tables = legacy.get("tables", {})
+        table = tables.get("mntb_density_summary")
+        summary = tables.get("analysis_summary")
+        if table is None and summary is not None and "density_status" in summary:
+            table = summary
+        self.historical_density.setVisible(table is not None and len(table) == 1)
+        if table is None or len(table) != 1:
+            return
+        record = table.iloc[0]
+        summary = summary.iloc[0] if summary is not None and len(summary) == 1 else {}
+        fields = (
+            ("Total masks", summary, "total_cellpose_masks", ""),
+            ("Retained masks", record, "retained_nuclei_in_roi", ""),
+            ("Excluded masks", summary, "excluded_masks", ""),
+            ("Effective sampling volume", record, "roi_effective_volume_um3", " µm³"),
+            ("Measured full tissue thickness", record, "measured_full_tissue_thickness_um", " µm"),
+            ("Nominal section thickness", record, "nominal_section_thickness_um", " µm"),
+            ("Measured density", record, "retained_nuclei_per_100um_cube", " nuclei/(100 µm)³"),
+            ("Nominal-thickness-corrected density", record, "nominal_corrected_nuclei_per_100um_cube", " nuclei/(100 µm)³"),
+            ("Counting rule", record, "counting_rule", ""),
+            ("Physical Z-guard exclusions", summary, "excluded_by_z_guard", ""),
+            ("ROI or counting Z exclusions", summary, "failed_outside_sampling_roi_or_z_range", ""),
+            ("Physical volume failures", summary, "failed_physical_volume", ""),
+            ("Sphericity failures", summary, "failed_sphericity", ""),
+            ("Manual exclusions", summary, "failed_manual_exclusion", ""),
+        )
+        lines = ["Historical legacy quantification", "Saved values from the original export."]
+        for label, values, key, units in fields:
+            value = values.get(key)
+            if isinstance(value, str) or (value is not None and np.isfinite(value)):
+                lines.append(f"{label} · {value}{units}")
+        self.historical_density.setText("\n".join(lines))
 
     def _clear(self, message, *, preserve_total=False):
         self.status.setText(message)

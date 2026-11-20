@@ -31,6 +31,7 @@ from .image_preparation_workspace import ImagePreparationController
 from .image_export_workspace import ImageExportController
 from .import_loading import ImportLoadingDialog
 from .layer_panel import LayerPanel
+from .legacy_import import import_legacy_analysis
 from .lif_import import LifEnumerationWorker, LifImportWorker
 from .mask_selection import MaskSelectionController
 from .native_project import ProjectWorker, open_project, save_project, snapshot_state
@@ -435,6 +436,7 @@ class DesktopWindow(QMainWindow):
     def _create_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         file_menu.addActions(self.project_actions)
+        file_menu.addAction(self.import_legacy_action)
         file_menu.addAction(self.open_image_action)
         file_menu.addAction(self.close_project_action)
         file_menu.addSeparator()
@@ -518,6 +520,11 @@ class DesktopWindow(QMainWindow):
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
             panel.project_actions.addWidget(button, position // 2, position % 2)
             self.project_actions.append(action)
+        self.import_legacy_action = QAction("Import Legacy Analysis…", self)
+        self.import_legacy_action.triggered.connect(lambda: self.import_legacy_project())
+        legacy_button = QToolButton()
+        legacy_button.setDefaultAction(self.import_legacy_action)
+        panel.project_actions.addWidget(legacy_button, 2, 0, 1, 2)
         state = self.project_state
         prep = self.context_panel.preprocessing_page
         for signal in (
@@ -544,6 +551,7 @@ class DesktopWindow(QMainWindow):
 
     def _update_project_actions(self):
         available = self._import_thread is None
+        self.import_legacy_action.setEnabled(available)
         for action in self.project_actions[:2]:
             action.setEnabled(available)
         for action in self.project_actions[2:]:
@@ -655,6 +663,30 @@ class DesktopWindow(QMainWindow):
             relocated=replacement is not None,
         )
 
+    def import_legacy_project(self, directory=None, *, replacement=None):
+        if not self._project_idle():
+            return False
+        if directory is None:
+            directory = QFileDialog.getExistingDirectory(self, "Import Legacy Analysis Folder")
+        if not directory:
+            return False
+        folder = Path(directory).expanduser().absolute()
+        return self._start_project_job(
+            "legacy", folder, partial(import_legacy_analysis, folder, replacement, self._bioimage_factory)
+        )
+
+    def _confirm_legacy_import(self, summary):
+        return QMessageBox.question(
+            self, "Legacy Analysis Compatibility", summary + "\n\nImport this analysis?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel,
+        ) == QMessageBox.StandardButton.Yes
+
+    def _complete_legacy_import(self, dataset, restored, payload):
+        if self._restore_native_project(dataset, restored, payload):
+            self.project_dirty = True
+            self._update_project_actions()
+            self.statusBar().showMessage("Legacy analysis imported. Use Save Project As to convert it.", 7000)
+
     def _start_project_job(self, kind, folder, operation, after=None, *, relocated=False):
         worker = ProjectWorker(operation)
         controls = (self.centralWidget(), self.menuBar(), self.graph_window)
@@ -667,7 +699,9 @@ class DesktopWindow(QMainWindow):
         worker.succeeded.connect(self._project_io_succeeded)
         worker.failed.connect(self._project_io_failed)
         worker.missing_source.connect(self._project_source_missing)
-        progress = QProgressDialog("Saving project…" if kind == "save" else "Opening project…", "", 0, 0, self)
+        progress = QProgressDialog({
+            "save": "Saving project…", "open": "Opening project…", "legacy": "Verifying legacy analysis…",
+        }[kind], "", 0, 0, self)
         progress.setCancelButton(None)
         progress.setWindowTitle("NuCytoSeg Project")
         progress.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -696,13 +730,23 @@ class DesktopWindow(QMainWindow):
                 self, "Locate Original Image", job["missing"], "Microscopy images (*.tif *.tiff *.lif)"
             )
             if path:
-                self.open_project(folder, replacement=path, confirm=False)
+                if job["kind"] == "legacy":
+                    self.import_legacy_project(folder, replacement=path)
+                else:
+                    self.open_project(folder, replacement=path, confirm=False)
             return
         if "error" in job:
             QMessageBox.warning(self, "NuCytoSeg Project", job["error"])
             return
         result = job.get("result")
         if result is None:
+            return
+        if job["kind"] == "legacy":
+            dataset, restored, payload, summary = result
+            if self._confirm_legacy_import(summary):
+                complete = partial(self._complete_legacy_import, dataset, restored, payload)
+                if self._confirm_close_project(complete):
+                    complete()
             return
         if job["kind"] == "open":
             revision, dataset, restored, payload = result
@@ -804,6 +848,8 @@ class DesktopWindow(QMainWindow):
                     review.accept_roi_button.setEnabled(False)
                     review.roi_status.setText("Saved ROI layer geometry was incompatible. Recalculate measurements to review a new ROI.")
                 review._filter_timer.stop()
+            elif state.scientific_roi is not None and state.segmentation_is_current:
+                self.filtering._create_roi_layer(state.scientific_roi, state.scientific_roi_reviewed)
             state.scientific_roi_changed.emit(state.scientific_roi, state.scientific_roi_reviewed)
             state.quantification_result_changed.emit(state.quantification_result, state.quantification_is_current)
             self.context_panel.quantification_page.show_restored_result()

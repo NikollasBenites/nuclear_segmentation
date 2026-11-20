@@ -40,7 +40,14 @@ def _write_scientific_package(namespace):
         if len(names) != len(set(names)) or "perinuclear_marker" in names:
             raise ValueError("Marker names would produce conflicting TIFF filenames.")
 
-    namespace["manual_review"] = ManualReview(masks, namespace["filter_properties"].index)
+    properties = namespace["filter_properties"]
+    saved = namespace.pop("saved_manual_review", None)
+    review = ManualReview(masks, properties.index, saved)
+    # Export only decisions that are active in the current counting result.
+    if saved and "manual_decision" in properties:
+        review.decisions = {label: item for label, item in review.decisions.items()
+                            if properties.loc[label, "manual_decision"] == item["decision"]}
+    namespace["manual_review"] = review
     try:
         execute_stage(namespace, "export")
     except Exception:
@@ -291,13 +298,15 @@ class ImageExportController(QObject):
             ANISOTROPY=executed.get("anisotropy", spacing[0] / np.mean(spacing[1:])),
             NOMINAL_SECTION_THICKNESS_UM=density["nominal_section_thickness_um"],
             DEFAULT_INPUT=source.source_path,
-            INPUT_SHA256=None,
+            INPUT_SHA256=source.source_sha256,
             image_information={
                 "source_format": source.source_format,
                 "series_index": source.series_index,
                 "series_identifier": source.series_identifier,
                 "series_name": source.series_name,
                 "time_index": source.time_index,
+                "axes_override": source.axes_override,
+                "original_channel_names": [channel.original_name for channel in source.channels],
                 "reported_axes": source.reported_axes,
                 "reported_shape": source.reported_shape,
                 "axes_interpreted_before_reorder": source.acquisition_metadata.get(
@@ -324,6 +333,7 @@ class ImageExportController(QObject):
             masks=masks,
             filtered_masks=filtering["filtered_masks"],
             filter_properties=properties,
+            saved_manual_review=segmentation.get("manual_review"),
             current_keep=keep,
             background_table=filtering["background_table"],
             calculate_perinuclear_filter_keep=partial(calculate_perinuclear_filter_keep, properties),

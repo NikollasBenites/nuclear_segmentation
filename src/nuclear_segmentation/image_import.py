@@ -192,18 +192,3 @@ class TiffImportWorker(QObject):
             self.succeeded.emit(dataset)
         finally:
             self.finished.emit()
-    def __init__(self, path, options: dict, parent: QObject | None = None):
-        super().__init__(parent)
-        self.path = Path(path)
-        self.options = dict(options)
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            dataset = load_tiff_dataset(self.path, **self.options)
-        except Exception as error:
-            self.failed.emit(str(error))
-        else:
-            self.succeeded.emit(dataset)
-        finally:
-            self.finished.emit()
