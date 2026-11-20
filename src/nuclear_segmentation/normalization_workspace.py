@@ -666,7 +666,7 @@ class NormalizationController(QObject):
         thread.start()
         return True
 
-    def _show_preview(self, report, preview, elapsed: float) -> None:
+    def _show_preview(self, report, preview, elapsed: float, *, restoring=False) -> None:
         try:
             current = normalization_fingerprint(
                 self.project_state, _options_from_report(report)
@@ -701,7 +701,8 @@ class NormalizationController(QObject):
         )
         self._report = deepcopy(report)
         self._fingerprint = current
-        self.project_state.set_normalization_preview(report)
+        if not restoring:
+            self.project_state.set_normalization_preview(report)
         full_low, full_high = report["full_lowhigh"]
         lines = [
             "Normalization Preview",

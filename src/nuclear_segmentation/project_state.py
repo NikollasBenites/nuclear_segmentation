@@ -36,6 +36,8 @@ class ImportedDataset:
     channels: tuple[ChannelDescriptor, ...]
     time_index: int = 0
     acquisition_metadata: dict[str, Any] = field(default_factory=dict)
+    source_sha256: str | None = None
+    axes_override: str | None = None
 
     @property
     def source_filename(self) -> str:
@@ -107,6 +109,7 @@ class ProjectState(QObject):
         self.scientific_roi_provenance: dict[str, Any] | None = None
         self.quantification_result: dict[str, Any] | None = None
         self.quantification_is_current = False
+        self.restoring_project = False
 
     @property
     def dataset_ready(self) -> bool:

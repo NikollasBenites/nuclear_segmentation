@@ -1,7 +1,8 @@
 """Phase 2B.1 projection and non-destructive XY crop controls."""
 from __future__ import annotations
 
-from qtpy.QtCore import Signal
+from contextlib import ExitStack
+from qtpy.QtCore import QSignalBlocker, Signal
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -294,21 +295,44 @@ class PreprocessingPanel(QWidget):
             )
 
     def normalization_options(self) -> dict:
+        options = self.normalization_settings()
+        if not 0 <= options["lower"] < options["upper"] <= 100:
+            raise ValueError("Percentiles must satisfy 0 <= lower < upper <= 100.")
+        if options["channel_index"] is None:
+            raise ValueError("Select a normalization source channel.")
+        return options
+
+    def normalization_settings(self) -> dict:
         lower = float(self.normalization_lower.value())
         upper = float(self.normalization_upper.value())
-        if not 0 <= lower < upper <= 100:
-            raise ValueError("Percentiles must satisfy 0 <= lower < upper <= 100.")
-        channel_index = self.normalization_channel_combo.currentData()
-        if channel_index is None:
-            raise ValueError("Select a normalization source channel.")
         return {
-            "channel_index": int(channel_index),
+            "channel_index": self.normalization_channel_combo.currentData(),
             "mode": str(self.normalization_mode_combo.currentData()),
             "lower": lower,
             "upper": upper,
             "norm3D": bool(self.normalization_norm3d.isChecked()),
             "input_source": str(self.normalization_input_combo.currentData()),
         }
+
+    def restore_normalization_settings(self, options):
+        with ExitStack() as signals:
+            fields = (
+                (self.normalization_channel_combo, "channel_index"),
+                (self.normalization_mode_combo, "mode"),
+                (self.normalization_input_combo, "input_source"),
+            )
+            for field in (*[field for field, _ in fields], self.normalization_lower,
+                          self.normalization_upper, self.normalization_norm3d):
+                signals.enter_context(QSignalBlocker(field))
+            for field, key in fields:
+                index = field.findData(options[key])
+                if index >= 0:
+                    field.setCurrentIndex(index)
+                if key == "channel_index":
+                    self.refresh_normalization_inputs()
+            self.normalization_lower.setValue(options["lower"])
+            self.normalization_upper.setValue(options["upper"])
+            self.normalization_norm3d.setChecked(options["norm3D"])
 
     def refresh_normalization_inputs(self, *args, prefer_effective=False) -> None:
         previous = self.normalization_input_combo.currentData()
@@ -324,7 +348,7 @@ class PreprocessingPanel(QWidget):
                 "options"
             ) == self.project_state.z_correction_options[int(channel_index)]
         )
-        self.normalization_input_combo.blockSignals(True)
+        blocked = self.normalization_input_combo.blockSignals(True)
         self.normalization_input_combo.clear()
         self.normalization_input_combo.addItem(
             "Original working image", "working_original"
@@ -345,7 +369,7 @@ class PreprocessingPanel(QWidget):
             wanted = "z_corrected"
         position = self.normalization_input_combo.findData(wanted)
         self.normalization_input_combo.setCurrentIndex(max(0, position))
-        self.normalization_input_combo.blockSignals(False)
+        self.normalization_input_combo.blockSignals(blocked)
         self._normalization_input_channel = (
             None if channel_index is None else int(channel_index)
         )

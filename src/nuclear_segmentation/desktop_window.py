@@ -1,6 +1,8 @@
 """Independent NuCytoSeg QMainWindow composition."""
 from __future__ import annotations
 
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
 import logging
 
@@ -13,6 +15,7 @@ from qtpy.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QSplitter,
     QToolButton,
     QVBoxLayout,
@@ -30,6 +33,7 @@ from .import_loading import ImportLoadingDialog
 from .layer_panel import LayerPanel
 from .lif_import import LifEnumerationWorker, LifImportWorker
 from .mask_selection import MaskSelectionController
+from .native_project import ProjectWorker, open_project, save_project, snapshot_state
 from .napari_embedding import DISPLAY_NAME, EmbeddedNapariWidget
 from .normalization_workspace import NormalizationController
 from .selected_mask_panel import SelectedMaskPanel
@@ -72,6 +76,10 @@ class DesktopWindow(QMainWindow):
         self._focus_snapshot = None
         self._import_thread = None
         self._import_worker = None
+        self._project_job = None
+        self.project_directory = None
+        self._project_revision = None
+        self.project_dirty = False
         self._pending_import_path: Path | None = None
         self._pending_lif_series = None
         self._loading_dialog = None
@@ -245,6 +253,7 @@ class DesktopWindow(QMainWindow):
         self.context_panel.project_page.close_requested.connect(self.close_project)
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
+        self._connect_project_actions()
         self.context_panel.project_page.availability_changed.connect(
             self.close_project_action.setEnabled
         )
@@ -372,7 +381,7 @@ class DesktopWindow(QMainWindow):
 
     def _create_actions(self) -> None:
         self.open_image_action = QAction("Open Image…", self)
-        self.open_image_action.setShortcut(QKeySequence.StandardKey.Open)
+        self.open_image_action.setShortcut("Ctrl+Shift+O")
         self.open_image_action.setIcon(icon("open", accent=True))
         self.open_image_action.triggered.connect(self.open_image_dialog)
 
@@ -425,6 +434,7 @@ class DesktopWindow(QMainWindow):
 
     def _create_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
+        file_menu.addActions(self.project_actions)
         file_menu.addAction(self.open_image_action)
         file_menu.addAction(self.close_project_action)
         file_menu.addSeparator()
@@ -491,22 +501,316 @@ class DesktopWindow(QMainWindow):
             for layer in self.embedding.viewer.layers
         )
 
-    def _confirm_close_project(self) -> bool:
+    def _connect_project_actions(self):
+        panel = self.context_panel.project_page
+        self.project_actions = []
+        for position, (name, shortcut, handler) in enumerate((
+            ("New Project", QKeySequence.StandardKey.New, self.new_project),
+            ("Open Project…", QKeySequence.StandardKey.Open, self.open_project),
+            ("Save Project", QKeySequence.StandardKey.Save, self.save_project),
+            ("Save Project As…", QKeySequence.StandardKey.SaveAs, partial(self.save_project, save_as=True)),
+        )):
+            action = QAction(name, self)
+            action.setShortcut(shortcut)
+            action.triggered.connect(lambda checked=False, callback=handler: callback())
+            button = QToolButton()
+            button.setDefaultAction(action)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            panel.project_actions.addWidget(button, position // 2, position % 2)
+            self.project_actions.append(action)
+        state = self.project_state
+        prep = self.context_panel.preprocessing_page
+        for signal in (
+            state.changed, state.channels_changed, state.calibration_changed,
+            state.normalization_changed, state.normalization_roi_changed,
+            state.z_correction_changed, state.segmentation_result_changed,
+            state.filtering_result_changed, state.scientific_roi_changed,
+            state.perinuclear_markers_changed, self.crop_workspace.working_dataset_changed,
+            prep.normalization_settings_changed, prep.z_correction_panel.settings_changed,
+            prep.z_correction_panel.include_zeros.toggled,
+            prep.z_correction_panel.channel_list.itemSelectionChanged,
+            prep.z_correction_panel.inspected_channel_changed,
+            prep.channel_combo.currentIndexChanged, prep.method_combo.currentIndexChanged,
+            self.context_panel.segmentation_page.configuration_changed,
+            self.context_panel.mask_review_page.filters_edited, panel.analysis_mode_changed,
+        ):
+            signal.connect(self._mark_project_dirty)
+        self._update_project_actions()
+
+    def _mark_project_dirty(self, *args):
+        if self.project_state.dataset_ready and not self.project_state.restoring_project:
+            self.project_dirty = True
+        self._update_project_actions()
+
+    def _update_project_actions(self):
+        available = self._import_thread is None
+        for action in self.project_actions[:2]:
+            action.setEnabled(available)
+        for action in self.project_actions[2:]:
+            action.setEnabled(available and self.project_state.dataset_ready)
+        label = self.context_panel.project_page.project_description
+        path = self.project_directory
+        title = path.name if path else ("Unsaved project" if self.project_state.dataset_ready else "No native project directory")
+        label.setText(title + (" · Unsaved changes" if path and self.project_dirty else ""))
+        label.setToolTip(str(path or ""))
+
+    def _project_idle(self):
+        if self._import_thread is not None or any(controller.busy for controller in (
+            self.crop_workspace, self.normalization, self.z_correction, self.image_preparation,
+            self.image_export, self.segmentation, self.filtering,
+        )):
+            self.statusBar().showMessage("Wait for the active operation to finish.", 5000)
+            return False
+        return True
+
+    def new_project(self):
+        if not self._project_idle():
+            return False
+        if self._project_has_user_data() or self._pending_import_path is not None:
+            if not self._confirm_close_project(self.new_project):
+                return False
+            self.close_project(confirm=False)
+        self.set_workflow("project")
+        return True
+
+    def _ask_project_changes(self):
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Icon.Warning)
-        dialog.setWindowTitle("Close Project?")
-        dialog.setText(
-            "Closing this project will discard unsaved changes, including mask "
-            "edits and unsaved analysis results.\n\n"
-            "The original source image will not be modified."
-        )
-        close_button = dialog.addButton(
-            "Close without Saving", QMessageBox.ButtonRole.DestructiveRole
-        )
-        dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
-        dialog.setDefaultButton(dialog.buttons()[-1])
+        dialog.setWindowTitle("Unsaved Project")
+        dialog.setText("Save the current analysis before closing or replacing it?")
+        save = dialog.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        save.setEnabled(self.project_state.dataset_ready)
+        discard = dialog.addButton("Discard Changes", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = dialog.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel)
         dialog.exec()
-        return dialog.clickedButton() is close_button
+        return {save: "save", discard: "discard"}.get(dialog.clickedButton(), "cancel")
+
+    def _confirm_close_project(self, after=None) -> bool:
+        if not self.project_dirty:
+            return True
+        choice = self._ask_project_changes()
+        if choice == "save":
+            self.save_project(after=after or partial(self.close_project, confirm=False))
+        return choice == "discard"
+
+    def save_project(self, directory=None, *, save_as=False, after=None):
+        if not self._project_idle() or not self.project_state.dataset_ready:
+            return False
+        state = self.project_state
+        review = self.context_panel.mask_review_page
+        if state.filtering_result is not None and review._filter_timer.isActive():
+            self.statusBar().showMessage("Wait for the filter settings to settle before saving.", 5000)
+            return False
+        active = self._project_revision if not save_as and (
+            directory is None or Path(directory).expanduser().absolute() == self.project_directory
+        ) else None
+        directory = directory or (self.project_directory if active else None)
+        if directory is None:
+            directory, _ = QFileDialog.getSaveFileName(
+                self, "Name the New Project Folder", str(state.original_dataset.source_path.with_suffix(".ncs-project"))
+            )
+        if not directory:
+            return False
+        folder = Path(directory).expanduser().absolute()
+        prep = self.context_panel.preprocessing_page
+        z_panel = prep.z_correction_panel
+        snapshot = snapshot_state(state)
+        roi_grid_compatible = True
+        if self.filtering.roi_layer is not None:
+            try:
+                self.filtering.validate_roi_layer()
+            except ValueError:
+                roi_grid_compatible = False
+        snapshot.update(
+            projection_settings=(prep.channel_combo.currentData(), prep.method_combo.currentData()),
+            roi_grid_compatible=roi_grid_compatible,
+            z_settings={channel.index: z_panel.options_for(channel.index) for channel in state.channels},
+            z_inspected=z_panel.current_index(),
+            z_selected=z_panel.selected_indexes(),
+            z_include_zeros=z_panel.include_zeros.isChecked(),
+            z_previews={index: layer.data for index, layer in self.z_correction.preview_layers.items()
+                        if index in state.z_correction_reports},
+            normalization_settings=prep.normalization_settings(),
+            normalization_pixels=(self.normalization.preview_layer.data
+                                  if self.normalization.preview_layer is not None else None),
+            segmentation_settings=self.context_panel.segmentation_page.pending_config(),
+            filter_controls=review.filter_settings(),
+            intensity_controls=review.intensity_control_settings(),
+        )
+        return self._start_project_job("save", folder, partial(save_project, folder, snapshot, active), after)
+
+    def open_project(self, directory=None, *, replacement=None, confirm=True):
+        if not self._project_idle():
+            return False
+        if directory is None:
+            directory = QFileDialog.getExistingDirectory(self, "Open NuCytoSeg Project Folder")
+        if not directory:
+            return False
+        folder = Path(directory).expanduser().absolute()
+        if confirm and not self._confirm_close_project(partial(self.open_project, folder, confirm=False)):
+            return False
+        return self._start_project_job(
+            "open", folder, partial(open_project, folder, replacement, self._bioimage_factory),
+            relocated=replacement is not None,
+        )
+
+    def _start_project_job(self, kind, folder, operation, after=None, *, relocated=False):
+        worker = ProjectWorker(operation)
+        controls = (self.centralWidget(), self.menuBar(), self.graph_window)
+        self._project_job = {
+            "kind": kind, "folder": folder, "after": after, "relocated": relocated,
+            "controls": [(widget, widget.isEnabled()) for widget in controls],
+        }
+        for widget in controls:
+            widget.setEnabled(False)
+        worker.succeeded.connect(self._project_io_succeeded)
+        worker.failed.connect(self._project_io_failed)
+        worker.missing_source.connect(self._project_source_missing)
+        progress = QProgressDialog("Saving project…" if kind == "save" else "Opening project…", "", 0, 0, self)
+        progress.setCancelButton(None)
+        progress.setWindowTitle("NuCytoSeg Project")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self._project_job["progress"] = progress
+        self._start_worker(worker, project=True)
+        progress.show()
+        return True
+
+    def _project_io_succeeded(self, result):
+        self._project_job["result"] = result
+
+    def _project_io_failed(self, message):
+        self._project_job["error"] = message
+
+    def _project_source_missing(self, path):
+        self._project_job["missing"] = path
+
+    def _finish_project_job(self, job):
+        job["progress"].close()
+        job["progress"].deleteLater()
+        for widget, enabled in job["controls"]:
+            widget.setEnabled(enabled)
+        folder = job["folder"]
+        if "missing" in job:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Locate Original Image", job["missing"], "Microscopy images (*.tif *.tiff *.lif)"
+            )
+            if path:
+                self.open_project(folder, replacement=path, confirm=False)
+            return
+        if "error" in job:
+            QMessageBox.warning(self, "NuCytoSeg Project", job["error"])
+            return
+        result = job.get("result")
+        if result is None:
+            return
+        if job["kind"] == "open":
+            revision, dataset, restored, payload = result
+            if not self._restore_native_project(dataset, restored, payload):
+                return
+        else:
+            revision, digest = result
+            state = self.project_state
+            state.original_dataset = replace(state.original_dataset, source_sha256=digest)
+            state.working_dataset = replace(state.working_dataset, source_sha256=digest)
+            state.dataset = state.working_dataset
+        self.project_directory = folder
+        self._project_revision = revision
+        self.project_dirty = job["relocated"]
+        self._update_project_actions()
+        self.statusBar().showMessage(f"Project {'opened' if job['kind'] == 'open' else 'saved'} · {folder.name}", 5000)
+        if job["after"] is not None:
+            job["after"]()
+
+    def _restore_native_project(self, dataset, restored, payload):
+        state = self.project_state
+        state.restoring_project = True
+        try:
+            if not self._apply_imported_dataset(dataset, restored):
+                return False
+            state.channels = restored["channels"]
+            state.segmentation_channel_index = restored["segmentation_channel_index"]
+            state.channels_changed.emit(tuple(state.channels))
+            # Channel/calibration notifications must precede restored preprocessing.
+            state.set_calibration(restored["voxel_spacing_zyx_um"], restored["calibration_source"])
+            normalization_keys = ("normalization_configuration", "normalization_preview", "normalization_is_current")
+            for key, value in restored.items():
+                if key not in normalization_keys:
+                    setattr(state, key, value)
+            state.dataset = state.working_dataset
+            state.z_correction_changed.emit(None)
+            for key in normalization_keys:
+                setattr(state, key, restored[key])
+            project = self.context_panel.project_page
+            project.analysis_mode.setCurrentIndex(project.analysis_mode.findData(state.analysis_mode))
+            project.time_index.setValue(dataset.time_index)
+            project.axes_override.setText(dataset.axes_override or "")
+            for field, spacing in zip(project.spacing_fields, state.voxel_spacing_zyx_um, strict=True):
+                field.setText(f"{spacing:g}")
+            project.calibration_source.setText(state.calibration_source)
+            state.perinuclear_markers_changed.emit(tuple(state.perinuclear_markers))
+            prep = self.context_panel.preprocessing_page
+            channel, method = payload["projection_settings"]
+            prep.channel_combo.setCurrentIndex(prep.channel_combo.findData(channel))
+            prep.method_combo.setCurrentIndex(prep.method_combo.findData(method))
+            z_panel = prep.z_correction_panel
+            z_panel._settings.update(payload["z_settings"])
+            for row in range(z_panel.channel_list.count()):
+                item = z_panel.channel_list.item(row)
+                item.setSelected(item.data(Qt.ItemDataRole.UserRole) in payload["z_selected"])
+            z_panel.include_zeros.setChecked(payload["z_include_zeros"])
+            z_index = payload["z_inspected"]
+            position = z_panel.inspect_combo.findData(z_index)
+            if position >= 0:
+                z_panel.inspect_combo.setCurrentIndex(position)
+            z_panel._load_current_settings()
+            for index in state.z_correction_reports:
+                self.z_correction.invalidate_channel(index)
+            if payload["z_previews"]:
+                self.z_correction._set_previews(payload["z_previews"], z_panel.current_index())
+                for index, layer in self.z_correction.preview_layers.items():
+                    if index in state.z_correction_applied:
+                        layer.metadata["z_correction_applied"] = True
+                        layer.name = f"Z-corrected applied · {state.channels[index].name}"
+                    self.z_correction.invalidate_channel(index)
+            self.z_correction._refresh_results()
+            prep.restore_normalization_settings(payload["normalization_settings"])
+            if state.normalization_roi_mask_yx is not None:
+                self.normalization._show_existing_roi_overlay()
+                prep.set_normalization_roi_status("Restored normalization reference ROI.")
+            if state.normalization_preview is not None and payload["normalization_pixels"] is not None:
+                self.normalization._show_preview(
+                    state.normalization_preview, payload["normalization_pixels"], 0.0, restoring=True
+                )
+            if state.normalization_is_current:
+                prep.set_normalization_status(
+                    "Applied normalization restored.", preview_ready=self.normalization.preview_layer is not None
+                )
+            state.normalization_changed.emit(state.normalization_configuration, state.normalization_is_current)
+            segmentation_panel = self.context_panel.segmentation_page
+            segmentation_panel.restore_settings(payload["segmentation_settings"])
+            state.segmentation_result_changed.emit(state.segmentation_result, state.segmentation_is_current)
+            filtering = state.filtering_result
+            review = self.context_panel.mask_review_page
+            state.filtering_result_changed.emit(filtering, state.filtering_is_current)
+            if filtering is not None:
+                if state.segmentation_is_current and payload["roi_grid_compatible"]:
+                    self.filtering._create_layers(filtering)
+                    if not state.filtering_is_current:
+                        self.filtering.filtered_layer.name = "Live filtered masks — outdated"
+                review.configure_filtering(dict(filtering, settings=payload["filter_controls"]), state.filtering_is_current)
+                review.restore_intensity_controls(payload["intensity_controls"])
+                if not payload["roi_grid_compatible"]:
+                    review.accept_roi_button.setEnabled(False)
+                    review.roi_status.setText("Saved ROI layer geometry was incompatible. Recalculate measurements to review a new ROI.")
+                review._filter_timer.stop()
+            state.scientific_roi_changed.emit(state.scientific_roi, state.scientific_roi_reviewed)
+            state.quantification_result_changed.emit(state.quantification_result, state.quantification_is_current)
+            self.context_panel.quantification_page.show_restored_result()
+            self.set_workflow("project")
+            return True
+        finally:
+            state.restoring_project = False
 
     def close_project(self, *, confirm: bool = True) -> bool:
         if self._import_thread is not None:
@@ -552,6 +856,9 @@ class DesktopWindow(QMainWindow):
         self._load_after_worker_finished = False
         self._finish_loading_dialog()
         self.project_state.clear_project()
+        self.project_directory = self._project_revision = None
+        self.project_dirty = False
+        self._update_project_actions()
         self.context_panel.project_page.clear_project()
         self.close_project_action.setEnabled(False)
         self.set_workflow("project")
@@ -560,27 +867,11 @@ class DesktopWindow(QMainWindow):
         return True
 
     def prepare_image_import(self, path, *, confirm_replacement: bool = True) -> bool:
-        if self._import_thread is not None:
-            self.statusBar().showMessage("An image import is already running", 4000)
-            return False
-        if self.crop_workspace.busy or self.image_export.busy or self.segmentation.busy:
-            self.statusBar().showMessage(
-                "Wait for active preprocessing or image export to finish before "
-                "opening another image",
-                5000,
-            )
+        if not self._project_idle():
             return False
         source = Path(path).expanduser().resolve()
         if confirm_replacement and self._project_has_user_data():
-            response = QMessageBox.question(
-                self,
-                "Replace current project?",
-                "Opening another image will replace the current viewer dataset. "
-                "Unsaved masks or edits are not saved by Phase 2A.1. Continue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if response != QMessageBox.StandardButton.Yes:
+            if not self._confirm_close_project(partial(self.prepare_image_import, source, confirm_replacement=False)):
                 return False
         if source.suffix.lower() == ".lif":
             if not source.is_file():
@@ -615,7 +906,7 @@ class DesktopWindow(QMainWindow):
         return self.load_pending_image()
 
     def load_pending_image(self) -> bool:
-        if self._pending_import_path is None or self._import_thread is not None:
+        if self._pending_import_path is None or not self._project_idle():
             return False
         panel = self.context_panel.project_page
         try:
@@ -643,11 +934,12 @@ class DesktopWindow(QMainWindow):
         self._start_worker(worker)
         return True
 
-    def _start_worker(self, worker) -> None:
+    def _start_worker(self, worker, *, project=False) -> None:
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.failed.connect(self._show_import_error)
+        if not project:
+            worker.failed.connect(self._show_import_error)
         diagnostic = getattr(worker, "diagnostic", None)
         if diagnostic is not None:
             diagnostic.connect(self._record_import_diagnostic)
@@ -659,6 +951,7 @@ class DesktopWindow(QMainWindow):
         self._import_worker = worker
         self.open_image_action.setEnabled(False)
         self.context_panel.project_page.set_loading(True)
+        self._update_project_actions()
         thread.start()
 
     def _show_lif_loading_dialog(self) -> None:
@@ -716,6 +1009,11 @@ class DesktopWindow(QMainWindow):
         self._import_worker = None
         self.open_image_action.setEnabled(True)
         self.context_panel.project_page.set_loading(False)
+        self._update_project_actions()
+        if self._project_job is not None:
+            job, self._project_job = self._project_job, None
+            self._finish_project_job(job)
+            return
         if self._close_when_import_finishes:
             self._close_when_import_finishes = False
             self.close()
@@ -725,8 +1023,7 @@ class DesktopWindow(QMainWindow):
             self.load_pending_image()
             return
 
-    def _apply_imported_dataset(self, dataset) -> None:
-        self.crop_workspace.clear_workspace_for_new_project()
+    def _apply_imported_dataset(self, dataset, restored=None) -> bool:
         self._record_import_diagnostic(
             f"layer_creation_started: file={dataset.source_filename} "
             f"series={dataset.series_index}"
@@ -739,22 +1036,28 @@ class DesktopWindow(QMainWindow):
                 "nucytoseg_selection_highlight", False
             )
         ]
+        grid = restored["working_dataset"] if restored else dataset
+        channels = restored["channels"] if restored else dataset.channels
+        spacing = restored["voxel_spacing_zyx_um"] if restored else dataset.voxel_spacing_zyx_um
+        oy, ox = restored["working_offset_yx"] if restored else (0, 0)
         added = []
         try:
-            for channel in dataset.channels:
+            for channel in channels:
                 added.append(
                     viewer.add_image(
-                        dataset.data_czyx[channel.index],
+                        grid.data_czyx[channel.index],
                         name=channel.name,
                         colormap=channel.colormap,
                         blending="additive",
-                        scale=dataset.voxel_spacing_zyx_um,
+                        scale=spacing,
+                        translate=(0.0, oy * spacing[1], ox * spacing[2]),
                         units=("µm", "µm", "µm"),
                         visible=channel.visible,
                         metadata={
                             "nucytoseg_imported": True,
                             "channel_index": channel.index,
                             "source_path": str(dataset.source_path),
+                            "working_crop": bool(restored and restored["crop_provenance"]),
                         },
                     )
                 )
@@ -763,7 +1066,8 @@ class DesktopWindow(QMainWindow):
                 if layer in viewer.layers:
                     viewer.layers.remove(layer)
             self._show_import_error(f"Could not create image layers: {error}")
-            return
+            return False
+        self.crop_workspace.clear_workspace_for_new_project()
         self.normalization.clear_project()
         self.z_correction.clear_project()
         self.image_preparation.clear_project()
@@ -771,11 +1075,12 @@ class DesktopWindow(QMainWindow):
         for layer in old_layers:
             if layer in viewer.layers:
                 viewer.layers.remove(layer)
-        for layer, channel in zip(added, dataset.channels):
+        for layer, channel in zip(added, channels):
             layer.name = channel.name
         viewer.dims.axis_labels = ("Z", "Y", "X")
         viewer.layers.selection.active = added[0] if added else None
         viewer.canvas.overlays.scale_bar.visible = True
+        self.project_directory = self._project_revision = None
         self.project_state.set_dataset(dataset)
         self._connect_channel_layers(added)
         self._pending_import_path = None
@@ -789,6 +1094,7 @@ class DesktopWindow(QMainWindow):
             f"series={dataset.series_index} CZYX={dataset.standardized_shape}"
         )
         self._finish_loading_dialog()
+        return True
 
     def _display_working_dataset(self, dataset) -> None:
         viewer = self.embedding.viewer
@@ -1175,6 +1481,9 @@ class DesktopWindow(QMainWindow):
             controls.setFixedHeight(min(72 + extra // 2, controls.widget().sizeHint().height()))
 
     def closeEvent(self, event) -> None:
+        if self._project_job is not None:
+            event.ignore()
+            return
         if self._import_thread is not None and self._import_thread.isRunning():
             self._close_when_import_finishes = True
             self.statusBar().showMessage(
@@ -1197,6 +1506,9 @@ class DesktopWindow(QMainWindow):
             event.ignore()
             return
         if not self._closed:
+            if not self._confirm_close_project(self.close):
+                event.ignore()
+                return
             self._closed = True
             self._finish_loading_dialog()
             self.save_layout()

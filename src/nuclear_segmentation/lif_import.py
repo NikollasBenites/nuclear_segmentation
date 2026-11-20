@@ -10,7 +10,7 @@ from typing import Any, Callable
 import numpy as np
 from qtpy.QtCore import QObject, Signal, Slot
 
-from .image_import import DEFAULT_COLORMAPS
+from .image_import import DEFAULT_COLORMAPS, load_verified_image
 from .project_state import ChannelDescriptor, ImportedDataset
 
 
@@ -432,12 +432,11 @@ class LifImportWorker(QObject):
             self.diagnostic.emit(f"{stage}: {message}{suffix}")
 
         try:
-            result = load_lif_dataset(
-                self.path,
-                self.series_index,
-                bioimage_factory=self.bioimage_factory,
-                diagnostic=report,
-                **self.options,
+            result = load_verified_image(
+                self.path, lambda: load_lif_dataset(
+                    self.path, self.series_index, bioimage_factory=self.bioimage_factory,
+                    diagnostic=report, **self.options,
+                )
             )
         except Exception as error:
             LOGGER.exception(

@@ -326,7 +326,7 @@ class SegmentationPanel(QWidget):
             field.setEnabled(is_3d)
         self.refresh()
 
-    def scientific_config(self):
+    def pending_config(self):
         state = self.project_state
         config = deepcopy(self._defaults)
         config.update(
@@ -352,11 +352,36 @@ class SegmentationPanel(QWidget):
         normalization = state.normalization_configuration or {}
         config["CELLPOSE_NORMALIZE"] = deepcopy(normalization.get("cellpose_normalize", True))
         config["CELLPOSE_ROI_NORMALIZATION"] = None
+        return config
+
+    def scientific_config(self):
+        config = self.pending_config()
         if not config["MODEL_NAME"]:
             raise ValueError("A Cellpose model name or local model path is required.")
         if not math.isfinite(config["CELLPROB_THRESHOLD"]):
             raise ValueError("Cell probability threshold must be finite.")
         return validate_config(config)
+
+    def restore_settings(self, config):
+        self.model_name.setText(config["MODEL_NAME"])
+        self.device.setCurrentIndex(self.device.findData(config["PROCESSING_DEVICE"]))
+        self.mode.setCurrentIndex(self.mode.findData(config["CELLPOSE_DO_3D"]))
+        for field, key in (
+            (self.cellprob, "CELLPROB_THRESHOLD"), (self.min_size, "CELLPOSE_MIN_SIZE_VOXELS"),
+            (self.stitch, "CELLPOSE_STITCH_THRESHOLD"), (self.batch_size, "BATCH_SIZE"),
+        ):
+            field.setValue(config[key])
+        for field, value in zip(self.flow_smooth, config["FLOW3D_SMOOTH"], strict=True):
+            field.setValue(value)
+        self.resample.setChecked(config["CELLPOSE_RESAMPLE"])
+        for enabled, field, key in (
+            (self.rescale_enabled, self.rescale, "CELLPOSE_RESCALE"),
+            (self.diameter_enabled, self.diameter, "DIAMETER_PIXELS"),
+        ):
+            value = config[key]
+            enabled.setChecked(value is not None)
+            if value is not None:
+                field.setValue(value)
 
     def prepare_scientific_input(self):
         """Validate and route current in-memory data without running Cellpose."""

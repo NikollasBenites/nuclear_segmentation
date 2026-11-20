@@ -215,6 +215,8 @@ class QuantificationPanel(QWidget):
 
     def refresh(self, *args):
         state = self.project_state
+        if state.restoring_project:
+            return
         segmentation = state.segmentation_result
         filtering = state.filtering_result
         if segmentation is None or not state.segmentation_is_current:
@@ -238,6 +240,20 @@ class QuantificationPanel(QWidget):
             return
         state.set_quantification_result(result)
         self._display(result)
+
+    def show_restored_result(self):
+        state = self.project_state
+        if state.quantification_is_current:
+            self._display(state.quantification_result)
+            return
+        self._clear("Quantification pending: review the restored measurements and ROI.")
+        if state.segmentation_is_current:
+            self.summary_values["total"].setText(f"{state.segmentation_result['object_count']:,}")
+        if state.filtering_is_current:
+            retained = len(state.filtering_result["retained_ids"])
+            total = len(state.filtering_result["properties"])
+            self.summary_values["retained"].setText(f"{retained:,}")
+            self.summary_values["excluded"].setText(f"{total - retained:,}")
 
     def _clear(self, message, *, preserve_total=False):
         self.status.setText(message)

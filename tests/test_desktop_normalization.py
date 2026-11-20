@@ -397,10 +397,10 @@ def test_close_project_cancel_clear_reopen_and_preserve_layout(qapp, tmp_path, m
     panel = window.context_panel.preprocessing_page
     assert window.normalization.calculate(panel.normalization_options())
     _wait(qapp, lambda: not window.normalization.busy)
-    monkeypatch.setattr(window, "_confirm_close_project", lambda: False)
+    monkeypatch.setattr(window, "_ask_project_changes", lambda: "cancel")
     assert not window.close_project()
     assert window.project_state.dataset_ready
-    monkeypatch.setattr(window, "_confirm_close_project", lambda: True)
+    monkeypatch.setattr(window, "_ask_project_changes", lambda: "discard")
     assert window.close_project()
     assert not window.project_state.dataset_ready
     assert len(window.embedding.viewer.layers) == 0

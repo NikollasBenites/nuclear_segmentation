@@ -1,0 +1,561 @@
+"""Versioned native checkpoints. No scientific stages are run on open."""
+from dataclasses import asdict, replace
+from functools import partial
+import json
+import os
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from uuid import uuid4
+from zipfile import ZipFile
+
+import numpy as np
+import pandas as pd
+from qtpy.QtCore import QObject, QLockFile, Signal, Slot
+
+from .core import density_z_planes
+from .image_import import load_tiff_dataset, load_verified_image, source_digest
+from .lif_import import load_lif_dataset
+from .manual_review import ManualReview
+from .normalization import mask_digest
+from .normalization_workspace import _options_from_report, cellpose_configuration, normalization_fingerprint
+from .project_state import ChannelDescriptor, ProjectState
+from .scientific_input import validate_scientific_input
+from .z_correction import validate_options
+
+MANIFEST = "project.json"
+CHECKPOINT = "checkpoint.ncs"
+STATE_FIELDS = (
+    "voxel_spacing_zyx_um", "calibration_source", "segmentation_channel_index",
+    "analysis_mode", "perinuclear_markers", "roi_mask_yx", "working_offset_yx",
+    "normalization_configuration", "normalization_preview", "normalization_is_current",
+    "normalization_roi_mask_yx", "normalization_roi_vertices_yx", "normalization_roi_provenance",
+    "z_correction_options", "z_correction_reports", "z_correction_applied",
+    "segmentation_result", "segmentation_is_current", "filtering_result", "filtering_is_current",
+    "scientific_roi", "scientific_roi_provenance", "scientific_roi_reviewed",
+    "quantification_result", "quantification_is_current",
+)
+SOURCE_FIELDS = (
+    "source_format", "series_index", "series_identifier", "series_name", "reported_axes",
+    "reported_shape", "standardized_shape", "dtype", "voxel_spacing_zyx_um",
+    "calibration_source", "time_index", "acquisition_metadata", "axes_override",
+)
+
+
+class MissingProjectSource(FileNotFoundError):
+    """The saved source path needs user-directed relocation."""
+
+
+def _pack(archive, value):
+    if isinstance(value, np.ndarray):
+        name = f"arrays/{len(archive.filelist)}.npy"
+        with archive.open(name, "w", force_zip64=True) as stream:
+            np.save(stream, value, allow_pickle=False)
+        return {"array": name}
+    if isinstance(value, pd.DataFrame):
+        return {"table": {
+            "index": _pack(archive, value.index.tolist()),
+            "index_name": _pack(archive, value.index.name),
+            "index_dtype": str(value.index.dtype),
+            "columns": [[name, str(series.dtype), _pack(archive, series.tolist())]
+                        for name, series in value.items()],
+        }}
+    if isinstance(value, dict):
+        return {"map": [[key, _pack(archive, item)] for key, item in value.items()]}
+    if isinstance(value, (tuple, set)):
+        return {type(value).__name__: [_pack(archive, item) for item in value]}
+    if isinstance(value, list):
+        return [_pack(archive, item) for item in value]
+    if isinstance(value, np.generic):
+        return _pack(archive, value.item())
+    if value is pd.NA:
+        return {"missing": True}
+    if isinstance(value, float) and not np.isfinite(value):
+        return {"float": str(value)}
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def _unpack(archive, value):
+    if isinstance(value, list):
+        return [_unpack(archive, item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    kind, item = next(iter(value.items()))
+    if kind == "array":
+        # None of the array members are extracted as filesystem paths.
+        with archive.open(item) as stream:
+            return np.load(stream, allow_pickle=False)
+    if kind == "table":
+        index = pd.Index(_unpack(archive, item["index"]), dtype=item["index_dtype"],
+                         name=_unpack(archive, item["index_name"]))
+        return pd.DataFrame({
+            name: pd.Series(_unpack(archive, values), dtype=dtype, index=index)
+            for name, dtype, values in item["columns"]
+        }, index=index)
+    if kind == "map":
+        return {key: _unpack(archive, val) for key, val in item}
+    if kind in ("set", "tuple"):
+        return (set if kind == "set" else tuple)(_unpack(archive, x) for x in item)
+    if kind == "missing":
+        return pd.NA
+    if kind == "float":
+        return float(item)
+    raise ValueError(f"Unsupported project record: {kind}")
+
+
+def snapshot_state(state):
+    """Snapshot references after workers stop. Project I/O holds the editor closed."""
+    result = {key: getattr(state, key) for key in STATE_FIELDS}
+    segmentation = result["segmentation_result"]
+    if segmentation is not None:
+        model_input = segmentation.get("model_input_volume")
+        if model_input is not None and any(np.shares_memory(model_input, dataset.data_czyx)
+                                           for dataset in (state.original_dataset, state.working_dataset)):
+            result["segmentation_result"] = dict(segmentation, model_input_volume=None)
+    return {
+        "source": {
+            **{key: getattr(state.original_dataset, key) for key in SOURCE_FIELDS},
+            "path": str(state.original_dataset.source_path),
+            "sha256": state.original_dataset.source_sha256,
+            "channels": [asdict(channel) for channel in state.original_dataset.channels],
+        },
+        "channels": [asdict(channel) for channel in state.channels],
+        "crop": asdict(state.crop_provenance) if state.crop_provenance else None,
+        "state": result,
+    }
+
+
+def _manifest(folder):
+    with (folder / MANIFEST).open(encoding="utf-8") as stream:
+        record = json.load(stream)
+    if record.get("format") != "NuCytoSeg" or record.get("version") != 1 or not record.get("id"):
+        raise ValueError("This is not a supported native NuCytoSeg project.")
+    return record
+
+
+def save_project(folder, snapshot, active=None):
+    """Publish one closed archive atomically, leaving the old file on any failure."""
+    folder = Path(folder)
+    source = snapshot["source"]
+    digest = source_digest(Path(source["path"]))
+    if source["sha256"] is not None and source["sha256"] != digest:
+        raise ValueError("The original image changed after import. Reopen the original image before saving.")
+    snapshot = dict(snapshot, source=dict(source, sha256=digest))
+    created = active is None
+    if created:
+        folder.mkdir(exist_ok=False)
+    temporary = None
+    lock = QLockFile(str(folder / ".write.lock"))
+    lock.setStaleLockTime(0)
+    locked = False
+    try:
+        locked = lock.tryLock()
+        if not locked:
+            raise ValueError("Another application is saving this project.")
+        if created:
+            project_id = uuid4().hex
+            with (folder / MANIFEST).open("x", encoding="utf-8") as stream:
+                json.dump({"format": "NuCytoSeg", "version": 1, "id": project_id}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+        else:
+            project_id, expected_revision = active
+            with ZipFile(folder / CHECKPOINT) as previous:
+                revision = previous.read("revision.txt").decode("ascii")
+                archive_id = previous.read("project-id.txt").decode("ascii")
+            if _manifest(folder)["id"] != project_id or archive_id != project_id or revision != expected_revision:
+                raise ValueError("The project changed on disk. Open it again or choose Save Project As.")
+        revision = uuid4().hex
+        with NamedTemporaryFile(dir=folder, prefix=".save-", delete=False) as stream:
+            temporary = Path(stream.name)
+            with ZipFile(stream, "w") as archive:
+                archive.writestr("source.json", json.dumps(_pack(archive, snapshot["source"]), allow_nan=False))
+                state = {key: value for key, value in snapshot.items() if key != "source"}
+                archive.writestr("state.json", json.dumps(_pack(archive, state), allow_nan=False))
+                archive.writestr("revision.txt", revision)
+                archive.writestr("project-id.txt", project_id)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, folder / CHECKPOINT)
+        return (project_id, revision), digest
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        abandoned = locked and created and not (folder / CHECKPOINT).exists()
+        if abandoned:
+            (folder / MANIFEST).unlink(missing_ok=True)
+        if locked:
+            lock.unlock()
+        if abandoned:
+            try:
+                folder.rmdir()
+            except OSError:
+                pass
+
+
+def _rebase_source(value, old, new):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in ("source_path", "source", "path") and isinstance(item, str) and item == old:
+                value[key] = new
+            _rebase_source(item, old, new)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _rebase_source(item, old, new)
+
+
+def open_project(folder, replacement=None, bioimage_factory=None):
+    folder = Path(folder)
+    record = _manifest(folder)
+    with ZipFile(folder / CHECKPOINT) as archive:
+        if archive.read("project-id.txt").decode("ascii") != record["id"]:
+            raise ValueError("Checkpoint identity does not match its project folder.")
+        revision = archive.read("revision.txt").decode("ascii")
+        source = _unpack(archive, json.loads(archive.read("source.json")))
+        dataset = _open_source(source, replacement, bioimage_factory)
+        payload = _unpack(archive, json.loads(archive.read("state.json")))
+    _rebase_source(payload, source["path"], str(dataset.source_path))
+    state = _validated_state(dataset, payload)
+    return (record["id"], revision), dataset, state, payload
+
+
+def _open_source(source, replacement, bioimage_factory):
+    expected = source["sha256"]
+    if not isinstance(expected, str) or len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        raise ValueError("This native checkpoint has no valid source SHA-256.")
+    path = Path(replacement or source["path"])
+    if not path.is_file():
+        if replacement is None:
+            raise MissingProjectSource(source["path"])
+        raise FileNotFoundError(f"Image file does not exist: {path}")
+    path = path.resolve()
+    options = {
+        "time_index": source["time_index"],
+        "spacing_override": source["voxel_spacing_zyx_um"],
+    }
+    if source["source_format"] == "Leica LIF":
+        read = partial(load_lif_dataset, path, source["series_index"], bioimage_factory=bioimage_factory, **options)
+    else:
+        read = partial(load_tiff_dataset, path, axes_override=source["axes_override"], **options)
+    dataset = load_verified_image(path, read, expected)
+    keys = ("source_format", "series_index", "series_identifier", "reported_axes", "reported_shape",
+            "standardized_shape", "dtype", "time_index")
+    if any(getattr(dataset, key) != source[key] for key in keys) or (
+        dataset.acquisition_metadata.get("axes_interpreted_before_reorder")
+        != source["acquisition_metadata"].get("axes_interpreted_before_reorder")
+    ):
+        raise ValueError("The source series, timepoint, axes, or dimensions do not match the checkpoint.")
+    if [channel.original_name for channel in dataset.channels] != [
+        item["original_name"] for item in source["channels"]
+    ]:
+        raise ValueError("The source channel identities do not match the checkpoint.")
+    return replace(
+        dataset, series_name=source["series_name"], calibration_source=source["calibration_source"],
+        acquisition_metadata=source["acquisition_metadata"],
+    )
+
+
+def _validate_controls(payload, indexes):
+    """Check editable fields before the open worker hands records to Qt widgets."""
+    projection_channel, projection_method = payload["projection_settings"]
+    if projection_channel not in indexes or projection_method not in {"maximum", "mean"}:
+        raise ValueError("The checkpoint contains invalid XY projection controls.")
+    if (
+        set(payload["z_settings"]) != indexes or payload["z_inspected"] not in indexes
+        or not set(payload["z_selected"]) <= indexes or type(payload["z_include_zeros"]) is not bool
+    ):
+        raise ValueError("The checkpoint contains invalid Z-correction channel selections.")
+    for settings in payload["z_settings"].values():
+        validate_options(settings)
+    normalization = payload["normalization_settings"]
+    if (
+        normalization["channel_index"] not in indexes
+        or normalization["mode"] not in {"cellpose_default", "disabled", "percentile", "roi_fixed"}
+        or normalization["input_source"] not in {"working_original", "z_corrected"}
+        or type(normalization["norm3D"]) is not bool
+        or not all(0 <= normalization[key] <= 100 for key in ("lower", "upper"))
+    ):
+        raise ValueError("The checkpoint contains invalid normalization controls.")
+    segmentation = payload["segmentation_settings"]
+    if (
+        not isinstance(segmentation["MODEL_NAME"], str)
+        or segmentation["PROCESSING_DEVICE"] not in {"auto", "cpu"}
+        or any(type(segmentation[key]) is not bool for key in ("CELLPOSE_DO_3D", "CELLPOSE_RESAMPLE"))
+        or len(segmentation["FLOW3D_SMOOTH"]) != 3
+        or not all(np.isfinite(value) for value in segmentation["FLOW3D_SMOOTH"])
+        or not all(type(segmentation[key]) is int and -(2**31) <= segmentation[key] < 2**31
+                   for key in ("CELLPOSE_MIN_SIZE_VOXELS", "BATCH_SIZE"))
+        or not all(np.isfinite(segmentation[key]) for key in ("CELLPROB_THRESHOLD", "CELLPOSE_STITCH_THRESHOLD"))
+        or any(segmentation[key] is not None and not np.isfinite(segmentation[key])
+               for key in ("CELLPOSE_RESCALE", "DIAMETER_PIXELS"))
+    ):
+        raise ValueError("The checkpoint contains invalid segmentation controls.")
+
+
+def _label_ids(array, shape):
+    if len(shape) != 3 or array.shape != shape or not array.size or array.dtype.kind not in "ui" or array.min() < 0:
+        raise ValueError("The checkpoint contains incompatible label mask data.")
+    return set(map(int, np.unique(array))) - {0}
+
+
+def _validated_state(dataset, payload):
+    # A detached state lets existing grid and configuration validators run in the worker.
+    state = ProjectState()
+    stored = payload["state"]
+    state.set_dataset(dataset)
+    crop = payload["crop"]
+    if crop:
+        roi_mask = stored["roi_mask_yx"]
+        if roi_mask.dtype != bool or roi_mask.shape != crop["roi_mask_shape_yx"] or not roi_mask.any():
+            raise ValueError("The checkpoint contains an invalid crop inclusion mask.")
+        state.set_calibration(crop["voxel_spacing_zyx_um"])
+        state.apply_crop(crop["bounding_box_y0_y1_x0_x1"], crop["selection_vertices_yx"],
+                         stored["roi_mask_yx"], crop["selection_type"])
+        if asdict(state.crop_provenance) != crop:
+            raise ValueError("Crop provenance does not match the restored working grid.")
+    elif stored["roi_mask_yx"] is not None:
+        raise ValueError("The checkpoint contains a crop mask without crop geometry.")
+    if state.working_offset_yx != stored["working_offset_yx"]:
+        raise ValueError("The checkpoint contains an incompatible spatial offset.")
+    state.set_calibration(stored["voxel_spacing_zyx_um"], stored["calibration_source"])
+    channels = [ChannelDescriptor(**item) for item in payload["channels"]]
+    if [(c.index, c.original_name) for c in channels] != [
+        (c.index, c.original_name) for c in dataset.channels
+    ] or stored["segmentation_channel_index"] not in {c.index for c in channels}:
+        raise ValueError("The checkpoint contains incompatible channel identities.")
+    state.channels = channels
+    for key in STATE_FIELDS:
+        setattr(state, key, stored[key])
+    _validate_results(state, payload)
+    _validate_controls(payload, {channel.index for channel in channels})
+    return {"working_dataset": state.working_dataset, "crop_provenance": state.crop_provenance,
+            "channels": state.channels, **{key: getattr(state, key) for key in STATE_FIELDS}}
+
+
+def _validate_results(state, payload):
+    original = state.original_dataset
+    working_shape = state.working_dataset.standardized_shape
+    grid = {
+        "source_path": str(original.source_path), "source_series": original.series_index,
+        "working_shape_czyx": working_shape, "voxel_spacing_zyx_um": state.voxel_spacing_zyx_um,
+        "working_offset_yx": state.working_offset_yx,
+        "crop_type": state.crop_provenance.selection_type if state.crop_provenance else None,
+        "segmentation_channel": state.segmentation_channel,
+    }
+
+    def compatible(provenance):
+        return bool(provenance) and all(provenance.get(key) == value for key, value in grid.items())
+
+    normalization_roi = state.normalization_roi_mask_yx
+    if normalization_roi is not None:
+        vertices = np.asarray(state.normalization_roi_vertices_yx)
+        roi_provenance = state.normalization_roi_provenance or {}
+        if (
+            normalization_roi.dtype != bool or normalization_roi.shape != original.standardized_shape[-2:]
+            or not normalization_roi.any() or vertices.ndim != 2 or vertices.shape[1] != 2
+            or len(vertices) < 3 or not np.isfinite(vertices).all()
+            or roi_provenance.get("mask_sha256") != mask_digest(normalization_roi)
+            or roi_provenance.get("source") != str(original.source_path)
+            or roi_provenance.get("series_index") != original.series_index
+        ):
+            raise ValueError("The checkpoint contains incompatible normalization ROI geometry.")
+    z_previews = payload["z_previews"]
+    for index, array in z_previews.items():
+        if index not in state.z_correction_reports or array.shape != working_shape[1:] or array.dtype.kind != "f":
+            raise ValueError("The checkpoint contains incompatible Z-correction preview data.")
+    channel_names = {channel.index: channel.name for channel in state.channels}
+    for index, report in tuple(state.z_correction_reports.items()):
+        expected = {
+            "options": state.z_correction_options.get(index),
+            "working_shape_czyx": list(working_shape),
+            "working_offset_yx": list(state.working_offset_yx),
+            "voxel_spacing_zyx_um": list(state.voxel_spacing_zyx_um),
+            "channel_name_at_calculation": channel_names.get(index),
+            "source_path": str(original.source_path),
+            "series_index": original.series_index,
+            "series_identifier": str(original.series_identifier),
+        }
+        if index not in channel_names or any(report.get(key) != value for key, value in expected.items()):
+            state.z_correction_reports.pop(index)
+            z_previews.pop(index, None)
+    valid_applied = state.z_correction_applied.intersection(z_previews)
+    if valid_applied != state.z_correction_applied:
+        state.z_correction_applied = valid_applied
+        state.normalization_is_current = False
+        state.segmentation_is_current = False
+
+    normalization = state.normalization_configuration or {}
+    applied = normalization.get("provenance")
+    if state.normalization_is_current:
+        try:
+            state.normalization_is_current = bool(applied and cellpose_configuration(applied) == normalization)
+        except (KeyError, TypeError, ValueError):
+            state.normalization_is_current = False
+    reports = (applied, state.normalization_preview)
+    for report in reports:
+        if not report:
+            continue
+        try:
+            fingerprint = normalization_fingerprint(state, _options_from_report(report))
+            # Verified identical bytes may have acquired a different filesystem timestamp.
+            source = report.get("source", {})
+            if source.get("path") == fingerprint["source"]["path"] and source.get("size") == fingerprint["source"]["size"]:
+                report["source"] = fingerprint["source"]
+            valid = all(report.get(key) == val for key, val in fingerprint.items())
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        if not valid and report is state.normalization_preview:
+            state.normalization_preview = None
+            payload["normalization_pixels"] = None
+        if not valid and report is applied:
+            state.normalization_is_current = False
+
+    preview = payload["normalization_pixels"]
+    if preview is not None and (preview.shape != working_shape[1:] or preview.dtype.kind not in "iuf"):
+        raise ValueError("The checkpoint contains incompatible normalization preview data.")
+
+    segmentation = state.segmentation_result
+    ids = set()
+    if segmentation is not None:
+        masks = segmentation["masks"]
+        shape = segmentation["mask_shape"]
+        ids = _label_ids(masks, shape)
+        if not ids or segmentation["object_count"] != len(ids) or segmentation["maximum_label_id"] != max(ids):
+            raise ValueError("The raw label IDs do not match the segmentation record.")
+        for key in ("edited_masks", "model_input_volume", "raw_3d_probs"):
+            array = segmentation.get(key)
+            if array is not None and array.shape != shape:
+                raise ValueError(f"Incompatible {key} shape in the checkpoint.")
+        if segmentation.get("edited_masks") is not None:
+            _label_ids(segmentation["edited_masks"], shape)
+        if segmentation.get("manual_review") is not None:
+            ManualReview(masks, ids, segmentation["manual_review"])
+        if state.segmentation_is_current:
+            try:
+                config = segmentation["scientific_config"]
+                validate_scientific_input(state, config)
+                provenance = segmentation.get("input_provenance")
+                state.segmentation_is_current = (
+                    shape == working_shape[1:] and compatible(provenance)
+                    and provenance["z_corrections"] == config["Z_CORRECTIONS"]
+                    and provenance["cellpose_normalize"] == config["CELLPOSE_NORMALIZE"]
+                )
+            except (KeyError, ValueError):
+                state.segmentation_is_current = False
+        masks.setflags(write=False)
+    else:
+        state.segmentation_is_current = False
+
+    filtering = state.filtering_result
+    roi = state.scientific_roi
+    effective_planes = None
+    if filtering is not None:
+        intensity_controls = payload["intensity_controls"]
+        if (
+            set(intensity_controls) != {item["index"] for item in filtering["intensity_definitions"]}
+            or any(type(checked) is not bool or not np.isfinite([lower, upper]).all()
+                   for checked, lower, upper in intensity_controls.values())
+        ):
+            raise ValueError("The checkpoint contains incompatible intensity controls.")
+        retained = filtering["retained_ids"]
+        filtered = filtering["filtered_masks"]
+        if segmentation is None or (
+            set(filtering["properties"].index) != ids or not filtering["properties"].index.is_unique
+            or _label_ids(filtered, segmentation["mask_shape"]) != set(retained)
+            or not set(retained) <= ids or len(set(retained)) != len(retained)
+            or filtering["raw_mask_shape"] != segmentation["mask_shape"]
+        ):
+            raise ValueError("The checkpoint's filtered masks or measurements do not match its segmentation.")
+        if any(not np.array_equal(saved, np.where(np.isin(raw, retained), raw, 0))
+               for saved, raw in zip(filtered, segmentation["masks"])):
+            raise ValueError("Filtered label geometry does not match the raw masks.")
+        filtered.setflags(write=False)
+        measured_roi = filtering["scientific_roi"]
+        if measured_roi.shape != filtering["raw_mask_shape"] or measured_roi.dtype != bool:
+            raise ValueError("The checkpoint contains incompatible measurement ROI geometry.")
+        provenance = filtering.get("measurement_provenance", {})
+        expected_markers = {
+            (item["channel_index"], channel_names[item["channel_index"]], item["ring_inner_um"],
+             item["ring_outer_um"], item["pixel_threshold"])
+            for item in state.perinuclear_markers if item["enabled"]
+        }
+        measured_markers = {
+            (item["channel_index"], item["name"], item["ring_inner_um"],
+             item["ring_outer_um"], item["configured_pixel_threshold"])
+            for item in filtering["perinuclear_definitions"]
+        }
+        matching_roi_grid = (
+            compatible(provenance) and roi is not None and roi.dtype == bool
+            and roi.shape == working_shape[1:] and roi.any()
+            and state.scientific_roi_provenance == dict(provenance, mask_shape=roi.shape)
+            and np.array_equal(roi, measured_roi)
+        )
+        state.scientific_roi_reviewed = bool(
+            state.scientific_roi_reviewed and filtering["roi_reviewed"] and matching_roi_grid
+            and payload["roi_grid_compatible"]
+        )
+        filtering["roi_reviewed"] = state.scientific_roi_reviewed
+        state.filtering_is_current = bool(
+            state.filtering_is_current and state.segmentation_is_current and compatible(provenance)
+            and filtering["input_segmentation_provenance"] == segmentation.get("input_provenance")
+            and provenance == segmentation.get("input_provenance")
+            and expected_markers == measured_markers
+            and payload["roi_grid_compatible"]
+        )
+        if state.filtering_is_current:
+            try:
+                _, effective_planes = density_z_planes(
+                    filtering["settings"], working_shape[1], state.voxel_spacing_zyx_um[0]
+                )
+            except ValueError:
+                state.filtering_is_current = False
+    else:
+        state.filtering_is_current = state.scientific_roi_reviewed = False
+    if roi is not None and (roi.shape != working_shape[1:] or roi.dtype != bool):
+        state.scientific_roi = None
+        state.scientific_roi_provenance = None
+        state.scientific_roi_reviewed = False
+    if filtering and not payload["roi_grid_compatible"]:
+        # A transformed viewer layer cannot be accepted in the fixed scientific grid.
+        state.scientific_roi_provenance = None
+
+    quant = state.quantification_result
+    state.quantification_is_current = bool(
+        state.quantification_is_current and quant and state.filtering_is_current
+        and state.scientific_roi_reviewed and quant["density_status"] == "valid"
+        and np.isfinite(quant["roi_effective_volume_um3"]) and quant["roi_effective_volume_um3"] > 0
+        and quant["roi_reviewed"] and effective_planes is not None
+        and tuple(effective_planes.tolist()) == quant["effective_sampling_planes"]
+        and bool(roi[effective_planes].any())
+        and quant["scientific_roi_sha256"] == mask_digest(roi)
+        and quant["scientific_roi_provenance"] == state.scientific_roi_provenance
+        and quant["source_identity"] == filtering["measurement_provenance"]
+        and quant["filter_settings"] == filtering["settings"] == payload["filter_controls"]
+        and quant["retained_mask_ids"] == filtering["retained_ids"]
+        and quant["executed_segmentation_config"] == segmentation["scientific_config"]
+        and quant["voxel_spacing_zyx_um"] == state.voxel_spacing_zyx_um
+        and all(quant.get(key) == val for key, val in quant["density"].items())
+    )
+
+
+class ProjectWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    missing_source = Signal(str)
+    finished = Signal()
+
+    def __init__(self, operation):
+        super().__init__()
+        self.operation = operation
+
+    @Slot()
+    def run(self):
+        try:
+            self.succeeded.emit(self.operation())
+        except MissingProjectSource as error:
+            self.missing_source.emit(str(error))
+        except Exception as error:
+            self.failed.emit(f"{type(error).__name__}: {error}")
+        finally:
+            self.finished.emit()

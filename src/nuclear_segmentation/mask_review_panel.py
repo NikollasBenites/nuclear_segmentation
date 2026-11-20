@@ -398,13 +398,15 @@ class MaskReviewPanel(QWidget):
             form = QFormLayout(group); enabled = QCheckBox("Enable"); enabled.setChecked(item["name"] in active_names)
             low = SyncedNumericControl(item["minimum"], item["maximum"], 9)
             high = SyncedNumericControl(item["minimum"], item["maximum"], 9)
-            low.setValue(item["minimum"]); high.setValue(item["maximum"])
+            limits = result_settings.get("intensity_filters", {}).get(item["name"], item)
+            low.setValue(limits["minimum"]); high.setValue(limits["maximum"])
             form.addRow(enabled); form.addRow("Minimum", low); form.addRow("Maximum", high)
             enabled.toggled.connect(self._intensity_channel_changed); low.valueChanged.connect(self._schedule_filters); high.valueChanged.connect(self._schedule_filters)
             self.intensity_layout.addWidget(group); self.intensity_controls[item["index"]] = (group, enabled, low, high, item)
         for item in definitions:
             group = QGroupBox(item["name"]); form = QFormLayout(group)
-            minimum = SyncedNumericControl(0, 1, 6); minimum.setValue(item["minimum_positive_fraction"])
+            limits = result_settings.get("perinuclear_filters", {}).get(item["name"], item)
+            minimum = SyncedNumericControl(0, 1, 6); minimum.setValue(limits["minimum_positive_fraction"])
             form.addRow("Minimum positive fraction", minimum); minimum.valueChanged.connect(self._schedule_filters)
             self.perinuclear_layout.addWidget(group); self.perinuclear_controls[item["name"]] = (group, minimum, item)
         self._update_optional_filter_visibility()
@@ -422,6 +424,23 @@ class MaskReviewPanel(QWidget):
                 "intensity_combination": self.intensity_combination.currentText(),
                 "intensity_filtering_enabled": self.intensity_master.isChecked(),
                 "intensity_filters": intensity}
+
+    def intensity_control_settings(self):
+        return {
+            index: (enabled.isChecked(), low.value(), high.value())
+            for index, (_, enabled, low, high, _) in self.intensity_controls.items()
+        }
+
+    def restore_intensity_controls(self, settings):
+        for index, values in settings.items():
+            _, enabled, low, high, _ = self.intensity_controls[index]
+            for widget, method, value in zip(
+                (enabled, low, high), (enabled.setChecked, low.setValue, high.setValue), values, strict=True
+            ):
+                blocked = widget.blockSignals(True)
+                method(value)
+                widget.blockSignals(blocked)
+        self._update_optional_filter_visibility()
 
     def update_filter_summary(self, result, current=True):
         self.counting_error.hide()

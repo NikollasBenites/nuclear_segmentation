@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import tifffile
 from qtpy.QtCore import QSettings
-from qtpy.QtWidgets import QApplication, QMessageBox, QWidget
+from qtpy.QtWidgets import QApplication, QWidget
 
 from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.image_import import inspect_tiff, load_tiff_dataset
@@ -309,11 +309,7 @@ def test_project_replacement_requires_confirmation(qapp, tmp_path, monkeypatch):
     )
     assert window.prepare_image_import(source, confirm_replacement=False)
     _wait_until(qapp, lambda: window._import_thread is None)
-    monkeypatch.setattr(
-        QMessageBox,
-        "question",
-        lambda *args, **kwargs: QMessageBox.StandardButton.No,
-    )
+    monkeypatch.setattr(window, "_ask_project_changes", lambda: "cancel")
     assert not window.prepare_image_import(replacement)
     assert window.project_state.dataset.source_path == source.resolve()
     assert window.embedding.viewer.layers[0].data[0, 0, 0] == 1

@@ -38,6 +38,11 @@ class ProjectPanel(QWidget):
         self._spacing_manually_edited = False
         self.sections = {}
         layout = QVBoxLayout(self)
+        self.project_actions = QGridLayout()
+        self.project_description = QLabel("No native project directory")
+        self.project_description.setWordWrap(True)
+        layout.addLayout(self.project_actions)
+        layout.addWidget(self.project_description)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(8)
 

@@ -1,7 +1,7 @@
 """Format-independent desktop import boundary; TIFF implementation for 2A.1."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -9,12 +9,38 @@ import numpy as np
 import tifffile
 from qtpy.QtCore import QObject, Signal, Slot
 
-from .core import load_tiff_czyx, read_voxel_spacing_um
+from .core import file_sha256, load_tiff_czyx, read_voxel_spacing_um
 from .project_state import ChannelDescriptor, ImportedDataset
 
 
 TIFF_SUFFIXES = (".tif", ".tiff", ".ome.tif", ".ome.tiff")
 DEFAULT_COLORMAPS = ("cyan", "magenta", "green", "red", "yellow", "gray")
+
+
+def _file_stamp(path):
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def source_digest(path):
+    stamp = _file_stamp(path)
+    digest = file_sha256(path)
+    if _file_stamp(path) != stamp:
+        raise ValueError("The original image changed while it was being verified.")
+    return digest
+
+
+def load_verified_image(path, read, expected=None):
+    """Tie the digest to the same file identity observed by the importer."""
+    path = Path(path)
+    stamp = _file_stamp(path)
+    digest = source_digest(path)
+    if expected is not None and digest != expected:
+        raise ValueError("The selected image does not match the saved SHA-256 fingerprint.")
+    dataset = read()
+    if _file_stamp(path) != stamp:
+        raise ValueError("The original image changed while it was being loaded.")
+    return replace(dataset, source_sha256=digest)
 
 
 @dataclass(frozen=True)
@@ -132,6 +158,7 @@ def load_tiff_dataset(
         calibration_source=calibration_source,
         channels=channels,
         time_index=int(time_index),
+        axes_override=axes_override,
         acquisition_metadata={
             "axes_interpreted_before_reorder": information[
                 "axes_interpreted_before_reorder"
@@ -156,7 +183,9 @@ class TiffImportWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            dataset = load_tiff_dataset(self.path, **self.options)
+            dataset = load_verified_image(
+                self.path, lambda: load_tiff_dataset(self.path, **self.options)
+            )
         except Exception as error:
             self.failed.emit(str(error))
         else:
