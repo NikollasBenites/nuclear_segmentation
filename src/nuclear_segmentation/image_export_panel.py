@@ -1,4 +1,4 @@
-"""Application-owned controls for calibrated prepared-channel TIFF export."""
+"""Application-owned controls for scientific results and prepared images."""
 from __future__ import annotations
 
 from qtpy.QtCore import QEvent, QLineF, QRect, QRectF, QSize, Qt, Signal
@@ -108,6 +108,14 @@ class ImageExportPanel(QWidget):
         self._busy = False
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 8, 0, 0)
+        self.scientific_button = QPushButton("Export Scientific Results")
+        self.scientific_button.setEnabled(False)
+        outer.addWidget(self.scientific_button)
+        self.scientific_status = QLabel()
+        self.scientific_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.scientific_status.setWordWrap(True)
+        self.scientific_status.hide()
+        outer.addWidget(self.scientific_status)
         section = CollapsibleSection("multichannel_tiff_export", "Multichannel TIFF Export")
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 8, 10, 10)
@@ -282,4 +290,6 @@ class ImageExportPanel(QWidget):
         self.export_button.setEnabled(False)
         self.status.setText("Generate prepared channel previews before exporting.")
         self.results.set_results("No image export completed.")
+        self.scientific_status.clear()
+        self.scientific_status.hide()
         self._update_selection_state()

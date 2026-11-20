@@ -11,6 +11,7 @@ from .core import (
     calculate_mask_properties, calculate_perinuclear_marker_metrics, safe_key,
 )
 from .filtering import apply_filter_settings
+from .runtime import validate_roi_geometry
 from .scientific_input import prepare_scientific_input
 
 
@@ -65,6 +66,9 @@ def calculate_filtering_prerequisites(project_state, config):
             "name": name,
             "channel_index": int(next(item["index"] for item in ns["CHANNELS"] if item["name"] == name)),
             "column": column,
+            "ring_inner_um": float(marker.get("ring_inner_um", .5)),
+            "ring_outer_um": float(marker.get("ring_outer_um", 3.0)),
+            "configured_pixel_threshold": marker.get("pixel_threshold"),
             "minimum_positive_fraction": float(marker.get("initial_min_positive_fraction", 0)),
             "resolved_pixel_threshold": float(threshold),
             "threshold_source": source,
@@ -102,6 +106,7 @@ def calculate_filtering_prerequisites(project_state, config):
         "perinuclear_definitions": perinuclear_definitions, "ring_labels": ring_labels,
         "input_segmentation_provenance": deepcopy(project_state.segmentation_result.get("input_provenance", {})),
         "measurement_provenance": deepcopy(scientific.provenance),
+        "roi_source": ns["roi_source"],
     }
 
 
@@ -118,12 +123,12 @@ class FilteringWorker(QObject):
 
 class FilteringController(QObject):
     status_changed = Signal(str)
+    _roi_events = ("data", "paint", "scale", "translate", "rotate", "shear", "affine")
     def __init__(self, viewer, state, panel, config_provider, parent=None,
                  conflict_operations=()):
         super().__init__(parent); self.viewer = viewer; self.state = state; self.panel = panel
         self.config_provider = config_provider; self.conflict_operations = tuple(conflict_operations); self._thread = None; self._worker = None
         self.filtered_layer = None; self.roi_layer = None; self._roi_callback = None
-        self._roi_transform = None
         self._pending_filter_settings = None
         panel.calculate_measurements_requested.connect(self.calculate)
         panel.filters_changed.connect(self.apply_filters)
@@ -200,10 +205,9 @@ class FilteringController(QObject):
         self.roi_layer = self.viewer.add_labels(result["scientific_roi"].astype(np.uint8), name=roi_name, scale=spacing, translate=translate,
             opacity=.35, visible=False, metadata={"nucytoseg_scientific_roi": True})
         self.roi_layer.editable = True
-        self._roi_transform = (np.asarray(self.roi_layer.scale, dtype=float).copy(),
-                               np.asarray(self.roi_layer.translate, dtype=float).copy())
         self._roi_callback = lambda event=None: self.invalidate_roi()
-        self.roi_layer.events.data.connect(self._roi_callback)
+        for name in self._roi_events:
+            getattr(self.roi_layer.events, name).connect(self._roi_callback)
     def apply_filters(self, *args):
         current = self.state.filtering_result
         if current is None or not self.state.filtering_is_current or self.busy: return
@@ -237,17 +241,23 @@ class FilteringController(QObject):
             retained_count=len(retained),
             filtered_masks=np.where(np.isin(masks, retained), masks, 0),
         )
+    def validate_roi_layer(self):
+        if self.roi_layer is None or self.roi_layer not in self.viewer.layers:
+            raise ValueError("The scientific ROI layer is missing.")
+        spacing = self.state.voxel_spacing_zyx_um
+        oy, ox = self.state.working_offset_yx
+        validate_roi_geometry(
+            self.roi_layer, spacing, self.state.segmentation_result["masks"].shape,
+            translate=(0, oy * spacing[1], ox * spacing[2]),
+        )
+
     def accept_roi(self):
-        if self.roi_layer is None or self.state.filtering_result is None: return
-        expected_scale, expected_translate = self._roi_transform
-        if (not np.allclose(self.roi_layer.scale, expected_scale)
-                or not np.allclose(self.roi_layer.translate, expected_translate)
-                or not np.allclose(self.roi_layer.rotate, np.eye(3))
-                or not np.allclose(self.roi_layer.shear, 0)
-                or not np.allclose(self.roi_layer.affine.affine_matrix, np.eye(4))):
-            self.panel.roi_status.setText(
-                "ROI transform changed — restore it and edit voxels with the brush."
-            )
+        if self.state.filtering_result is None or not self.state.segmentation_is_current:
+            return
+        try:
+            self.validate_roi_layer()
+        except ValueError as error:
+            self.panel.roi_status.setText(str(error))
             return
         roi = np.asarray(self.roi_layer.data) > 0
         if roi.shape != self.state.segmentation_result["masks"].shape or not roi.any():
@@ -271,7 +281,11 @@ class FilteringController(QObject):
         if self.state.filtering_result is None or self.roi_layer is None:
             return
         roi = np.asarray(self.roi_layer.data) > 0
-        if roi.shape != tuple(self.state.filtering_result["raw_mask_shape"]):
+        if roi.shape != tuple(self.state.filtering_result["raw_mask_shape"]) or not roi.any():
+            self.state.clear_scientific_roi()
+            self.state.update_filtering_roi_state(roi, False)
+            self.roi_layer.name = "MNTB ROI — provisional review"
+            self.panel.roi_status.setText("Invalid or empty scientific ROI.")
             return
         self.state.set_scientific_roi(
             roi, self._roi_provenance(self.state.filtering_result), reviewed=False
@@ -309,11 +323,12 @@ class FilteringController(QObject):
         self.status_changed.emit(message)
     def clear_layers(self):
         if self.roi_layer is not None and self._roi_callback is not None:
-            try: self.roi_layer.events.data.disconnect(self._roi_callback)
-            except (TypeError, ValueError): pass
+            for name in self._roi_events:
+                getattr(self.roi_layer.events, name).disconnect(self._roi_callback)
+            self._roi_callback = None
         for layer in (self.filtered_layer, self.roi_layer):
             if layer is not None and layer in self.viewer.layers: self.viewer.layers.remove(layer)
-        self.filtered_layer = self.roi_layer = self._roi_callback = self._roi_transform = None
+        self.filtered_layer = self.roi_layer = None
     def clear_project(self): self.clear_layers()
     def dispose(self):
         self.clear_layers(); self.panel.calculate_measurements_requested.disconnect(self.calculate); self.panel.filters_changed.disconnect(self.apply_filters); self.panel.accept_roi_requested.disconnect(self.accept_roi); self.panel.marker_configuration_changed.disconnect(self.update_marker_configuration); self.state.filtering_result_changed.disconnect(self._state_changed)

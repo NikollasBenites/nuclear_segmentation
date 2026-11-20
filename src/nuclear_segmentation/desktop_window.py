@@ -171,6 +171,8 @@ class DesktopWindow(QMainWindow):
             conflict_operations=(self.segmentation,),
         )
         self.segmentation.conflict_operations += (self.filtering,)
+        self.filtering.conflict_operations += (self.image_export,)
+        self.image_export.bind_filtering(self.filtering)
         self.filtering.status_changed.connect(self.statusBar().showMessage)
         self.z_correction.correction_applied.connect(self.normalization.invalidate)
         self.project_state.channels_changed.connect(

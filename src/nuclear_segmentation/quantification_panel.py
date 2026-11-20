@@ -8,7 +8,10 @@ from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QFormLayout, QLabel, QVBoxLayout, QWidget
 
 from .collapsible_section import CollapsibleSection
-from .core import calculate_density_summary, density_z_planes, format_density_panel
+from .core import (
+    NOMINAL_SECTION_THICKNESS_UM, calculate_density_summary, density_z_planes,
+    format_density_panel,
+)
 from .normalization import mask_digest
 
 
@@ -50,13 +53,21 @@ def calculate_quantification_result(project_state):
     properties = filtering["properties"]
     retained_ids = tuple(int(value) for value in filtering["retained_ids"])
     plane_counts = np.count_nonzero(roi, axis=(1, 2))
+    executed_config = segmentation.get("scientific_config", {})
     density = calculate_density_summary(
         plane_counts,
         settings,
         spacing,
         len(retained_ids),
         project_state.scientific_roi_reviewed,
+        nominal_section_thickness_um=executed_config.get("NOMINAL_SECTION_THICKNESS_UM"),
     )
+    density["counting_rule"] = {
+        "first": "Directional Z-entry sampling at minimum object Z, with XY centroid in ROI",
+        "last": "Directional Z-entry sampling at maximum object Z, with XY centroid in ROI",
+        "both": "Centroid-based sampling in ROI and effective Z",
+        "none": "Centroid-based sampling in ROI and effective Z",
+    }[settings["z_guard_mode"]]
     _, effective_planes = density_z_planes(settings, roi.shape[0], spacing[0])
 
     reasons = properties["automatic_failure_reasons"].fillna("").astype(str)
@@ -67,6 +78,13 @@ def calculate_quantification_result(project_state):
     retained = len(retained_ids)
     result = {
         **density,
+        "density": density,
+        "roi_plane_counts": tuple(plane_counts.tolist()),
+        "effective_sampling_planes": tuple(effective_planes.tolist()),
+        "nominal_section_thickness_source": (
+            "default" if density["nominal_section_thickness_um"] == NOMINAL_SECTION_THICKNESS_UM
+            else "user-defined"
+        ),
         "total_cellpose_masks": total,
         "retained_masks": retained,
         "excluded_masks": max(0, total - retained),
@@ -91,9 +109,7 @@ def calculate_quantification_result(project_state):
         "z_guard_um": float(settings["z_guard_um"]),
         "z_guard_mode": str(settings["z_guard_mode"]),
         "source_identity": deepcopy(filtering.get("measurement_provenance", {})),
-        "executed_segmentation_config": deepcopy(
-            segmentation.get("scientific_config", {})
-        ),
+        "executed_segmentation_config": deepcopy(executed_config),
         "segmentation_channel": segmentation.get("segmentation_channel"),
         "voxel_spacing_zyx_um": spacing,
         "scientific_roi_sha256": mask_digest(roi),

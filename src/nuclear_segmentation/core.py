@@ -913,6 +913,8 @@ def calculate_density_summary(
     spacing,
     retained_count,
     reviewed,
+    *,
+    nominal_section_thickness_um=None,
 ):
     spacing = np.asarray(spacing, dtype=float)
 
@@ -954,7 +956,11 @@ def calculate_density_summary(
     )
 
     # Optional correction to nominal section thickness.
-    nominal = float(NOMINAL_SECTION_THICKNESS_UM)
+    nominal = float(
+        NOMINAL_SECTION_THICKNESS_UM
+        if nominal_section_thickness_um is None
+        else nominal_section_thickness_um
+    )
 
     # Full tissue thickness BEFORE applying guards.
     # Inclusive plane count, consistent with voxel-based volume.

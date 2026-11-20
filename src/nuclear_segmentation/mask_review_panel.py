@@ -135,6 +135,7 @@ class MaskReviewPanel(QWidget):
     clear_selection_requested = Signal()
     calculate_measurements_requested = Signal()
     filters_changed = Signal()
+    filters_edited = Signal()
     accept_roi_requested = Signal()
     marker_configuration_changed = Signal(object)
 
@@ -438,6 +439,7 @@ class MaskReviewPanel(QWidget):
 
     def _schedule_filters(self, *args):
         self._filter_timer.start()
+        self.filters_edited.emit()
 
     def _intensity_master_changed(self, *args):
         self._update_optional_filter_visibility()

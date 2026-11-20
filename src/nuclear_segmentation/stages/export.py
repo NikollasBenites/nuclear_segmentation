@@ -1,8 +1,11 @@
 # Derived from the synchronized M3 v5.5 workflow. Executed in a session namespace.
-if not roi_reviewed:
-    raise RuntimeError("Review the MNTB ROI across Z and click Accept reviewed MNTB ROI before export.")
-if current_keep is None or filtered_masks is None:
-    raise RuntimeError("Run the live filtering cell before exporting.")
+from datetime import datetime
+from pathlib import Path
+import textwrap
+
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.figure import Figure
 
 # Export-folder review patch: only the folder name changes; sample metadata is preserved.
 def _export_folder_error(parent, name):
@@ -27,12 +30,12 @@ def _export_folder_error(parent, name):
     return ""
 
 
-def _choose_export_destination(parent_window, sample):
+def _choose_export_destination(parent_window, sample, file_dialog=None):
     """Return a reviewed destination, or None on cancellation."""
     from qtpy.QtWidgets import (
-        QDialog, QDialogButtonBox, QLabel, QLineEdit, QVBoxLayout,
+        QDialog, QDialogButtonBox, QFileDialog, QLabel, QLineEdit, QVBoxLayout,
     )
-    parent = QFileDialog.getExistingDirectory(
+    parent = (file_dialog or QFileDialog).getExistingDirectory(
         parent_window, "Select the parent folder for analysis results", "",
     )
     if not parent:
@@ -83,28 +86,43 @@ def _choose_export_destination(parent_window, sample):
     return Path(parent) / field.text()
 
 
-parent_window = getattr(viewer.window, "_qt_window", None)
-sample_name = safe_filename(CUSTOM_SAMPLE_NAME or DEFAULT_INPUT.stem)
-_reviewed_export_destination = _choose_export_destination(parent_window, sample_name)
-if _reviewed_export_destination is None:
-    print("Export cancelled. No output folder or files were created.")
-else:
+_reviewed_export_destination = None
+desktop_export = globals().get("desktop_export")
+if desktop_export is not None:
+    sample_name = safe_filename(CUSTOM_SAMPLE_NAME or DEFAULT_INPUT.stem)
+    _reviewed_export_destination = desktop_export["destination"]
+    settings = desktop_export["settings"]
+    final_keep = current_keep
+    export_masks = filtered_masks
+elif "roi_reviewed" in globals():
+    if not roi_reviewed:
+        raise RuntimeError("Review the MNTB ROI across Z and click Accept reviewed MNTB ROI before export.")
+    if current_keep is None or filtered_masks is None:
+        raise RuntimeError("Run the live filtering cell before exporting.")
+    parent_window = getattr(viewer.window, "_qt_window", None)
+    sample_name = safe_filename(CUSTOM_SAMPLE_NAME or DEFAULT_INPUT.stem)
+    _reviewed_export_destination = _choose_export_destination(parent_window, sample_name, QFileDialog)
+    if _reviewed_export_destination is None:
+        print("Export cancelled. No output folder or files were created.")
+    else:
+        validate_roi_geometry(viewer.layers["MNTB ROI - review before density"], VOXEL_SPACING_UM, masks.shape)
+        settings = current_filter_settings()
+        final_keep = apply_filter_settings(settings)
+        if not final_keep.equals(current_keep):
+            raise RuntimeError(
+                "The displayed filter state changed. Refresh the panel and rerun export."
+            )
+        kept_labels = filter_properties.index[final_keep].to_numpy()
+        export_masks = np.where(np.isin(masks, kept_labels), masks, 0)
+
+if _reviewed_export_destination is not None:
     sample_export_directory = _reviewed_export_destination
     output_parent = sample_export_directory.parent
     selected_output_folder = str(output_parent)
-    validate_roi_geometry(viewer.layers["MNTB ROI - review before density"], VOXEL_SPACING_UM, masks.shape)
-    settings = current_filter_settings()
-    final_keep = apply_filter_settings(settings)
-    if not final_keep.equals(current_keep):
-        raise RuntimeError(
-            "The displayed filter state changed. Refresh the panel and rerun export."
-        )
-
     # Create only after live-state validation; never overwrite an existing folder.
     sample_export_directory.mkdir(parents=False, exist_ok=False)
+    export_directory_created = True
 
-    kept_labels = filter_properties.index[final_keep].to_numpy()
-    export_masks = np.where(np.isin(masks, kept_labels), masks, 0)
     combined_perinuclear_keep = calculate_perinuclear_filter_keep(settings)
     combined_perinuclear_labels = filter_properties.index[
         combined_perinuclear_keep
@@ -269,6 +287,8 @@ else:
     channel_records = []
     for item in CHANNELS:
         record = dict(item)
+        if desktop_export is not None:
+            record["filter_enabled"] = item["name"] in settings["intensity_filters"]
         if item["name"] in settings["intensity_filters"]:
             record["filter_min"] = settings["intensity_filters"][item["name"]][
                 "minimum"
@@ -300,6 +320,9 @@ else:
                 ],
             }
         )
+
+        if desktop_export is not None:
+            perinuclear_records[-1]["channel_index"] = marker_info["channel_index"]
 
     configuration = {
         "schema_version": 8,
@@ -341,8 +364,10 @@ else:
             "rescale": CELLPOSE_RESCALE,
             "normalize": CELLPOSE_NORMALIZE,
             "roi_normalization": CELLPOSE_ROI_NORMALIZATION,
-            "used_gpu": (previous_config.get("cellpose", {}).get("used_gpu") if RUN_MODE == "resume" else bool(DEVICE.type != "cpu")),
-            "device": (previous_config.get("cellpose", {}).get("device", "not recorded") if RUN_MODE == "resume" else str(DEVICE)),
+            "used_gpu": (desktop_export["used_gpu"] if desktop_export is not None else
+                         previous_config.get("cellpose", {}).get("used_gpu") if RUN_MODE == "resume" else bool(DEVICE.type != "cpu")),
+            "device": (desktop_export["device"] if desktop_export is not None else
+                       previous_config.get("cellpose", {}).get("device", "not recorded") if RUN_MODE == "resume" else str(DEVICE)),
             "model_load_seconds": CELLPOSE_MODEL_LOAD_SECONDS,
             "evaluation_seconds": CELLPOSE_EVAL_SECONDS,
         },
@@ -353,6 +378,10 @@ else:
         "filters": settings,
         "software_versions": software_versions(),
     }
+    if desktop_export is not None:
+        configuration.update(desktop_export["provenance"])
+        configuration["cellpose"]["executed_parameters"] = desktop_export["executed_parameters"]
+        configuration["mntb_roi"].update(desktop_export["roi_provenance"])
     config_json_path.write_text(json.dumps(configuration, indent=2), encoding="utf-8")
 
     mask_results.reset_index().to_csv(all_masks_csv_path, index=False)
@@ -421,8 +450,13 @@ else:
         )
     for description, count in failure_counts.items():
         summary[f"failed_{safe_key(description).lower()}"] = count
-    density_summary = calculate_density_summary(
-        roi_plane_counts, settings, VOXEL_SPACING_UM, int(final_keep.sum()), roi_reviewed)
+    if desktop_export is None:
+        density_summary = calculate_density_summary(
+            roi_plane_counts, settings, VOXEL_SPACING_UM, int(final_keep.sum()), roi_reviewed)
+        _, effective_planes = density_z_planes(settings, masks.shape[0], z_spacing_um)
+    else:
+        density_summary = desktop_export["density"]
+        effective_planes = desktop_export["effective_planes"]
     summary.update(density_summary)
     summary["roi_source"] = roi_source
     pd.DataFrame([summary]).to_csv(summary_csv_path, index=False)
@@ -430,7 +464,6 @@ else:
     calibrated_label_tiff(roi_export_path, mntb_roi.astype(np.uint8), VOXEL_SPACING_UM)
     density_csv_path = sample_export_directory / "mntb_density_summary.csv"
     pd.DataFrame([{**density_summary, "roi_source": roi_source}]).to_csv(density_csv_path, index=False)
-    _, effective_planes = density_z_planes(settings, masks.shape[0], z_spacing_um)
     roi_planes_path = sample_export_directory / "mntb_roi_by_z.csv"
     pd.DataFrame({"z_index": np.arange(masks.shape[0]), "roi_voxels": roi_plane_counts,
                   "area_um2": roi_plane_counts * VOXEL_SPACING_UM[1] * VOXEL_SPACING_UM[2],
@@ -471,12 +504,26 @@ else:
             f"Excluded by Z guard: {len(guard_results)}",
         ]
     )
+    if desktop_export is not None:
+        summary_lines.extend([
+            "",
+            density_summary["interpretation"],
+            f"Counting rule: {density_summary['counting_rule']}",
+            f"Measured density: {density_summary['retained_nuclei_per_mm3']:.6g} nuclei/mm³",
+            f"Measured density: {density_summary['retained_nuclei_per_100um_cube']:.6g} nuclei/(100 µm)³",
+            f"Nominal thickness: {NOMINAL_SECTION_THICKNESS_UM:g} µm "
+            f"({configuration['nominal_section_thickness_source']})",
+            f"Nominal-thickness-corrected density: "
+            f"{density_summary['nominal_corrected_nuclei_per_100um_cube']:.6g} nuclei/(100 µm)³",
+        ])
     summary_txt_path.write_text("\n".join(summary_lines), encoding="utf-8")
 
     all_volumes = mask_results["volume_um3"].dropna()
     retained_volumes = retained_results["volume_um3"].dropna()
     volume_bins = np.histogram_bin_edges(all_volumes, bins=40)
-    volume_figure, volume_axis = plt.subplots(figsize=(9, 5.5))
+    volume_figure = Figure(figsize=(9, 5.5))
+    FigureCanvasAgg(volume_figure)
+    volume_axis = volume_figure.subplots()
     volume_axis.hist(
         all_volumes,
         bins=volume_bins,
@@ -501,7 +548,9 @@ else:
     volume_figure.tight_layout()
     volume_figure.savefig(volume_figure_path, dpi=300, bbox_inches="tight")
 
-    scatter_figure, scatter_axis = plt.subplots(figsize=(9, 5.5))
+    scatter_figure = Figure(figsize=(9, 5.5))
+    FigureCanvasAgg(scatter_figure)
+    scatter_axis = scatter_figure.subplots()
     scatter_axis.scatter(
         excluded_results["volume_um3"],
         excluded_results["sphericity"],
@@ -527,7 +576,9 @@ else:
     scatter_figure.tight_layout()
     scatter_figure.savefig(scatter_figure_path, dpi=300, bbox_inches="tight")
 
-    marker_figure, marker_axis = plt.subplots(figsize=(9, 5.5))
+    marker_figure = Figure(figsize=(9, 5.5))
+    FigureCanvasAgg(marker_figure)
+    marker_axis = marker_figure.subplots()
     for marker_name, marker_filter in settings["perinuclear_filters"].items():
         marker_axis.hist(
             mask_results[marker_filter["column"]].dropna(),
@@ -544,12 +595,15 @@ else:
     marker_axis.set_ylabel("Number of DAPI nuclei")
     marker_axis.set_title("Perinuclear marker association")
     marker_axis.set_xlim(0, 1)
-    marker_axis.legend()
+    if settings["perinuclear_filters"]:
+        marker_axis.legend()
     marker_axis.grid(alpha=0.2)
     marker_figure.tight_layout()
     marker_figure.savefig(marker_figure_path, dpi=300, bbox_inches="tight")
 
-    reason_figure, reason_axis = plt.subplots(figsize=(9, 5.5))
+    reason_figure = Figure(figsize=(9, 5.5))
+    FigureCanvasAgg(reason_figure)
+    reason_axis = reason_figure.subplots()
     labels = list(failure_counts)
     counts = [failure_counts[label] for label in labels]
     reason_axis.barh(labels, counts, color="slateblue", edgecolor="navy")
@@ -565,7 +619,8 @@ else:
         metadata["Title"] = "General Cellpose-SAM DAPI nuclei report"
         metadata["Author"] = PDF_AUTHOR
         metadata["Subject"] = "3D nuclei and configurable perinuclear markers"
-        text_figure = plt.figure(figsize=(8.27, 11.69))
+        text_figure = Figure(figsize=(8.27, 11.69))
+        FigureCanvasAgg(text_figure)
         text_axis = text_figure.add_subplot(111)
         text_axis.axis("off")
         wrapped_text = "\n".join(
@@ -583,16 +638,13 @@ else:
             family="monospace",
         )
         pdf.savefig(text_figure, bbox_inches="tight")
-        plt.close(text_figure)
         pdf.savefig(volume_figure, bbox_inches="tight")
         pdf.savefig(scatter_figure, bbox_inches="tight")
         pdf.savefig(marker_figure, bbox_inches="tight")
         pdf.savefig(reason_figure, bbox_inches="tight")
 
-    plt.close(volume_figure)
-    plt.close(scatter_figure)
-    plt.close(marker_figure)
-    plt.close(reason_figure)
+    for figure in (text_figure, volume_figure, scatter_figure, marker_figure, reason_figure):
+        figure.clear()
 
     density_txt_path = sample_export_directory / "mntb_density_summary.txt"
     density_txt_path.write_text("\n".join(f"{k}: {v}" for k, v in density_summary.items()), encoding="utf-8")
@@ -619,11 +671,6 @@ else:
         report_path,
     ]
 
-    print(f"Analysis package saved to:\n{sample_export_directory}")
-    print("\nCreated files:")
-    for created_file in created_files:
-        print(f"  {created_file.name}")
-
     # Explicit per-plane provenance for corrected intensities.
     z_rows = []
     for name, report in globals().get('z_correction_reports', {}).items():
@@ -647,3 +694,8 @@ else:
                   correction=z_correction_reports[name]) for name in corrected_names],
             [DEFAULT_INPUT])
         print('Corrected image data saved:', corrected_image_path)
+
+    print(f"Analysis package saved to:\n{sample_export_directory}")
+    print("\nCreated files:")
+    for created_file in created_files:
+        print(f"  {created_file.name}")

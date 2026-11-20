@@ -22,10 +22,10 @@ def execute_stage(namespace, name):
     )
 
 
-def validate_roi_geometry(layer, spacing, shape):
+def validate_roi_geometry(layer, spacing, shape, *, translate=(0, 0, 0)):
     if tuple(layer.data.shape) != tuple(shape):
         raise ValueError('ROI shape differs from the original image grid.')
-    if (not np.allclose(layer.scale, spacing) or not np.allclose(layer.translate, 0)
+    if (not np.allclose(layer.scale, spacing) or not np.allclose(layer.translate, translate)
             or not np.allclose(layer.rotate, np.eye(3))
             or not np.allclose(layer.shear, 0)
             or not np.allclose(layer.affine.affine_matrix, np.eye(4))):
