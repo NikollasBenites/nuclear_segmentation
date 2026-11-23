@@ -5,7 +5,7 @@ from nuclear_segmentation.filtering_workspace import calculate_filtering_prerequ
 from nuclear_segmentation.geometry_edit import GeometryEdit, effective_masks, validate_history
 from nuclear_segmentation.project_state import ProjectState
 from test_desktop_normalization import _dataset
-from test_mask_review_gui import qapp, review_window
+from test_mask_review_gui import qapp, retained_second_mask, review_window
 from test_native_project import _segment, open_saved, project, save
 
 
@@ -379,3 +379,142 @@ def test_invalid_preview_can_only_be_discarded(review_window, change):
     panel.discard()
     assert window.mask_selection._on_mouse_press not in layer.mouse_drag_callbacks
     assert raw[0, 1, 1] == 1
+
+
+def test_filtered_selection_scope_and_hidden_geometry(retained_second_mask):
+    window, raw, filtered = retained_second_mask
+    state = window.project_state
+    panel = window.geometry_panel
+    window.mask_display.show("filtered")
+    window.viewer_toolbar.activate_tool("review")
+    window.mask_selection.select_mask(filtered, 2)
+    assert panel.selected_object.text() == "2"
+    revision = state.session_revision()
+    panel.start()
+    assert panel.edit.filtered and panel.selected_id == panel.brush_id == 2
+    preview = panel.layer.data
+    np.testing.assert_array_equal(preview, filtered.data)
+    hidden = raw == 1
+    assert hidden.any() and not preview[hidden].any()
+    for pos, value in [((0, 1, 1), 2), ((0, 0, 0), 1)]:
+        preview[pos] = value
+        panel.run("commit")
+        assert "excluded object" in panel.status.text()
+        assert state.session_revision() == revision
+        panel.scope.setCurrentIndex(1)
+        assert panel.edit.filtered and panel.scope.currentIndex() == 0
+        assert preview[pos] == value
+        preview[pos] = 0
+    preview[0, 0, 0] = 2
+    panel.scope.setCurrentIndex(1)
+    np.testing.assert_array_equal(preview[hidden], raw[hidden])
+    preview[0, 1, 1] = 0
+    panel.scope.setCurrentIndex(0)
+    assert not panel.edit.filtered and panel.scope.currentIndex() == 1
+    preview[0, 1, 1] = 1
+    panel.scope.setCurrentIndex(0)
+    assert panel.edit.filtered and not preview[hidden].any() and preview[0, 0, 0] == 2
+    panel.commit()
+    expected = raw.copy()
+    expected[0, 0, 0] = 2
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), expected)
+    assert state.segmentation_result["edit_history"][-1]["affected_ids"] == [2]
+    assert not state.filtering_is_current and panel.scope.currentIndex() == 1
+    assert not panel.scope.model().item(0).isEnabled()
+    committed = window.mask_display.layers["edited"]
+    window.mask_display.show("edited")
+    window.viewer_toolbar.activate_tool("review")
+    window.mask_selection.select_mask(committed, 1)
+    panel.start()
+    assert panel.selected_id == panel.brush_id == 1
+    panel.discard()
+    panel.undo()
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), raw)
+
+
+def test_collapsing_editor_preserves_transaction_and_merge(review_window, qapp):
+    from qtpy.QtWidgets import QScrollArea
+
+    window, raw = review_window
+    window.set_workflow("mask_review")
+    window.navigation.set_subpage("mask_editing", emit=True)
+    panel = window.geometry_panel
+    window.resize(800, 520)
+    window.show()
+    qapp.processEvents()
+    assert not panel.merge_section.expanded and panel.merge_list.isHidden()
+    panel.start()
+    preview = panel.layer
+    panel.merge_section.header.click()
+    for pos in ((0, 1, 1), (0, 5, 6)):
+        _click_mask(preview, pos)
+        panel.add_merge()
+    panel.merge_target.setCurrentIndex(panel.merge_target.findData(1))
+    panel.merge_section.header.click()
+    panel.header.click()
+    assert panel.content.isHidden() and panel.status.isVisible()
+    assert panel.layer is preview and panel.selected_id == panel.brush_id == 2
+    assert panel.merge_list.count() == 2 and panel.merge_target.currentData() == 1
+    np.testing.assert_array_equal(preview.data, raw)
+    panel.header.click()
+    panel.merge_section.header.click()
+    scroll = panel.parentWidget()
+    while scroll is not None and not isinstance(scroll, QScrollArea):
+        scroll = scroll.parentWidget()
+    assert scroll is not None
+    scroll.ensureWidgetVisible(panel.buttons["merge"])
+    qapp.processEvents()
+    assert scroll.verticalScrollBar().maximum() > 0
+    assert panel.buttons["merge"].isVisible()
+    assert panel.buttons["merge"].width() >= panel.buttons["merge"].minimumSizeHint().width()
+    panel.merge()
+    panel.discard()
+
+
+def test_filtered_commit_resumes_with_excluded_geometry_and_undo(project, tmp_path):
+    window, app, _, _, warnings = project
+    state = window.project_state
+    raw = _segment(window)
+    first = GeometryEdit(state)
+    child = first.split(90000)
+    first.preview[0][raw[0] == 90000] = child
+    first.commit()
+    before = effective_masks(state.segmentation_result)
+    record = calculate_filtering_prerequisites(state, state.segmentation_result["scientific_config"])
+    window.filtering._calculated(dict(record, retained_ids=(child,), retained_count=1,
+                                      filtered_masks=np.where(before == child, before, 0)))
+    edit = GeometryEdit(state, filtered=True)
+    edit.remove(child)
+    edit.commit()
+    folder = tmp_path / "filtered-edit"
+    save(window, app, folder)
+    open_saved(window, app, folder)
+    assert not warnings
+    np.testing.assert_array_equal(state.segmentation_result["masks"], raw)
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), np.where(before == child, 0, before))
+    assert state.segmentation_result["edit_history"][-1]["removed_ids"] == [child]
+    GeometryEdit.undo(state)
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), before)
+
+
+def test_empty_and_outdated_filtering_never_removes_objects(retained_second_mask):
+    window, raw, _ = retained_second_mask
+    state = window.project_state
+    panel = window.geometry_panel
+    record = dict(state.filtering_result, retained_ids=(), retained_count=0,
+                  filtered_masks=np.zeros_like(raw))
+    window.filtering._calculated(record)
+    panel.start()
+    assert panel.edit.filtered and not panel.layer.data.any() and panel.selected_id is None
+    panel.run("commit")
+    assert "no changes" in panel.status.text() and panel.busy
+    panel.scope.setCurrentIndex(1)
+    np.testing.assert_array_equal(panel.layer.data, raw)
+    panel.scope.setCurrentIndex(0)
+    state.invalidate_filtering()
+    assert not panel.buttons["commit"].isEnabled()
+    panel.discard()
+    panel.start()
+    assert not panel.edit.filtered and panel.selected_id is None
+    np.testing.assert_array_equal(panel.layer.data, raw)
+    panel.discard()

@@ -1,62 +1,148 @@
 """Proofreading controls for the Mask Editing page."""
 from napari.layers import LayerLock
-from qtpy.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QLabel, QLineEdit,
+from qtpy.QtCore import QSignalBlocker
+from qtpy.QtWidgets import (QComboBox, QFormLayout, QLabel, QLineEdit,
                             QListWidget, QPushButton, QVBoxLayout)
 
-from .geometry_edit import GeometryEdit, undo_stack
+from .collapsible_section import CollapsibleSection
+from .geometry_edit import GeometryEdit, effective_masks, undo_stack
 from .runtime import validate_roi_geometry
 
 
-class GeometryPanel(QGroupBox):
+class GeometryPanel(CollapsibleSection):
     def __init__(self, window, review):
-        super().__init__("Geometry editing")
+        super().__init__("geometry_editing", "Geometry Editing")
         self.window = window
         self.state = window.project_state
         self.viewer = window.embedding.viewer
         self.edit = self.layer = None
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout()
+        self.set_content_layout(layout)
         self.buttons = {}
         self.selected_id = self.brush_id = None
+
+        def button(name, caption):
+            control = QPushButton(caption)
+            control.clicked.connect(lambda checked=False: self.run(name))
+            self.buttons[name] = control
+            return control
+
+        controls = QFormLayout()
+        controls.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.scope = QComboBox()
+        self.scope.addItem("Edit Filtered Masks", True)
+        self.scope.addItem("Edit All Masks", False)
+        controls.addRow(self.scope)
+        controls.addRow(button("start", "Start Editing"), button("commit", "Commit Changes"))
+        controls.addRow(button("discard", "Discard Changes"), button("undo", "Undo Last Commit"))
+        layout.addLayout(controls)
+
         fields = QFormLayout()
+        fields.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.selected_object = QLabel("None")
         self.brush_label = QLineEdit()
-        self.brush_label.setPlaceholderText("Select an object or enter a positive ID")
+        self.brush_label.setPlaceholderText("Select an object or enter an ID")
         self.brush_label.editingFinished.connect(self._brush_entered)
         fields.addRow("Selected Object ID", self.selected_object)
         fields.addRow("Brush Label ID", self.brush_label)
+        fields.addRow(button("remove", "Remove Selected Object"))
+        fields.addRow(button("split", "Split Selected Object"))
+        fields.addRow(button("return_preview", "Return to Editing Preview"))
         layout.addLayout(fields)
+
+        self.merge_section = CollapsibleSection("geometry_merge", "Merge Selection", expanded=False)
+        merge = QVBoxLayout()
+        self.merge_section.set_content_layout(merge)
+        layout.addWidget(self.merge_section)
+        merge.addWidget(button("add_merge", "Add Selected Object to Merge"))
         self.merge_list = QListWidget()
         self.merge_list.setMaximumHeight(85)
         self.merge_list.setAccessibleName("Objects selected for merge")
+        merge.addWidget(self.merge_list)
+        merge.addWidget(button("remove_merge", "Remove ID from List"))
+        merge.addWidget(button("clear_merge", "Clear Merge Selection"))
         self.merge_target = QComboBox()
         self.merge_target.setAccessibleName("Retained target ID")
         self.merge_target.setPlaceholderText("Choose the retained ID")
-        for name, caption in (
-            ("start", "Start Editing"), ("commit", "Commit Changes"), ("discard", "Discard Changes"),
-            ("undo", "Undo Last Commit"), ("remove", "Remove Selected Object"),
-            ("split", "Split Selected Object"), ("return_preview", "Return to Editing Preview"),
-            ("add_merge", "Add Selected Object to Merge"), ("remove_merge", "Remove ID from List"),
-            ("clear_merge", "Clear Merge Selection"), ("merge", "Preview Merge"),
-            ("show_edited", "Show Committed Edits"),
-        ):
-            button = QPushButton(caption)
-            if name == "remove_merge":
-                layout.addWidget(self.merge_list)
-            if name == "merge":
-                layout.addWidget(QLabel("Retained target ID"))
-                layout.addWidget(self.merge_target)
-            layout.addWidget(button)
-            button.clicked.connect(lambda checked=False, action=name: self.run(action))
-            self.buttons[name] = button
+        merge.addWidget(QLabel("Retained target ID"))
+        merge.addWidget(self.merge_target)
+        merge.addWidget(button("merge", "Preview Merge"))
+        review.show_raw_button.parentWidget().layout().insertWidget(1, button("show_edited", "Show Committed Edits"))
         self.merge_target.currentIndexChanged.connect(self.refresh)
         self.merge_list.currentRowChanged.connect(self.refresh)
         self.status = QLabel()
         self.status.setWordWrap(True)
-        layout.addWidget(self.status)
+        self.layout().insertWidget(1, self.status)
         review.pages["mask_editing"].layout().insertWidget(1, self)
         self.state.segmentation_result_changed.connect(self.refresh)
         self.viewer.dims.events.ndisplay.connect(self._dimensions)
+        self.scope.currentIndexChanged.connect(self._change_scope)
+        self.state.filtering_result_changed.connect(self._sync_scope)
+        window.mask_selection.selection_changed.connect(self._selection_changed)
+        self._sync_scope()
+
+    def _sync_scope(self, *args):
+        current = self.state.filtering_is_current and self.state.filtering_result is not None
+        self.scope.model().item(0).setEnabled(current)
+        if self.busy:
+            if self.edit.filtered and not self.edit.filter_current:
+                self._preview_changed()
+            return
+        with QSignalBlocker(self.scope):
+            self.scope.setCurrentIndex(0 if current else 1)
         self.refresh()
+
+    def _scope_text(self):
+        if self.scope.currentData():
+            return "Filtered · retained objects"
+        return "All masks" if self.state.filtering_is_current else "All masks · filtered editing unavailable"
+
+    def _change_scope(self):
+        if self.busy:
+            try:
+                self._require_preview()
+                self.edit.set_filtered(self.scope.currentData())
+            except ValueError as error:
+                with QSignalBlocker(self.scope):
+                    self.scope.setCurrentIndex(0 if self.edit.filtered else 1)
+                self.status.setText(str(error))
+                return
+            self.layer.editable = False  # Clear napari stroke history for the previous presentation.
+            self._dimensions()
+            self.layer.refresh()
+            if self.selected_id is not None and not self.edit.allows_label(self.selected_id):
+                self.window.mask_selection.clear_selection(self.layer)
+                self.selected_id = None
+                self.selected_object.setText("None")
+                self._set_brush(None)
+            if self.brush_id is not None and not self.edit.allows_label(self.brush_id):
+                self._set_brush(None)
+            for row in reversed(range(self.merge_target.count())):
+                if not self.edit.allows_label(self.merge_target.itemData(row)):
+                    self.merge_list.setCurrentRow(row)
+                    self.remove_merge()
+            status = "Editing active" if self.edit.is_pristine() else "Uncommitted changes"
+            self.status.setText(f"{self._scope_text()} · {status}")
+        self.refresh()
+
+    def _prior_selection(self):
+        selection = self.window.mask_selection
+        layer, label = selection.selected_layer, selection.selected_mask_id
+        if (label is None or not self.state.owns_mask_layer(layer)
+                or layer not in (self.window.mask_display.layers.get(role) for role in ("raw", "filtered", "edited"))):
+            return None
+        if layer is self.window.mask_display.layers.get("filtered") and not self.state.filtering_is_current:
+            return None
+        if self.scope.currentData() and label not in (self.state.filtering_result or {}).get("retained_ids", ()):
+            return None
+        result = self.state.segmentation_result
+        if result is None or not self.state.segmentation_is_current:
+            return None
+        source = effective_masks(result)
+        if layer.data is result["masks"] and source is not layer.data:
+            if not any((plane == label).any() for plane in source):
+                return None
+        return label
 
     @property
     def busy(self):
@@ -88,8 +174,12 @@ class GeometryPanel(QGroupBox):
         self.buttons["undo"].setEnabled(current and not self.busy and bool(undo_stack(result.get("edit_history", ()))))
         self.buttons["show_edited"].setEnabled(not self.busy and "edited" in self.window.mask_display.layers)
         self.brush_label.setEnabled(bool(choosing))
+        self.scope.setEnabled(not self.busy or choosing)
+        self.merge_list.setVisible(self.merge_list.count() > 0)
         if not self.busy:
-            self.status.setText("No uncommitted edits.")
+            label = self._prior_selection()
+            self.selected_object.setText("None" if label is None else str(label))
+            self.status.setText("No active edit · " + self._scope_text())
 
     def _set_brush(self, label):
         self.brush_id = label
@@ -104,6 +194,10 @@ class GeometryPanel(QGroupBox):
             return
         try:
             label = int(self.brush_label.text())
+            if not self.edit.allows_label(label):
+                self._set_brush(None)
+                self.status.setText("This ID is excluded. Use Edit All Masks to edit it.")
+                return
             if not 0 < label <= self.edit.next_id:
                 raise ValueError
         except ValueError:
@@ -113,11 +207,15 @@ class GeometryPanel(QGroupBox):
         self._set_brush(label)
 
     def _selection_changed(self, layer, label):
-        if layer is self.layer and self.edit.operation == "paint/erase" and self.selected_id != label:
+        if self.busy and layer is self.layer and self.edit.operation == "paint/erase" and self.selected_id != label:
             self.selected_id = label
             self.selected_object.setText("None" if label is None else str(label))
             self._set_brush(label)
         self.refresh()
+
+    def _painted(self, event):
+        status = "Split preview" if self.edit.operation == "split" else "Uncommitted changes"
+        self.status.setText(f"{self._scope_text()} · {status}")
 
     def _brush_changed(self, event):
         # Napari's pick tool and keyboard shortcuts can change the brush independently.
@@ -125,7 +223,7 @@ class GeometryPanel(QGroupBox):
             self._set_brush(self.edit.parameters["new_id"])
         elif self.edit.operation == "paint/erase":
             value = int(self.layer.selected_label)
-            self._set_brush(value if 0 < value <= self.edit.next_id else None)
+            self._set_brush(value if 0 < value <= self.edit.next_id and self.edit.allows_label(value) else None)
 
     def _dimensions(self, event=None):
         if self.busy:
@@ -136,7 +234,8 @@ class GeometryPanel(QGroupBox):
     def _owns_preview(self):
         return (not self.invalidated and self.layer in self.viewer.layers and self.layer.data is self.edit.preview
                 and self.state.owns_mask_layer(self.layer) and self.state.segmentation_is_current
-                and self.edit.owner == self.state.session_revision())
+                and self.edit.owner == self.state.session_revision()
+                and (not self.edit.filtered or self.edit.filter_current))
 
     def _preview_changed(self, *args):
         if not self._owns_preview():
@@ -188,8 +287,8 @@ class GeometryPanel(QGroupBox):
         review = window.context_panel.mask_review_page
         if not window._project_idle() or review._filter_timer.isActive():
             raise ValueError("Wait for the active operation to finish.")
-        edit = GeometryEdit(self.state)
-        selected = review._selected_id if review._selected_is_raw else None
+        selected = self._prior_selection()
+        edit = GeometryEdit(self.state, filtered=self.scope.currentData())
         raw = window.segmentation.result_layer
         if raw is None:
             raise ValueError("Restore the segmentation layer before editing.")
@@ -203,6 +302,7 @@ class GeometryPanel(QGroupBox):
                                        scale=spacing, translate=self.translate,
                                        metadata={**self.state.mask_layer_metadata(), "nucytoseg_edit_preview": True})
         self.edit, self.layer = edit, layer
+        self.selected_object.setText("None")
         self.invalidated = False
         self.protected_layers = []
         layer.locked = LayerLock.DELETION
@@ -218,7 +318,7 @@ class GeometryPanel(QGroupBox):
         layer.events.data.connect(self._preview_changed)
         for name in ("scale", "translate", "rotate", "shear", "affine"):
             getattr(layer.events, name).connect(self._grid_changed)
-        window.mask_selection.selection_changed.connect(self._selection_changed)
+        layer.events.paint.connect(self._painted)
         layer.n_edit_dimensions = 2
         self._dimensions()
         self.locked = []
@@ -230,13 +330,13 @@ class GeometryPanel(QGroupBox):
             control.setEnabled(False)
         window.mask_display.suspend()
         self.return_preview()
-        if selected is not None and (edit.base == selected).any():
+        if selected is not None and any((plane == selected).any() for plane in edit.preview):
             window.mask_selection.restore_selection(layer, selected)
-        self.status.setText("Click an object in the preview to select it. Paint or erase in 2D.")
+        self.status.setText(self._scope_text() + " · Editing active")
         self.refresh()
 
     def discard(self):
-        self.window.mask_selection.selection_changed.disconnect(self._selection_changed)
+        self.layer.events.paint.disconnect(self._painted)
         self.layer.events.selected_label.disconnect(self._brush_changed)
         self.layer.events.visible.disconnect(self._dimensions)
         self.layer.events.editable.disconnect(self._dimensions)
@@ -271,7 +371,7 @@ class GeometryPanel(QGroupBox):
         self.previous_layer = None
         self.window._update_project_actions()
         self.window.context_panel.mask_review_page._refresh_actions()
-        self.refresh()
+        self._sync_scope()
 
     def commit(self):
         self._require_preview()
@@ -303,7 +403,7 @@ class GeometryPanel(QGroupBox):
     def add_merge(self):
         self._require_preview()
         label = self.selected_id
-        if label is None or not (self.edit.base == label).any():
+        if label is None or not self.edit.allows_label(label) or not (self.edit.base == label).any():
             raise ValueError("Select an object from the committed editing source.")
         if self.merge_target.findData(label) < 0:
             self.merge_list.addItem(str(label))

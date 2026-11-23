@@ -9,7 +9,7 @@ from qtpy.QtTest import QTest
 from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.geometry_edit import effective_masks
 from test_desktop_normalization import _dataset
-from test_mask_review_gui import qapp, review_window
+from test_mask_review_gui import qapp, retained_second_mask, review_window
 
 
 def click(layer, position, *, axes=(1, 2), direction=None, modifiers=(), drag=False):
@@ -27,6 +27,11 @@ def click(layer, position, *, axes=(1, 2), direction=None, modifiers=(), drag=Fa
     mouse_release_callbacks(layer, event)
 
 
+def editing_page(window):
+    window.set_workflow("mask_review")
+    window.navigation.set_subpage("mask_editing", emit=True)
+
+
 def actions(window):
     menu = window.mask_context_menu.menu
     assert menu is not None and menu.isVisible()
@@ -35,6 +40,7 @@ def actions(window):
 
 def test_menu_selection_properties_and_transactions(review_window):
     window, raw = review_window
+    editing_page(window)
     state = window.project_state
     layer = window.segmentation.result_layer
     window.embedding.viewer.layers.selection.active = layer
@@ -61,12 +67,12 @@ def test_menu_selection_properties_and_transactions(review_window):
     click(preview, (0, 1, 1))
     choices = actions(window)
     assert choices["Add to Merge Selection"].isEnabled()
-    assert not choices["Start Editing"].isEnabled() and not choices["Show Selected Only"].isEnabled()
+    assert "Start Editing" not in choices and "Show Selected Only" not in choices
     choices["Add to Merge Selection"].trigger()
     assert panel.merge_list.item(0).text() == "1"
     assert panel.selected_id == panel.brush_id == 1
     click(preview, (0, 5, 6))
-    actions(window)["Remove"].trigger()
+    actions(window)["Remove Object"].trigger()
     assert panel.edit.operation == "remove" and not (preview.data == 2).any()
     assert effective_masks(state.segmentation_result) is raw
     panel.commit()
@@ -78,6 +84,7 @@ def test_menu_selection_properties_and_transactions(review_window):
 
 def test_menu_split_and_native_event_conflicts(review_window):
     window, raw = review_window
+    editing_page(window)
     panel = window.geometry_panel
     panel.start()
     preview = panel.layer
@@ -86,7 +93,7 @@ def test_menu_split_and_native_event_conflicts(review_window):
         click(preview, position, **options)
         assert window.mask_context_menu.menu is None and panel.selected_id is None
     click(preview, (0, 1, 1))
-    actions(window)["Split"].trigger()
+    actions(window)["Split Object"].trigger()
     child = panel.edit.parameters["new_id"]
     assert panel.selected_id == 1 and panel.brush_id == child and str(preview.mode) == "paint"
     # A native brush-mode event belongs to napari. The menu callback exits before picking.
@@ -95,8 +102,8 @@ def test_menu_split_and_native_event_conflicts(review_window):
         assert list(window.mask_context_menu._gesture(preview, SimpleNamespace(button=2, modifiers=()))) == []
     window.viewer_toolbar.activate_tool("review")
     click(preview, (0, 5, 6))
-    assert {key for key, action in actions(window).items() if action.isEnabled()} == {"Show Mask Properties"}
-    actions(window)["Show Mask Properties"].trigger()
+    assert {key for key, action in actions(window).items() if action.isEnabled()} == {"Show Object Properties"}
+    actions(window)["Show Object Properties"].trigger()
     assert panel.selected_id == 1 and panel.brush_id == child
     panel.discard()
     assert np.array_equal(window.project_state.segmentation_result["masks"], raw)
@@ -104,6 +111,7 @@ def test_menu_split_and_native_event_conflicts(review_window):
 
 def test_menu_3d_camera_ray_selects_nearest_id_in_each_direction(review_window):
     window, raw = review_window
+    editing_page(window)
     masks = np.zeros_like(raw)
     masks[0, 2, 2] = 7
     masks[-1, 2, 2] = 91
@@ -122,6 +130,7 @@ def test_menu_3d_camera_ray_selects_nearest_id_in_each_direction(review_window):
 
 def test_foreign_layer_and_stale_context_cannot_edit(review_window):
     window, raw = review_window
+    editing_page(window)
     viewer = window.embedding.viewer
     state = window.project_state
     layer = window.segmentation.result_layer
@@ -151,6 +160,7 @@ def test_rendered_canvas_secondary_click_opens_menu(qapp, tmp_path):
                            restore_workspace=False)
     try:
         window.show()
+        editing_page(window)
         state = window.project_state
         state.set_dataset(_dataset(tmp_path / "menu.tif"))
         masks = np.full(state.working_dataset.standardized_shape[1:], 13, dtype=np.uint16)
@@ -182,16 +192,17 @@ def test_rendered_canvas_secondary_click_opens_menu(qapp, tmp_path):
 
 def test_raw_context_for_removed_id_and_dirty_preview(review_window):
     window, _ = review_window
+    editing_page(window)
     panel = window.geometry_panel
     panel.start()
     click(panel.layer, (0, 1, 1))
-    actions(window)["Remove"].trigger()
+    actions(window)["Remove Object"].trigger()
     panel.commit()
     raw = window.segmentation.result_layer
     window.mask_display.show("raw")
     click(raw, (0, 1, 1))
     choices = actions(window)
-    assert choices["Select Mask"].isEnabled() and not choices["Start Editing"].isEnabled()
+    assert choices["Select Mask"].isEnabled() and "Start Editing" not in choices
     choices["Select Mask"].trigger()
     click(raw, (0, 5, 6))
     actions(window)["Start Editing"].trigger()
@@ -200,8 +211,50 @@ def test_raw_context_for_removed_id_and_dirty_preview(review_window):
     preview.paint((0, 0, 0), 2)
     click(preview, (0, 5, 6))
     choices = actions(window)
-    assert choices["Select Mask"].isEnabled()
-    assert not any(choices[name].isEnabled() for name in ("Remove", "Split", "Add to Merge Selection"))
+    assert set(choices) == {"Select Object", "Show Object Properties"}
     panel.discard()
     assert window.mask_context_menu.menu is None
     assert window.mask_context_menu._gesture not in preview.mouse_drag_callbacks
+
+
+def test_workflow_and_scientific_role_menu(review_window):
+    window, masks = review_window
+    state = window.project_state
+    result = state.segmentation_result.copy()
+    second = state.create_session("Other channel", scientific_role="cytoplasmic", channel_index=0)
+    state.select_session(second.session_id)
+    state.set_segmentation_result(result)
+    raw = window.segmentation.result_layer
+    for workflow in ("project", "preprocessing", "matching", "export"):
+        window.set_workflow(workflow)
+        click(raw, (0, 1, 1))
+        assert window.mask_context_menu.menu is None
+    for workflow in ("segmentation", "quality_control", "quantification"):
+        window.set_workflow(workflow)
+        click(raw, (0, 1, 1))
+        assert set(actions(window)) == {"Select Mask", "Show Mask Properties"}
+        menu = window.mask_context_menu.menu
+        assert menu.actions()[0].text() == "Cytoplasmic · Mask 1"
+        menu.hide()
+        assert window.navigation.current_workflow == workflow
+
+
+def test_filtered_menu_respects_scope_and_review_subpage(retained_second_mask):
+    window, _, filtered = retained_second_mask
+    window.set_workflow("mask_review")
+    window.mask_display.show("raw")
+    raw = window.segmentation.result_layer
+    click(raw, (0, 1, 1))
+    assert "Start Editing" not in actions(window)
+    window.mask_context_menu.menu.hide()
+    window.mask_display.show("filtered")
+    window.navigation.set_subpage("roi_counting", emit=True)
+    click(filtered, (0, 5, 6))
+    assert "Start Editing" not in actions(window)
+    window.mask_context_menu.menu.hide()
+    window.navigation.set_subpage("filtering", emit=True)
+    click(filtered, (0, 5, 6))
+    actions(window)["Start Editing"].trigger()
+    assert window.navigation.current_subpage == "mask_editing"
+    assert window.geometry_panel.selected_id == window.geometry_panel.brush_id == 2
+    window.geometry_panel.discard()

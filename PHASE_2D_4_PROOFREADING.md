@@ -26,7 +26,23 @@ Use a duplicate of a validated nuclear project and a calibrated multichannel ima
 
 - [ ] With a visible raw, filtered or committed Labels layer active, use Pan or Review / Select. Secondary-click a known object on an offset, anisotropic slice. Verify the layer and ID in the menu. Dismiss it and check that selection, brush and voxels are unchanged.
 - [ ] Try Select Mask, Show Selected Only and Show Mask Properties. Compare the ID and voxel count with the clicked layer. Use Start Editing and verify the same object is selected in the effective preview. A raw ID previously removed from committed geometry should be available for inspection only.
-- [ ] In a fresh preview, secondary-click different objects to add them to the merge list. Test Split and Remove separately, inspecting the preview before Commit or Discard. Verify Undo restores committed geometry. After a brush stroke, confirm whole-object operations are disabled until the transaction finishes.
+- [ ] In a fresh preview, secondary-click different objects to add them to the merge list. Test Split and Remove separately, inspecting the preview before Commit or Discard. Verify Undo restores committed geometry. After a brush stroke, confirm the menu omits whole-object operations until the transaction finishes.
 - [ ] Test background clicks, modified clicks, secondary-button drags, paint and erase. Verify native gestures continue without opening the menu. Rotate a 3D volume with two masks along one ray and check the nearest ID from both directions. Repeat after switching sessions and reopening the project.
 
 Record pass/fail and observations per step. Native macOS sign-off is pending.
+
+## Phase 2D.4.2 native macOS sign-off
+
+Use the same calibrated image and reference measurements as above. Record the commit, macOS, PyQt6 and napari versions and the session for each check.
+
+- [ ] Narrow the context dock, expand Geometry Editing and scroll to Preview Merge. Add two IDs and choose a target. Collapse both sections, change a comparison layer's opacity and reopen the sections. Verify the preview, selection, brush, merge IDs and target. Check the collapsed status after a brush stroke, split and merge.
+- [ ] Filter out one known object while retaining another. Select the retained object in Live Filtered Masks and start editing. Check the selected ID, brush ID and Edit Filtered Masks indicator. Use Edit All Masks to inspect the excluded object's position, then switch back.
+- [ ] Paint across that hidden position. Attempt Commit and switch to Edit All Masks. Verify both report the conflict and preserve the preview. Undo the stroke or discard. Repeat with a valid stroke over true background. Toggle scope twice, commit and verify that the excluded object's complete voxel set is identical to the reference. Check the original Cellpose masks and the history's affected IDs.
+- [ ] In Edit All Masks, erase part of an excluded object. Verify a switch to filtered scope reports the pending change. Commit intentionally, recalculate measurements and filtering, then compare volumes and nuclear counts using the procedure above. Repeat in the cytoplasmic session and check the nuclear session's results.
+- [ ] Select a committed object and start editing again. Inspect the all-mask fallback after invalidation and the filtered default after recalculation. Repeat with zero retained objects and with a previously removed object selected in raw masks.
+- [ ] With a trackpad secondary click, verify the biological role and ID on raw, filtered, committed and preview layers. Compare Filtering, ROI & Counting, Mask Editing, Segmentation and Project. Check that brush strokes, camera drags, split and merge previews expose only applicable actions. Repeat the two-direction 3D ray check above.
+- [ ] Save and quit after a filtered edit, reopen the v2 checkpoint, and compare excluded voxels, geometry signatures and Undo against the initial reference. Repeat the earlier legacy checkpoint checks and record any differences.
+
+### Phase 2D.5 naming plan
+
+Inventory legacy marker-specific matching entry points and their callers. Introduce role-based cytoplasmic split and nuclear–cytoplasmic matching module names behind compatibility imports. Verify matching outputs against existing fixtures and retain acquisition channel names and persisted scientific fields throughout the migration.

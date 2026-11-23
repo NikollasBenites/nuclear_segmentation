@@ -417,11 +417,11 @@ def test_project_close_clears_review_state(review_window):
     assert window.segmentation.result_layer is None
 
 
-def test_raw_filtered_and_selected_modes_preserve_label_geometry(review_window, qapp):
+@pytest.fixture
+def retained_second_mask(review_window, qapp):
     window, masks = review_window
     state = window.project_state
     panel = window.context_panel.mask_review_page
-    raw = window.segmentation.result_layer
     assert window.filtering.calculate()
     _wait(qapp, lambda: not window.filtering.busy)
     panel.minimum_volume.editor.setValue(0)
@@ -437,6 +437,16 @@ def test_raw_filtered_and_selected_modes_preserve_label_geometry(review_window, 
     filtered = window.filtering.filtered_layer
     record = state.filtering_result
     assert record["retained_ids"] == (2,)
+    return window, masks, filtered
+
+
+def test_raw_filtered_and_selected_modes_preserve_label_geometry(retained_second_mask, qapp):
+    window, masks, filtered = retained_second_mask
+    state = window.project_state
+    panel = window.context_panel.mask_review_page
+    raw = window.segmentation.result_layer
+    record = state.filtering_result
+    _, _, lower, _, _ = panel.intensity_controls[0]
     expected = masks.copy()
     panel.show_all_button.click()
     assert filtered.visible and not raw.visible

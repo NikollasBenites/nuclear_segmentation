@@ -20,12 +20,6 @@ class MaskHit:
 
 
 class MaskContextMenu:
-    actions = (
-        ("select", "Select Mask"), ("isolate", "Show Selected Only"),
-        ("add_merge", "Add to Merge Selection"), ("split", "Split"),
-        ("remove", "Remove"), ("start", "Start Editing"), ("properties", "Show Mask Properties"),
-    )
-
     def __init__(self, window):
         self.window = window
         self.panel = window.geometry_panel
@@ -67,6 +61,8 @@ class MaskContextMenu:
         if self.panel.busy:
             return layer is self.panel.layer and self.panel._owns_preview()
         layers = self.window.mask_display.layers
+        if layer is layers.get("filtered") and not self.state.filtering_is_current:
+            return False
         return any(layer is layers.get(role) for role in ("raw", "edited", "filtered"))
 
     def _label_at(self, layer, position, axes, direction):
@@ -107,32 +103,44 @@ class MaskContextMenu:
                 and self._label_at(hit.layer, hit.position, hit.axes, hit.direction) == hit.label)
 
     def _available(self, hit):
+        workflow = self.window.navigation.current_workflow
+        subpage = self.window.navigation.current_subpage
         edit = self.panel.edit
+        if workflow != "mask_review":
+            if workflow in ("segmentation", "quantification", "quality_control"):
+                return {"select": "Select Mask", "properties": "Show Mask Properties"}
+            return {}
         if edit is None:
-            allowed = {"select", "isolate", "properties"}
+            allowed = {"select": "Select Mask", "isolate": "Show Selected Only", "properties": "Show Mask Properties"}
             review = self.window.context_panel.mask_review_page
             source = effective_masks(self.state.segmentation_result)
-            if (self.state.segmentation_is_current and self.window._project_idle()
-                    and not review._filter_timer.isActive()
+            scope_ok = (not self.panel.scope.currentData()
+                        or hit.label in (self.state.filtering_result or {}).get("retained_ids", ()))
+            if (subpage in ("filtering", "mask_editing") and scope_ok and self.state.segmentation_is_current
+                    and self.window._project_idle() and not review._filter_timer.isActive()
                     and (source is hit.layer.data or any((plane == hit.label).any() for plane in source))):
-                allowed.add("start")
+                allowed["start"] = "Start Editing"
             return allowed
-        if edit.operation != "paint/erase":
-            return {"properties"}
-        allowed = {"select", "properties"}
-        if np.array_equal(edit.base, edit.preview):
-            allowed.update(("add_merge", "split", "remove"))
+        allowed = {"properties": "Show Object Properties"}
+        if subpage == "mask_editing" and edit.operation == "paint/erase":
+            allowed["select"] = "Select Object"
+            if edit.is_pristine() and edit.allows_label(hit.label):
+                if self.panel.merge_target.findData(hit.label) < 0:
+                    allowed["add_merge"] = "Add to Merge Selection"
+                allowed.update(split="Split Object", remove="Remove Object")
         return allowed
 
     def _popup(self, hit):
         self._dismiss()
+        allowed = self._available(hit)
+        if not allowed:
+            return
         menu = QMenu(self.window)
         self.menu = menu
-        menu.addSection(f"{hit.layer.name} · Mask {hit.label}")
-        allowed = self._available(hit)
-        for key, title in self.actions:
+        role = self.state.active_session.scientific_role.capitalize()
+        menu.addSection(f"{role} · Mask {hit.label}")
+        for key, title in allowed.items():
             action = menu.addAction(title)
-            action.setEnabled(key in allowed)
             action.triggered.connect(lambda checked=False, key=key: self._invoke(hit, key))
 
         def release():
