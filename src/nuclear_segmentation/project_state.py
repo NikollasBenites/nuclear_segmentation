@@ -76,6 +76,7 @@ class SegmentationSession:
     normalization_is_current: bool = False
     filter_controls: dict[str, Any] | None = None
     intensity_controls: dict | None = None
+    display_state: dict = field(default_factory=dict)
     roi_grid_compatible: bool = True
     legacy_import: dict[str, Any] | None = None
     input_revision: int = 0
@@ -234,6 +235,7 @@ class ProjectState(QObject):
             raise ValueError("Select a source channel from the project image.")
         session = SegmentationSession(uuid4().hex, self._session_name(name),
                                       scientific_role, channel_index)
+        session.display_state["channels"] = {c.index: c.visible for c in self.channels}
         self._sessions[session.session_id] = session
         self.sessions_changed.emit()
         return session

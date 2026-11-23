@@ -134,6 +134,7 @@ class PerinuclearMarkerRow(QGroupBox):
 class MaskReviewPanel(QWidget):
     """Present review state without owning selection or scientific decisions."""
 
+    show_raw_requested = Signal()
     show_all_requested = Signal()
     show_selected_requested = Signal()
     clear_selection_requested = Signal()
@@ -281,14 +282,16 @@ class MaskReviewPanel(QWidget):
         section = CollapsibleSection("review_visualization", "Visualization")
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 8, 10, 10)
-        self.show_all_button = QPushButton("Show all masks")
-        self.show_selected_button = QPushButton("Show selected mask only")
+        self.show_raw_button = QPushButton("Show Raw Masks")
+        self.show_all_button = QPushButton("Show All Masks")
+        self.show_selected_button = QPushButton("Show Selected Mask Only")
         self.clear_button = QPushButton("Clear mask selection")
+        self.show_raw_button.clicked.connect(self.show_raw_requested)
         self.show_all_button.clicked.connect(self.show_all_requested)
         self.show_selected_button.clicked.connect(self.show_selected_requested)
         self.clear_button.clicked.connect(self.clear_selection_requested)
         for button in (
-            self.show_all_button, self.show_selected_button, self.clear_button
+            self.show_raw_button, self.show_all_button, self.show_selected_button, self.clear_button
         ):
             layout.addWidget(button)
         self.visualization_status = self._value(
@@ -671,6 +674,7 @@ class MaskReviewPanel(QWidget):
     def _refresh_actions(self) -> None:
         available = self._result is not None
         selected = available and self._selected_is_raw and self._selected_id is not None
+        self.show_raw_button.setEnabled(available)
         self.show_all_button.setEnabled(available)
         self.show_selected_button.setEnabled(selected)
         self.clear_button.setEnabled(self._selected_id is not None)

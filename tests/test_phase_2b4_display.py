@@ -81,3 +81,29 @@ def test_auto_contrast_excludes_artificial_polygon_fill_but_keeps_genuine_zeros(
     assert "valid polygon ROI" in panel.scope.text()
     assert expected[0] == 0.0
     panel.dispose()
+
+
+def test_labels_display_uses_public_opacity_visibility_and_disconnects():
+    app = QApplication.instance() or QApplication([])
+    viewer = ViewerModel()
+    panel = ImageDisplayPanel(viewer, ProjectState())
+    image = viewer.add_image(np.arange(12).reshape(3, 4))
+    data = np.array([[0, 1, 90000]], dtype=np.uint32)
+    labels = viewer.add_labels(data)
+    assert panel.layer is labels
+    assert not panel.minimum.isEnabled() and not panel.gamma.isEnabled()
+    assert not panel.auto_contrast() and not panel.reset_contrast()
+    panel.opacity_slider.setValue(370)
+    panel.visibility.click()
+    assert labels.opacity == .37 and not labels.visible
+    assert labels.data is data
+    np.testing.assert_array_equal(labels.data, [[0, 1, 90000]])
+    labels.visible = True
+    labels.opacity = .64
+    assert panel.visibility.isChecked() and panel.opacity.value() == .64
+    viewer.layers.selection.active = image
+    labels.opacity = .13
+    assert panel.gamma.isEnabled() and panel.minimum.isEnabled()
+    assert panel.opacity.value() == image.opacity
+    viewer.layers.remove(labels)
+    panel.dispose()

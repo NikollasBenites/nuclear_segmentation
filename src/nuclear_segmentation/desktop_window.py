@@ -41,6 +41,7 @@ from .normalization_workspace import NormalizationController
 from .selected_mask_panel import SelectedMaskPanel
 from .project_state import ProjectState
 from .series_browser import ImageSeriesBrowser
+from .session_display import SessionMaskDisplay
 from .segmentation_execution import SegmentationController
 from .filtering_workspace import FilteringController
 from .viewer_toolbar import ViewerToolbar
@@ -235,9 +236,17 @@ class DesktopWindow(QMainWindow):
         self.mask_selection.status_changed.connect(self.statusBar().showMessage)
         self.mask_selection.selection_changed.connect(self._mask_selection_changed)
         review_panel = self.context_panel.mask_review_page
-        review_panel.show_all_requested.connect(self._show_all_review_masks)
-        review_panel.show_selected_requested.connect(self._show_selected_review_mask)
-        review_panel.clear_selection_requested.connect(self._clear_review_selection)
+        self.mask_display = SessionMaskDisplay(self.embedding.viewer, self.project_state, self.mask_selection, self)
+        self.mask_display.status.connect(review_panel.set_visualization_status)
+        self.mask_display.changed.connect(self._mark_project_dirty)
+        self.mask_selection.selection_changed.connect(self.mask_display.selection_changed)
+        self.mask_selection.selection_cleared.connect(self.mask_display.selection_cleared)
+        self.filtering.display_updated.connect(self._sync_mask_display)
+        self.project_state.segmentation_result_changed.connect(self._sync_mask_display)
+        review_panel.show_raw_requested.connect(lambda: self.mask_display.show("raw"))
+        review_panel.show_all_requested.connect(lambda: self.mask_display.show("filtered"))
+        review_panel.show_selected_requested.connect(lambda: self.mask_display.show("selected"))
+        review_panel.clear_selection_requested.connect(self.mask_selection.clear_selection)
         self.layer_panel.active_layer_changed.connect(self._update_active_layer_status)
         self.context_panel.project_page.open_requested.connect(self.open_image_dialog)
         self.context_panel.project_page.load_pending_requested.connect(
@@ -878,6 +887,7 @@ class DesktopWindow(QMainWindow):
     def _capture_session_controls(self):
         session = self.project_state.active_session
         review = self.context_panel.mask_review_page
+        session.display_state["channels"] = {c.index: c.visible for c in self.project_state.channels}
         session.segmentation_settings = self.context_panel.segmentation_page.pending_config()
         session.normalization_settings = self.context_panel.preprocessing_page.normalization_settings()
         if session.filtering_result is not None:
@@ -898,6 +908,10 @@ class DesktopWindow(QMainWindow):
         was_restoring = state.restoring_project
         state.restoring_project = True
         try:
+            with QSignalBlocker(self.context_panel.preprocessing_page):
+                for index, visible in session.display_state.get("channels", {}).items():
+                    if self._channel_for_index(index).visible != visible:
+                        self._update_channel_configuration(index, "visible", visible)
             if not was_restoring:
                 self.normalization.display_session()
             self.mask_selection.clear_all()
@@ -934,6 +948,7 @@ class DesktopWindow(QMainWindow):
                     review.roi_status.setText("ROI geometry was incompatible. Recalculate measurements to review a new ROI.")
             elif state.scientific_roi is not None and state.segmentation_is_current:
                 self.filtering._create_roi_layer(state.scientific_roi, state.scientific_roi_reviewed)
+            self.mask_display.sync(restore_selection=True)
             review._filter_timer.stop()
             state.scientific_roi_changed.emit(state.scientific_roi, state.scientific_roi_reviewed)
             state.quantification_result_changed.emit(state.quantification_result, state.quantification_is_current)
@@ -1370,38 +1385,9 @@ class DesktopWindow(QMainWindow):
             layer = mask_id = None
         self.context_panel.mask_review_page.set_selection(layer, mask_id)
 
-    def _show_all_review_masks(self) -> None:
-        layer = self.segmentation.result_layer
-        if layer is None:
-            self.context_panel.mask_review_page.set_visualization_status(
-                "No segmentation mask layer is available."
-            )
-            return
-        layer.show_selected_label = False
-        layer.visible = True
-        self.context_panel.mask_review_page.set_visualization_status(
-            "Showing all raw segmentation masks."
-        )
-
-    def _show_selected_review_mask(self) -> None:
-        layer = self.mask_selection.selected_layer
-        mask_id = self.mask_selection.selected_mask_id
-        valid_layers = (self.segmentation.result_layer, self.filtering.filtered_layer)
-        if layer is None or mask_id is None or layer not in valid_layers or not self.project_state.owns_mask_layer(layer):
-            self.context_panel.mask_review_page.set_visualization_status(
-                "Select a raw or live filtered mask with Review / Select first."
-            )
-            return
-        layer.selected_label = int(mask_id)
-        layer.show_selected_label = True
-        layer.visible = True
-        self.context_panel.mask_review_page.set_visualization_status(
-            f"Showing only Mask ID {int(mask_id)}."
-        )
-
-    def _clear_review_selection(self) -> None:
-        self.mask_selection.clear_selection()
-        self._show_all_review_masks()
+    def _sync_mask_display(self, *args):
+        if not self.project_state.restoring_project:
+            self.mask_display.sync(restore_selection=True)
 
     def set_workflow(self, key: str) -> None:
         self.navigation.set_workflow(key)
@@ -1644,6 +1630,7 @@ class DesktopWindow(QMainWindow):
             self._finish_loading_dialog()
             self.save_layout()
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
+            self.mask_display.dispose()
             self.mask_selection.dispose()
             self.normalization.dispose()
             self.z_correction.dispose()

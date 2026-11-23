@@ -1,9 +1,10 @@
-"""Application-owned, non-destructive controls for napari Image display properties."""
+"""Application-owned, non-destructive controls for napari Image and Labels display properties."""
 from __future__ import annotations
 
 import numpy as np
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QLabel,
@@ -18,7 +19,7 @@ from .collapsible_section import CollapsibleSection
 
 
 class ImageDisplayPanel(QWidget):
-    """Edit only public Image-layer display properties for the active layer."""
+    """Edit public display properties of the active Image or Labels layer."""
 
     _SLIDER_STEPS = 1000
 
@@ -35,7 +36,7 @@ class ImageDisplayPanel(QWidget):
         form = QFormLayout()
         form.setContentsMargins(10, 8, 10, 10)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.layer_name = QLabel("Select an Image layer")
+        self.layer_name = QLabel("Select an Image or Labels layer")
         self.layer_name.setWordWrap(True)
         form.addRow("Selected layer", self.layer_name)
 
@@ -53,6 +54,8 @@ class ImageDisplayPanel(QWidget):
         self.gamma.setDecimals(3)
         self.gamma.setSingleStep(0.05)
         form.addRow("Gamma", self.gamma)
+        self.visibility = QCheckBox("Visible")
+        form.addRow(self.visibility)
         self.opacity = QDoubleSpinBox()
         self.opacity.setRange(0.0, 1.0)
         self.opacity.setDecimals(3)
@@ -87,6 +90,7 @@ class ImageDisplayPanel(QWidget):
         self.minimum_slider.valueChanged.connect(self._contrast_from_sliders)
         self.maximum_slider.valueChanged.connect(self._contrast_from_sliders)
         self.gamma.valueChanged.connect(self._gamma_changed)
+        self.visibility.toggled.connect(self._visibility_changed)
         self.opacity.valueChanged.connect(self._opacity_changed)
         self.opacity_slider.valueChanged.connect(self._opacity_slider_changed)
         self.auto_button.clicked.connect(self.auto_contrast)
@@ -123,9 +127,10 @@ class ImageDisplayPanel(QWidget):
         if active is self.layer and active in self.viewer.layers:
             return
         self._disconnect_layer()
-        self.layer = active if self._is_image(active) and active in self.viewer.layers else None
+        self.layer = active if active in self.viewer.layers and type(active).__name__.lower() in {"image", "labels"} else None
         if self.layer is not None:
-            for name in ("contrast_limits", "gamma", "opacity", "name"):
+            events = ("contrast_limits", "gamma") if self._is_image(active) else ()
+            for name in (*events, "opacity", "visible", "name"):
                 emitter = getattr(self.layer.events, name, None)
                 if emitter is not None:
                     callback = lambda event=None: self.sync_from_layer()
@@ -151,18 +156,25 @@ class ImageDisplayPanel(QWidget):
         enabled = self.layer is not None
         self.section.content.setEnabled(enabled)
         if not enabled:
-            self.layer_name.setText("Select an Image layer")
+            self.layer_name.setText("Select an Image or Labels layer")
             self.scope.setText("Display settings do not modify image pixels.")
             self._syncing = False
             return
         self.layer_name.setText(self.layer.name)
-        low, high = (float(value) for value in self.layer.contrast_limits)
-        range_low, range_high = self._display_range()
-        for field, value in ((self.minimum, low), (self.maximum, high)):
-            field.setValue(value)
-        self.minimum_slider.setValue(self._to_slider(low, range_low, range_high))
-        self.maximum_slider.setValue(self._to_slider(high, range_low, range_high))
-        self.gamma.setValue(float(self.layer.gamma))
+        image = self._is_image(self.layer)
+        for widget in (self.minimum, self.maximum, self.minimum_slider, self.maximum_slider,
+                       self.gamma, self.auto_button, self.reset_button):
+            widget.setEnabled(image)
+        self.scope.setText("Display settings do not modify image pixels." if image else "Mask display settings")
+        self.visibility.setChecked(self.layer.visible)
+        if image:
+            low, high = (float(value) for value in self.layer.contrast_limits)
+            range_low, range_high = self._display_range()
+            for field, value in ((self.minimum, low), (self.maximum, high)):
+                field.setValue(value)
+            self.minimum_slider.setValue(self._to_slider(low, range_low, range_high))
+            self.maximum_slider.setValue(self._to_slider(high, range_low, range_high))
+            self.gamma.setValue(float(self.layer.gamma))
         self.opacity.setValue(float(self.layer.opacity))
         self.opacity_slider.setValue(round(float(self.layer.opacity) * self._SLIDER_STEPS))
         self._syncing = False
@@ -174,7 +186,7 @@ class ImageDisplayPanel(QWidget):
         return low + (high - low) * value / self._SLIDER_STEPS
 
     def _set_contrast(self, low: float, high: float) -> None:
-        if self._syncing or self.layer is None or not np.isfinite([low, high]).all():
+        if self._syncing or not self._is_image(self.layer) or not np.isfinite([low, high]).all():
             return
         if high <= low:
             self.scope.setText("Minimum contrast must be lower than maximum contrast.")
@@ -186,7 +198,7 @@ class ImageDisplayPanel(QWidget):
         self._set_contrast(self.minimum.value(), self.maximum.value())
 
     def _contrast_from_sliders(self, *args) -> None:
-        if self._syncing or self.layer is None:
+        if self._syncing or not self._is_image(self.layer):
             return
         low, high = self._display_range()
         self._set_contrast(
@@ -195,8 +207,12 @@ class ImageDisplayPanel(QWidget):
         )
 
     def _gamma_changed(self, value: float) -> None:
-        if not self._syncing and self.layer is not None:
+        if not self._syncing and self._is_image(self.layer):
             self.layer.gamma = float(value)
+
+    def _visibility_changed(self, visible):
+        if not self._syncing and self.layer is not None:
+            self.layer.visible = visible
 
     def _opacity_changed(self, value: float) -> None:
         if self._syncing or self.layer is None:
@@ -233,7 +249,7 @@ class ImageDisplayPanel(QWidget):
         return values, "valid polygon ROI" if can_use_mask else "finite active-layer pixels"
 
     def auto_contrast(self) -> bool:
-        if self.layer is None:
+        if not self._is_image(self.layer):
             return False
         values, scope = self._valid_values()
         if values.size == 0:
@@ -253,7 +269,7 @@ class ImageDisplayPanel(QWidget):
         return True
 
     def reset_contrast(self) -> bool:
-        if self.layer is None:
+        if not self._is_image(self.layer):
             return False
         self.layer.reset_contrast_limits()
         self.scope.setText("Contrast reset from the active layer data; pixels are unchanged.")

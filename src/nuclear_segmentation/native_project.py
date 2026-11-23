@@ -313,6 +313,30 @@ def _validate_normalization_controls(normalization, indexes):
         raise ValueError("The checkpoint contains invalid normalization controls.")
 
 
+def _validate_display_state(display, indexes):
+    if not isinstance(display, dict) or display.get("mode", "raw") not in ("raw", "filtered", "selected", "custom"):
+        raise ValueError("Invalid session display mode.")
+    channels = display.get("channels", {})
+    if not isinstance(channels, dict) or any(
+        type(index) is not int or index not in indexes or type(visible) is not bool
+        for index, visible in channels.items()
+    ):
+        raise ValueError("Invalid session channel visibility.")
+    for role in ("raw", "filtered", "roi"):
+        settings = display.get(role, {})
+        if not isinstance(settings, dict) or type(settings.get("visible", True)) is not bool:
+            raise ValueError("Invalid session layer visibility.")
+        opacity = settings.get("opacity", 1)
+        if type(opacity) not in (int, float) or not 0 <= opacity <= 1:
+            raise ValueError("Invalid session layer opacity.")
+    if display.get("mode") == "selected" and (
+        display.get("selected_layer") not in ("raw", "filtered")
+        or type(display.get("selected_id")) is not int or display["selected_id"] <= 0
+        or type(display.get("geometry_revision")) is not int
+    ):
+        raise ValueError("Invalid selected mask display settings.")
+
+
 def _validate_segmentation_controls(segmentation):
     if (
         not isinstance(segmentation["MODEL_NAME"], str)
@@ -392,6 +416,7 @@ def _validated_state(dataset, payload, version):
                 or any(char not in "0123456789abcdef" for char in session_id)
             ):
                 raise ValueError("The checkpoint contains an invalid session ID.")
+            record = {"display_state": {}, **record}
             if set(record) == set(SESSION_FIELDS).difference(normalization_fields, {"normalization_settings"}):
                 record = dict(record, normalization_settings=None, **previous_normalization)
             if set(record) != set(SESSION_FIELDS):
@@ -414,6 +439,7 @@ def _validated_state(dataset, payload, version):
                 ))
             ):
                 raise ValueError("The checkpoint contains incompatible session metadata.")
+            _validate_display_state(session.display_state, indexes)
             sessions[session_id] = session
         active_id = payload["active_session_id"]
         if active_id not in sessions or "nuclear" not in sessions:
@@ -432,6 +458,8 @@ def _validated_state(dataset, payload, version):
             session.segmentation_is_current = False
         _validate_normalization(state, payload, check_preview=session_id == active_id)
         _validate_results(state)
+    for session in sessions.values():
+        session.display_state.setdefault("channels", {c.index: c.visible for c in channels})
     state.select_session(active_id)
     return restored_state(state)
 

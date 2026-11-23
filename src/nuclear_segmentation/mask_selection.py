@@ -12,6 +12,7 @@ class MaskSelectionController(QObject):
     """Own object selection separately from active-layer and editing state."""
 
     selection_changed = Signal(object, object)
+    selection_cleared = Signal(object)
     status_changed = Signal(str)
 
     def __init__(self, viewer, parent: QObject | None = None):
@@ -24,6 +25,7 @@ class MaskSelectionController(QObject):
         self._updating_overlay = False
         self._disposed = False
         viewer.layers.selection.events.active.connect(self._on_active_layer_changed)
+        viewer.layers.events.removed.connect(self._layer_removed)
         viewer.dims.events.ndisplay.connect(self._on_ndisplay_changed)
 
     @staticmethod
@@ -53,7 +55,7 @@ class MaskSelectionController(QObject):
         self._deactivate_review_layer()
         self._tool = tool
         if tool == "review":
-            self._activate_review_layer(self.selected_layer)
+            self._activate_review_layer(self.viewer.layers.selection.active)
         self._emit_selection()
 
     def _on_active_layer_changed(self, event=None) -> None:
@@ -61,7 +63,7 @@ class MaskSelectionController(QObject):
             return
         self._deactivate_review_layer()
         if self._tool == "review":
-            self._activate_review_layer(self.selected_layer)
+            self._activate_review_layer(self.viewer.layers.selection.active)
         self._emit_selection()
 
     def _activate_review_layer(self, layer) -> None:
@@ -269,14 +271,37 @@ class MaskSelectionController(QObject):
         finally:
             self._updating_overlay = False
 
+    def _layer_removed(self, event):
+        self._selected_by_layer.pop(event.value, None)
+        if event.value is self._highlight_layer:
+            self._highlight_layer = None
+        if event.value is self._review_layer:
+            self._deactivate_review_layer()
+
+    def label_for_layer(self, layer):
+        return self._selected_by_layer.get(layer)
+
+    def restore_selection(self, layer, label):
+        """Reconnect a saved selection to its newly created Labels layer."""
+        self._selected_by_layer[layer] = label
+        if not layer.visible:
+            return
+        if self.viewer.layers.selection.active is not layer:
+            self.viewer.layers.selection.active = layer
+        elif self._tool == "review" and layer.visible:
+            self._update_highlight(layer, label)
+        self._emit_selection()
+
     def clear_selection(self, layer=None) -> None:
         layer = layer or self.selected_layer
         if layer is None:
             return
-        self._selected_by_layer.pop(layer, None)
+        previous = self._selected_by_layer.pop(layer, None)
         if layer is self._review_layer:
             self._remove_highlight()
         self._emit_selection()
+        if previous is not None:
+            self.selection_cleared.emit(layer)
         self.status_changed.emit("Mask selection cleared")
 
     def clear_all(self) -> None:
@@ -297,5 +322,6 @@ class MaskSelectionController(QObject):
         self.viewer.layers.selection.events.active.disconnect(
             self._on_active_layer_changed
         )
+        self.viewer.layers.events.removed.disconnect(self._layer_removed)
         self.viewer.dims.events.ndisplay.disconnect(self._on_ndisplay_changed)
         self._selected_by_layer.clear()

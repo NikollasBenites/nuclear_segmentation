@@ -37,6 +37,7 @@ def review_window(qapp, tmp_path):
         restore_workspace=False,
     )
     image = np.ones((1, 4, 8, 9), dtype=np.uint16)
+    image[:, :, 5:7, 6:8] = 10
     channels = (ChannelDescriptor(0, "DAPI", "DAPI", "segmentation"),)
     dataset = ImportedDataset(
         source_path=tmp_path / "review.ome.tif",
@@ -354,6 +355,9 @@ def test_existing_selection_updates_review_and_visualization(review_window):
     assert window.mask_selection.select_at_data_position(layer, second) == 2
     assert panel.mask_id.text() == "Selected Mask ID: 2"
     panel.show_all_button.click()
+    assert "Calculate current filtering" in panel.visualization_status.text()
+    assert layer.show_selected_label
+    panel.show_raw_button.click()
     assert not layer.show_selected_label
     assert callback in layer.mouse_drag_callbacks
 
@@ -411,3 +415,71 @@ def test_project_close_clears_review_state(review_window):
     assert panel.mask_count.text() == "Detected masks: —"
     assert panel.mask_id.text() == "Selected Mask ID: —"
     assert window.segmentation.result_layer is None
+
+
+def test_raw_filtered_and_selected_modes_preserve_label_geometry(review_window, qapp):
+    window, masks = review_window
+    state = window.project_state
+    panel = window.context_panel.mask_review_page
+    raw = window.segmentation.result_layer
+    assert window.filtering.calculate()
+    _wait(qapp, lambda: not window.filtering.busy)
+    panel.minimum_volume.editor.setValue(0)
+    panel.minimum_sphericity.editor.setValue(0)
+    panel.z_guard_mode.setCurrentText("none")
+    panel.first_tissue_z.setValue(0)
+    panel.last_tissue_z.setValue(masks.shape[0] - 1)
+    panel.intensity_master.setChecked(True)
+    _, enabled, lower, _, _ = panel.intensity_controls[0]
+    enabled.setChecked(True)
+    lower.editor.setValue(lower.value() + 1)
+    _wait(qapp, lambda: not panel._filter_timer.isActive())
+    filtered = window.filtering.filtered_layer
+    record = state.filtering_result
+    assert record["retained_ids"] == (2,)
+    expected = masks.copy()
+    panel.show_all_button.click()
+    assert filtered.visible and not raw.visible
+    np.testing.assert_array_equal(np.unique(filtered.data), [0, 2])
+    panel.show_raw_button.click()
+    assert raw.visible and not filtered.visible
+    np.testing.assert_array_equal(np.unique(raw.data), [0, 1, 2])
+    window.viewer_toolbar.activate_tool("review")
+    window.mask_selection.select_mask(raw, 1)
+    panel.show_selected_button.click()
+    assert raw.show_selected_label and raw.selected_label == 1 and not filtered.visible
+    assert state.filtering_result is record
+    assert filtered.data is record["filtered_masks"]
+    np.testing.assert_array_equal(raw.data, expected)
+    panel.show_all_button.click()
+    window.mask_selection.select_mask(filtered, 2)
+    panel.show_selected_button.click()
+    assert filtered.show_selected_label and not raw.visible
+    lower.editor.setValue(lower.editor.minimum())
+    _, _, _, upper, _ = panel.intensity_controls[0]
+    upper.editor.setValue(upper.editor.minimum())
+    _wait(qapp, lambda: not panel._filter_timer.isActive())
+    assert 2 not in state.filtering_result["retained_ids"]
+    assert not filtered.show_selected_label and window.mask_selection.selected_mask_id is None
+    assert filtered.visible and not raw.visible
+    assert "all retained masks" in panel.visualization_status.text()
+
+
+
+def test_selected_view_expires_when_same_id_has_new_geometry(review_window):
+    window, masks = review_window
+    panel = window.context_panel.mask_review_page
+    state = window.project_state
+    panel.show_raw_button.click()
+    window.viewer_toolbar.activate_tool("review")
+    window.mask_selection.select_mask(window.segmentation.result_layer, 1)
+    panel.show_selected_button.click()
+    prior = state.mask_identity(1)
+    replacement = np.flip(masks, axis=-1).copy()
+    state.set_segmentation_result(dict(state.segmentation_result, masks=replacement))
+    assert prior != state.mask_identity(1)
+    assert window.segmentation.result_layer.visible
+    assert not window.segmentation.result_layer.show_selected_label
+    assert window.mask_selection.selected_mask_id is None
+    assert window.mask_selection._highlight_layer is None
+    assert "all raw" in panel.visualization_status.text()

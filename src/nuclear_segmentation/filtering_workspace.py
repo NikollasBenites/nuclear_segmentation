@@ -152,6 +152,7 @@ class FilteringWorker(QObject):
 
 
 class FilteringController(QObject):
+    display_updated = Signal()
     status_changed = Signal(str)
     _roi_events = ("data", "paint", "scale", "translate", "rotate", "shear", "affine")
     def __init__(self, viewer, state, panel, config_provider, parent=None,
@@ -255,6 +256,7 @@ class FilteringController(QObject):
         self.filtered_layer.editable = False
         if result["scientific_roi"] is not None:
             self._create_roi_layer(result["scientific_roi"], result.get("roi_reviewed"), editable=True)
+        self.display_updated.emit()
 
     def _create_roi_layer(self, roi, reviewed, *, editable=False):
         spacing = self.state.voxel_spacing_zyx_um
@@ -282,6 +284,7 @@ class FilteringController(QObject):
             updated = self._result_with_settings(current, settings, roi)
             self.state.set_filtering_result(updated)
             if self.filtered_layer is not None: self.filtered_layer.data = updated["filtered_masks"]
+            self.display_updated.emit()
             self.panel.update_filter_summary(updated, True); self.panel.update_selected_properties(self.panel._selected_id)
         except ValueError as error: self.panel.show_filter_error(f"Invalid filter settings: {error}")
     def _result_with_settings(self, current, settings, roi):

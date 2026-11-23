@@ -593,15 +593,18 @@ def test_v1_migration_keeps_original_and_scientific_results(project, tmp_path):
     assert state.quantification_is_current and state.quantification_result == original_density
 
 
-def test_original_v2_sessions_restore_shared_normalization(project, tmp_path, monkeypatch):
+@pytest.mark.parametrize("phase", ["2D.2", "2D.3"])
+def test_original_v2_sessions_restore_shared_normalization(project, tmp_path, monkeypatch, phase):
     window, app, _, _, warnings = project
     masks = _segment(window)
     folder = tmp_path / "Checkpoint"
     save(window, app, folder)
     snapshot = _read_snapshot(folder)
     for record in snapshot["sessions"].values():
-        del record["normalization_settings"], record["normalization_configuration"], record["normalization_is_current"]
-    older = tmp_path / "Phase 2D.2"
+        del record["display_state"]
+        if phase == "2D.2":
+            del record["normalization_settings"], record["normalization_configuration"], record["normalization_is_current"]
+    older = tmp_path / phase
     native_project.save_project(older, snapshot)
     _forbid_calculations(monkeypatch)
     open_saved(window, app, older)
@@ -843,3 +846,106 @@ def test_nuclear_session_worker_uses_its_source_channel(project, monkeypatch):
     assert window.segmentation.result_layer is layer
     assert layer.name == "Replicate · Raw Cellpose masks"
     assert "Session: Replicate" in summary.text()
+
+
+def test_session_display_survives_switches_filter_refresh_and_resume(project, tmp_path, monkeypatch):
+    window, app, _, _, warnings = project
+    state = window.project_state
+    viewer = window.embedding.viewer
+    panel = window.context_panel.mask_review_page
+    raw_masks = _segment(window)
+    _measure_and_review(window, app)
+    nuclear = state.active_session
+    density = deepcopy(state.quantification_result)
+    properties = state.filtering_result["properties"].copy()
+    retained = state.filtering_result["retained_ids"]
+    original_revision = state.session_revision()
+    channel_layers = [window._layer_for_channel(i) for i in (0, 1)]
+    channel_layers[1].visible = False
+    raw = window.segmentation.result_layer
+    raw.opacity = .22
+    window.filtering.filtered_layer.opacity = .43
+    window.filtering.roi_layer.visible = True
+    panel.show_raw_button.click()
+    assert raw.visible and not window.filtering.filtered_layer.visible
+    window.viewer_toolbar.activate_tool("review")
+    window.mask_selection.select_mask(raw, 90000)
+    panel.show_selected_button.click()
+    assert raw.show_selected_label and raw.selected_label == 90000
+
+    cyto = state.create_session("MAP2", scientific_role="cytoplasmic", channel_index=1)
+    state.select_session(cyto.session_id)
+    channel_layers[0].visible = False
+    channel_layers[1].visible = True
+    window.context_panel.segmentation_page.model_name.setText("test-model")
+    cyto_masks = _segment(window, x_start=4)
+    assert window.filtering.calculate()
+    _wait(app, lambda: not window.filtering.busy)
+    filtered = window.filtering.filtered_layer
+    filtered.opacity = .77
+    window.segmentation.result_layer.opacity = .19
+    panel.show_all_button.click()
+    assert filtered.visible and not window.segmentation.result_layer.visible
+    window.mask_selection.select_mask(filtered, 90000)
+    panel.show_selected_button.click()
+    assert filtered.show_selected_label and filtered.selected_label == 90000
+    # Recalculate measurements through the normal worker, replacing the layer.
+    assert window.filtering.calculate()
+    _wait(app, lambda: not window.filtering.busy)
+    assert filtered not in viewer.layers
+    assert window.filtering.filtered_layer.opacity == .77
+    assert window.filtering.filtered_layer.show_selected_label
+    assert window.mask_selection.selected_layer is window.filtering.filtered_layer
+    assert window.mask_selection.selected_mask_id == 90000
+    panel.show_all_button.click()
+
+    def check_nuclear():
+        r, f = window.segmentation.result_layer, window.filtering.filtered_layer
+        assert [window._layer_for_channel(i).visible for i in (0, 1)] == [True, False]
+        assert r.opacity == .22 and f.opacity == .43 and window.filtering.roi_layer.visible
+        assert r.visible and not f.visible and r.show_selected_label and r.selected_label == 90000
+        assert r.data is state.segmentation_result["masks"]
+        assert tuple(r.scale) == state.voxel_spacing_zyx_um
+        assert state.owns_mask_layer(r) and state.mask_identity(90000).session_id == nuclear.session_id
+        np.testing.assert_array_equal(r.data, raw_masks)
+        pd.testing.assert_frame_equal(state.filtering_result["properties"], properties)
+        assert state.filtering_result["retained_ids"] == retained
+        assert state.quantification_result == density and state.quantification_is_current
+        assert state.segmentation_is_current and state.filtering_is_current
+
+    def check_cyto():
+        r, f = window.segmentation.result_layer, window.filtering.filtered_layer
+        assert [window._layer_for_channel(i).visible for i in (0, 1)] == [False, True]
+        assert r.opacity == .19 and f.opacity == .77
+        assert not r.visible and f.visible and not f.show_selected_label
+        assert state.owns_mask_layer(f)
+        assert f.data is state.filtering_result["filtered_masks"]
+        np.testing.assert_array_equal(r.data, cyto_masks)
+
+    for _ in range(3):
+        state.select_session(nuclear.session_id)
+        check_nuclear()
+        assert state.session_revision() == original_revision
+        assert window._layer_for_channel(0) is channel_layers[0]
+        state.select_session(cyto.session_id)
+        check_cyto()
+        assert not any(layer.metadata.get("nucytoseg_selection_highlight") for layer in viewer.layers)
+
+    folder = tmp_path / "Session display"
+    state.select_session(nuclear.session_id)
+    save(window, app, folder)
+    assert window.close_project()
+    _forbid_calculations(monkeypatch)
+    open_saved(window, app, folder)
+    assert not warnings and state.active_session_id == nuclear.session_id
+    check_nuclear()
+    state.select_session(cyto.session_id)
+    check_cyto()
+    # Manual layer visibility is also a session preference.
+    window.segmentation.result_layer.visible = True
+    assert window.filtering.filtered_layer.visible
+    state.select_session(nuclear.session_id)
+    check_nuclear()
+    state.select_session(cyto.session_id)
+    assert window.segmentation.result_layer.visible and window.filtering.filtered_layer.visible
+    assert "raw and filtered" in panel.visualization_status.text()
