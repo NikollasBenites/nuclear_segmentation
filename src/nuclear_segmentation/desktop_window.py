@@ -34,6 +34,7 @@ from .import_loading import ImportLoadingDialog
 from .layer_panel import LayerPanel
 from .legacy_import import import_legacy_analysis
 from .lif_import import LifEnumerationWorker, LifImportWorker
+from .mask_context_menu import MaskContextMenu
 from .mask_selection import MaskSelectionController
 from .native_project import VERSION, ProjectWorker, open_project, save_project, snapshot_state
 from .napari_embedding import DISPLAY_NAME, EmbeddedNapariWidget
@@ -262,6 +263,7 @@ class DesktopWindow(QMainWindow):
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
         self.geometry_panel = GeometryPanel(self, review_panel)
+        self.mask_context_menu = MaskContextMenu(self)
         self.mask_selection.selection_changed.connect(self._mask_selection_changed)
         self.segmentation.conflict_operations += (self.geometry_panel,)
         self.filtering.conflict_operations += (self.geometry_panel,)
@@ -1636,6 +1638,7 @@ class DesktopWindow(QMainWindow):
             self._finish_loading_dialog()
             self.save_layout()
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
+            self.mask_context_menu.dispose()
             self.mask_display.dispose()
             self.mask_selection.dispose()
             self.normalization.dispose()

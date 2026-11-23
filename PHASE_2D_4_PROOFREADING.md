@@ -22,4 +22,11 @@ Use a duplicate of a validated nuclear project and a calibrated multichannel ima
 - [ ] Click a parent and choose Split Selected Object. Verify Selected Object ID stays on the parent and Brush Label ID changes to the proposed child. Paint part of the parent, inspect in 3D, return to 2D and commit. Repeat once with Discard.
 - [ ] Switch to a second session that uses the same numeric IDs. Check its raw, committed, filtered and selected-only displays. Save, quit and resume. Verify geometry, reviewed measurements and undo in each session. Start and discard another preview and verify each click produces a single selection and highlight.
 
+### Secondary-click menu on macOS
+
+- [ ] With a visible raw, filtered or committed Labels layer active, use Pan or Review / Select. Secondary-click a known object on an offset, anisotropic slice. Verify the layer and ID in the menu. Dismiss it and check that selection, brush and voxels are unchanged.
+- [ ] Try Select Mask, Show Selected Only and Show Mask Properties. Compare the ID and voxel count with the clicked layer. Use Start Editing and verify the same object is selected in the effective preview. A raw ID previously removed from committed geometry should be available for inspection only.
+- [ ] In a fresh preview, secondary-click different objects to add them to the merge list. Test Split and Remove separately, inspecting the preview before Commit or Discard. Verify Undo restores committed geometry. After a brush stroke, confirm whole-object operations are disabled until the transaction finishes.
+- [ ] Test background clicks, modified clicks, secondary-button drags, paint and erase. Verify native gestures continue without opening the menu. Rotate a 3D volume with two masks along one ray and check the nearest ID from both directions. Repeat after switching sessions and reopening the project.
+
 Record pass/fail and observations per step. Native macOS sign-off is pending.

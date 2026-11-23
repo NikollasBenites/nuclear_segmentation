@@ -5,7 +5,7 @@ import numpy as np
 from qtpy.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget,
+    QLabel, QPushButton, QScrollArea, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .collapsible_section import CollapsibleSection
@@ -270,6 +270,7 @@ class MaskReviewPanel(QWidget):
         )
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 8, 10, 10)
+        self.information_section = section
         self.mask_type = self._value("Mask type: —")
         self.measurements = self._value(
             "Scientific measurements are not available in this milestone."
@@ -353,6 +354,23 @@ class MaskReviewPanel(QWidget):
         self.mask_type.setText(f"Mask type: {role or 'unclassified'}")
         self.update_selected_properties(self._selected_id)
         self._refresh_actions()
+
+    def show_context_properties(self, layer, label):
+        state = self.project_state
+        voxels = sum(np.count_nonzero(plane == label) for plane in layer.data)
+        text = f"Mask {label} · {voxels:,} voxels in {layer.name}"
+        result = state.segmentation_result
+        raw_with_edits = layer.metadata.get("nucytoseg_raw_segmentation") and result.get("edited_masks") is not None
+        if (self._selected_identity is not None and state.filtering_is_current and not raw_with_edits
+                and label in state.filtering_result["properties"].index):
+            text += "\n" + self.measurements.text()
+        self.measurements.setText(text)
+        self.information_section.set_expanded(True)
+        scroll = self.information_section.parentWidget()
+        while scroll is not None and not isinstance(scroll, QScrollArea):
+            scroll = scroll.parentWidget()
+        if scroll is not None:
+            scroll.ensureWidgetVisible(self.measurements)
 
     def configure_filtering(self, result, current=True):
         role = self.project_state.active_session.scientific_role

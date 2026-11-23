@@ -112,6 +112,7 @@ class MaskSelectionController(QObject):
     def _on_mouse_press(self, layer, event) -> None:
         if (
             self._disposed
+            or getattr(event, "button", 1) != 1
             or self._tool != "review"
             or layer is not self._review_layer
             or not layer.visible

@@ -200,7 +200,8 @@ class GeometryPanel(QGroupBox):
         self.previous_tool = next((key for key, button in window.viewer_toolbar.buttons.items()
                                    if button.isChecked()), "pan_zoom")
         layer = self.viewer.add_labels(edit.preview, name=f"{self.state.active_session.display_name} · Uncommitted edits",
-                                       scale=spacing, translate=self.translate, metadata=self.state.mask_layer_metadata())
+                                       scale=spacing, translate=self.translate,
+                                       metadata={**self.state.mask_layer_metadata(), "nucytoseg_edit_preview": True})
         self.edit, self.layer = edit, layer
         self.invalidated = False
         self.protected_layers = []
