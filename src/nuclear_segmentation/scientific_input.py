@@ -27,6 +27,9 @@ class ScientificInputSnapshot:
     """Capture the job on the GUI thread, sharing only the existing pixel arrays."""
 
     owner: SessionRevision
+    scientific_role: str
+    channel_index: int
+    normalization_report: dict | None
     image_czyx: np.ndarray
     crop_mask_yx: np.ndarray | None
     _config: dict[str, Any]
@@ -39,7 +42,7 @@ class ScientificInputSnapshot:
         return deepcopy(self._provenance)
 
 
-def validate_scientific_input(project_state, config: dict[str, Any]) -> dict[str, Any]:
+def validate_scientific_input(project_state, config: dict[str, Any], *, completed_result=None) -> dict[str, Any]:
     """Validate desktop state without loading Cellpose or transforming pixels."""
     validated = validate_config(config)
     dataset = project_state.working_dataset
@@ -120,19 +123,41 @@ def validate_scientific_input(project_state, config: dict[str, Any]) -> dict[str
 
     normalization = project_state.normalization_configuration or {}
     mode = normalization.get("mode", "cellpose_default")
-    if mode not in {"cellpose_default", "disabled"} and not project_state.normalization_is_current:
+    # Pending preview edits can block a new run while the executed masks and
+    # their normalization record remain valid for measurement and resume.
+    recorded = (completed_result or {}).get("normalization_provenance")
+    uses_recorded = recorded is not None and recorded == normalization.get("provenance")
+    if mode not in {"cellpose_default", "disabled"} and not (project_state.normalization_is_current or uses_recorded):
         raise ValueError("Cellpose normalization configuration is outdated.")
+    report = normalization.get("provenance") or {}
+    if mode in {"percentile", "roi_fixed"}:
+        primary = project_state.segmentation_channel
+        correction = validated["Z_CORRECTIONS"].get(primary, {})
+        corrected = correction.get("segmentation", False)
+        route = "z_corrected" if corrected else "working_original"
+        if (report.get("channel_index") != project_state.active_channel_index
+                or report.get("channel_name") != primary
+                or report.get("input_source") != route
+                or (corrected and (report.get("z_correction_provenance") or {}).get("options") != correction)):
+            raise ValueError(f"Apply a normalization preview for {primary} using {route}.")
+    if mode == "legacy_recorded" and project_state.active_session_id != "nuclear":
+        raise ValueError("Select normalization for this session before running Cellpose.")
     expected_normalize = deepcopy(normalization.get("cellpose_normalize", True))
     if validated["CELLPOSE_NORMALIZE"] != expected_normalize:
         raise ValueError("Scientific Cellpose normalization configuration is outdated.")
     return validated
 
 
-def capture_scientific_input(project_state, config: dict[str, Any]) -> ScientificInputSnapshot:
-    validated = validate_scientific_input(project_state, config)
+def capture_scientific_input(project_state, config: dict[str, Any], *, completed_result=None) -> ScientificInputSnapshot:
+    validated = validate_scientific_input(project_state, config, completed_result=completed_result)
     crop_mask = project_state.roi_mask_yx
+    normalization = project_state.normalization_configuration or {}
+    report = normalization.get("provenance") if normalization.get("mode") in {"percentile", "roi_fixed"} else None
     return ScientificInputSnapshot(
         owner=project_state.session_revision(),
+        scientific_role=project_state.active_session.scientific_role,
+        channel_index=project_state.active_channel_index,
+        normalization_report=deepcopy(report),
         image_czyx=np.asarray(project_state.working_dataset.data_czyx),
         crop_mask_yx=None if crop_mask is None else np.asarray(crop_mask, dtype=bool),
         _config=validated,
@@ -154,11 +179,13 @@ def prepare_captured_scientific_input(snapshot: ScientificInputSnapshot) -> Scie
     channels = validated["CHANNELS"]
     volumes = {item["name"]: image[int(item["index"])] for item in channels}
     segmentation = volumes[validated["SEGMENTATION_CHANNEL"]]
-    roi = reconstruct_mntb_roi(image, validated["MNTB_ROI_MODE"])
-    if roi.shape != segmentation.shape or not roi.any():
-        raise ValueError(
-            "The provisional scientific ROI is empty or incompatible with the working grid."
-        )
+    roi = None
+    if snapshot.scientific_role == "nuclear":
+        roi = reconstruct_mntb_roi(image, validated["MNTB_ROI_MODE"])
+        if roi.shape != segmentation.shape or not roi.any():
+            raise ValueError(
+                "The provisional scientific ROI is empty or incompatible with the working grid."
+            )
 
     xy_spacing = float(np.mean(spacing[1:]))
     namespace = dict(validated)
@@ -173,7 +200,7 @@ def prepare_captured_scientific_input(snapshot: ScientificInputSnapshot) -> Scie
         XY_SPACING_UM=xy_spacing,
         ANISOTROPY=float(spacing[0] / xy_spacing),
         mntb_roi=roi,
-        roi_source="inferred_" + validated["MNTB_ROI_MODE"],
+        roi_source="inferred_" + validated["MNTB_ROI_MODE"] if roi is not None else None,
         crop_inclusion_mask_yx=snapshot.crop_mask_yx,
     )
     prepare_volumes(namespace)

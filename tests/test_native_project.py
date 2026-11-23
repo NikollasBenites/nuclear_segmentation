@@ -593,6 +593,24 @@ def test_v1_migration_keeps_original_and_scientific_results(project, tmp_path):
     assert state.quantification_is_current and state.quantification_result == original_density
 
 
+def test_original_v2_sessions_restore_shared_normalization(project, tmp_path, monkeypatch):
+    window, app, _, _, warnings = project
+    masks = _segment(window)
+    folder = tmp_path / "Checkpoint"
+    save(window, app, folder)
+    snapshot = _read_snapshot(folder)
+    for record in snapshot["sessions"].values():
+        del record["normalization_settings"], record["normalization_configuration"], record["normalization_is_current"]
+    older = tmp_path / "Phase 2D.2"
+    native_project.save_project(older, snapshot)
+    _forbid_calculations(monkeypatch)
+    open_saved(window, app, older)
+    state = window.project_state
+    assert not warnings and state.segmentation_is_current
+    assert state.normalization_configuration == snapshot["state"]["normalization_configuration"]
+    np.testing.assert_array_equal(state.segmentation_result["masks"], masks)
+
+
 def test_invalid_inactive_session_leaves_open_analysis_unchanged(project, tmp_path):
     window, app, _, _, warnings = project
     state = window.project_state
@@ -644,17 +662,132 @@ def test_project_actions_are_accessible_at_narrow_width_before_and_after_resume(
     assert_narrow_actions()
 
 
-def test_empty_cytoplasmic_session_has_no_nuclear_execution_or_density(project):
-    window, _, _, _, _ = project
+def test_independent_cytoplasmic_execution_measurements_and_resume(project, tmp_path, monkeypatch):
+    window, app, _, image, warnings = project
     state = window.project_state
-    session = state.create_session("Cytoplasm", scientific_role="cytoplasmic", channel_index=1)
-    state.select_session(session.session_id)
-    assert "Cytoplasmic · MAP2 · Empty" == window.context_panel.project_page.session_details.text()
-    segmentation = window.context_panel.segmentation_page
-    assert not segmentation.execute_button.isEnabled()
-    assert not window.segmentation.run()
-    assert not state.quantification_is_current
-    assert "nuclear sessions" in window.context_panel.quantification_page.status.text()
+    panel = window.context_panel.segmentation_page
+    review = window.context_panel.mask_review_page
+    inputs = []
+
+    def runner(scientific, progress):
+        inputs.append(scientific.namespace["model_input_volume"])
+        return _fake_result(scientific)
+
+    window.segmentation.runner = runner
+    prep = window.context_panel.preprocessing_page
+    prep.normalization_mode_combo.setCurrentIndex(prep.normalization_mode_combo.findData("percentile"))
+    assert window.normalization.calculate(prep.normalization_options())
+    _wait(app, lambda: not window.normalization.busy)
+    assert window.normalization.apply()
+    assert window.segmentation.run()
+    _wait(app, lambda: not window.segmentation.busy)
+    nuclear = state.nuclear_session
+    original = nuclear.segmentation_result
+    nuclear_id = state.mask_identity(1)
+    assert window.filtering.calculate()
+    _wait(app, lambda: not window.filtering.busy)
+    nuclear_properties = nuclear.filtering_result["properties"].copy()
+    prep.normalization_upper.setValue(97)
+    assert not nuclear.normalization_is_current and nuclear.segmentation_is_current
+
+    cyto = state.create_session("MAP2 objects", scientific_role="cytoplasmic", channel_index=1)
+    state.select_session(cyto.session_id)
+    assert not panel.model_name.text()
+    assert prep.normalization_channel_combo.currentData() == 1
+    prep.normalization_mode_combo.setCurrentIndex(prep.normalization_mode_combo.findData("disabled"))
+    assert window.normalization.calculate(prep.normalization_options())
+    _wait(app, lambda: not window.normalization.busy)
+    assert window.normalization.apply()
+    assert nuclear.segmentation_is_current and not nuclear.normalization_is_current
+    panel.model_name.setText("/models/MAP2")
+    panel.cellprob.setValue(-1.25)
+    panel.mode.setCurrentIndex(panel.mode.findData(False))
+    panel.stitch.setValue(0.35)
+    _wait(app, panel.execute_button.isEnabled)
+    assert window.segmentation.run()
+    _wait(app, lambda: not window.segmentation.busy)
+    completed = cyto.segmentation_result
+    assert cyto.segmentation_is_current and nuclear.segmentation_result is original
+    assert completed["cellpose_normalize"] is False
+    assert original["normalization_provenance"]["channel_index"] == 0
+    assert completed["scientific_config"]["MODEL_NAME"] == "/models/MAP2"
+    assert completed["scientific_config"]["CELLPROB_THRESHOLD"] == -1.25
+    assert completed["scientific_config"]["CELLPOSE_DO_3D"] is False
+    assert (completed["source_channel_index"], completed["segmentation_channel"]) == (1, "MAP2")
+    assert completed["session_id"] == cyto.session_id
+    assert completed["geometry_revision"] == cyto.geometry_revision
+    assert original["segmentation_channel"] == "DAPI"
+    for index, pixels in enumerate(inputs):
+        np.testing.assert_array_equal(pixels, image[index])
+    assert state.mask_identity(1) != nuclear_id
+    assert window.segmentation.result_layer.data is completed["masks"]
+    assert window.segmentation.result_layer.metadata["mask_type"] == "cytoplasmic"
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Cytoplasmic filtering invoked nuclear counting or rings")
+
+    with monkeypatch.context() as patch:
+        for target in ("filtering_workspace.calculate_perinuclear_marker_metrics",
+                       "filtering_workspace.apply_filter_settings", "native_project.density_z_planes"):
+            patch.setattr("nuclear_segmentation." + target, forbidden)
+        assert window.filtering.calculate()
+        _wait(app, lambda: not window.filtering.busy)
+        measured = cyto.filtering_result
+        assert measured["retained_ids"] == (1,)
+        assert not measured["perinuclear_definitions"] and window.filtering.roi_layer is None
+        assert "excluded_by_z_guard" not in measured["properties"]
+        assert "counting_z_px" not in measured["properties"]
+        assert "z_counting_rule" not in measured["settings"]
+        from nuclear_segmentation.core import calculate_mask_properties
+        config = completed["scientific_config"]
+        reference, _ = calculate_mask_properties(
+            completed["masks"], {c.name: image[c.index] for c in state.channels},
+            config["CHANNELS"], state.voxel_spacing_zyx_um, config["GLOBAL_BACKGROUND_PERCENTILE"],
+        )
+        pd.testing.assert_frame_equal(measured["properties"][reference.columns], reference)
+        pd.testing.assert_frame_equal(nuclear_properties[reference.columns], reference)
+        # Use a shape-independent intensity cutoff to exclude this synthetic object.
+        review.intensity_master.setChecked(True)
+        _, enabled, low, high, _ = review.intensity_controls[1]
+        enabled.setChecked(True)
+        low.setValue(high.value())
+        window.filtering.apply_filters()
+        _wait(app, lambda: not review._filter_timer.isActive())
+        assert not state.filtering_result["retained_ids"]
+        assert not state.quantification_is_current
+        assert "nuclear sessions" in window.context_panel.quantification_page.status.text()
+        assert not window.context_panel.export_page.scientific_button.isEnabled()
+
+    panel.cellprob.setValue(-2.5)
+    def failing(scientific, progress):
+        raise RuntimeError("failed MAP2 rerun")
+    window.segmentation.runner = failing
+    assert window.segmentation.run()
+    _wait(app, lambda: not window.segmentation.busy)
+    assert "failed MAP2 rerun" in panel.execution_log.toPlainText()
+    assert cyto.segmentation_result is completed and cyto.segmentation_is_current
+    assert nuclear.segmentation_result is original and nuclear.segmentation_is_current
+    cytoplasmic_properties = cyto.filtering_result["properties"].copy()
+    folder = tmp_path / "Both sessions"
+    save(window, app, folder)
+    assert window.close_project()
+    _forbid_calculations(monkeypatch)
+    open_saved(window, app, folder)
+    assert not warnings
+    assert state.active_session_id == cyto.session_id
+    assert state.segmentation_is_current and state.filtering_is_current
+    assert panel.cellprob.value() == -2.5
+    assert state.segmentation_result["scientific_config"] == completed["scientific_config"]
+    np.testing.assert_array_equal(state.segmentation_result["masks"], completed["masks"])
+    pd.testing.assert_frame_equal(state.filtering_result["properties"], cytoplasmic_properties)
+    assert state.normalization_configuration["mode"] == "disabled"
+    state.select_session("nuclear")
+    assert state.segmentation_is_current and state.filtering_is_current
+    assert window.segmentation.result_layer.data is state.segmentation_result["masks"]
+    assert not state.normalization_is_current and state.normalization_configuration["mode"] == "percentile"
+    assert prep.normalization_upper.value() == 97
+    pd.testing.assert_frame_equal(state.filtering_result["properties"], nuclear_properties)
+    np.testing.assert_array_equal(state.segmentation_result["masks"], original["masks"])
 
 
 def test_nuclear_session_worker_uses_its_source_channel(project, monkeypatch):

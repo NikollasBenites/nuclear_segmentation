@@ -879,6 +879,7 @@ class DesktopWindow(QMainWindow):
         session = self.project_state.active_session
         review = self.context_panel.mask_review_page
         session.segmentation_settings = self.context_panel.segmentation_page.pending_config()
+        session.normalization_settings = self.context_panel.preprocessing_page.normalization_settings()
         if session.filtering_result is not None:
             session.filter_controls = review.filter_settings()
             session.intensity_controls = review.intensity_control_settings()
@@ -897,15 +898,18 @@ class DesktopWindow(QMainWindow):
         was_restoring = state.restoring_project
         state.restoring_project = True
         try:
+            if not was_restoring:
+                self.normalization.display_session()
             self.mask_selection.clear_all()
             self.segmentation.clear_project()
             self.filtering.clear_project()
             self.context_panel.export_page.clear_scientific_history()
             segmentation_panel = self.context_panel.segmentation_page
             with QSignalBlocker(segmentation_panel):
-                segmentation_panel.restore_settings(
-                    session.segmentation_settings or self._default_session_settings
-                )
+                settings = session.segmentation_settings or self._default_session_settings
+                if session.scientific_role == "cytoplasmic" and session.segmentation_settings is None:
+                    settings = dict(settings, MODEL_NAME="")
+                segmentation_panel.restore_settings(settings)
             segmentation_panel.execution_log.clear()
             state.perinuclear_markers_changed.emit(tuple(state.perinuclear_markers))
             state.segmentation_result_changed.emit(state.segmentation_result, state.segmentation_is_current)

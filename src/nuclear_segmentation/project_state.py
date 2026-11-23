@@ -71,6 +71,9 @@ class SegmentationSession:
     scientific_role: str = "nuclear"
     configured_channel_index: int | None = None
     segmentation_settings: dict[str, Any] | None = None
+    normalization_settings: dict[str, Any] | None = None
+    normalization_configuration: dict[str, Any] | None = None
+    normalization_is_current: bool = False
     filter_controls: dict[str, Any] | None = None
     intensity_controls: dict | None = None
     roi_grid_compatible: bool = True
@@ -147,6 +150,8 @@ class ProjectState(QObject):
     scientific_roi_changed = Signal(object, bool)
     quantification_result_changed = Signal(object, bool)
 
+    normalization_configuration = _session_property("normalization_configuration")
+    normalization_is_current = _session_property("normalization_is_current")
     legacy_import = _session_property("legacy_import")
     segmentation_is_current = _session_property("segmentation_is_current")
     filtering_result = _session_property("filtering_result")
@@ -174,9 +179,7 @@ class ProjectState(QObject):
         self.calibration_source = None
         self.channels: list[ChannelDescriptor] = []
         self.segmentation_channel_index: int | None = None
-        self.normalization_configuration: dict[str, Any] | None = None
         self.normalization_preview: dict[str, Any] | None = None
-        self.normalization_is_current = False
         self.normalization_roi_mask_yx: np.ndarray | None = None
         self.normalization_roi_vertices_yx: tuple[tuple[float, float], ...] = ()
         self.normalization_roi_provenance: dict[str, Any] | None = None
@@ -440,10 +443,13 @@ class ProjectState(QObject):
     def apply_normalization(self, configuration: dict[str, Any]) -> None:
         self.normalization_configuration = dict(configuration)
         self.normalization_is_current = True
-        self.invalidate_segmentation()
+        self.invalidate_segmentation(active_only=True)
         self.normalization_changed.emit(self.normalization_configuration, True)
 
-    def invalidate_normalization(self) -> None:
+    def invalidate_normalization(self, *, active_only=False) -> None:
+        if not active_only:
+            for session in self.sessions.values():
+                session.normalization_is_current = False
         if self.normalization_preview is None and self.normalization_configuration is None:
             return
         self.normalization_preview = None
@@ -457,7 +463,7 @@ class ProjectState(QObject):
         }
         self.normalization_preview = None
         self.normalization_is_current = False
-        self.invalidate_segmentation()
+        self.invalidate_segmentation(active_only=True)
         if emit:
             self.normalization_changed.emit(self.normalization_configuration, False)
 
@@ -657,10 +663,11 @@ class ProjectState(QObject):
         self.segmentation_is_current = True
         self.segmentation_result_changed.emit(stored, True)
 
-    def invalidate_segmentation(self) -> None:
-        """Shared preprocessing or grid changes affect every session."""
+    def invalidate_segmentation(self, *, active_only=False) -> None:
+        """Shared input changes affect all sessions. Normalization belongs to its session."""
         active_was_current = self.segmentation_is_current
-        for session in self._sessions.values():
+        sessions = (self.active_session,) if active_only else self._sessions.values()
+        for session in sessions:
             session.input_revision += 1
             if not session.segmentation_is_current:
                 continue

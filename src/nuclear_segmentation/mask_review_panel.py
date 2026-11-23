@@ -229,6 +229,7 @@ class MaskReviewPanel(QWidget):
         self.add_marker_button.clicked.connect(self.add_marker)
         self.marker_configuration_layout.addWidget(self.marker_configuration_note)
         self.marker_configuration_layout.addWidget(self.add_marker_button)
+        self.marker_section = section
         section.set_content_layout(self.marker_configuration_layout)
         filtering.addWidget(section)
 
@@ -350,6 +351,11 @@ class MaskReviewPanel(QWidget):
         self._refresh_actions()
 
     def configure_filtering(self, result, current=True):
+        role = self.project_state.active_session.scientific_role
+        nuclear = role == "nuclear"
+        self.marker_section.setVisible(nuclear)
+        self.pages["roi_counting"].setEnabled(nuclear)
+        self.calculate_button.setText(f"Calculate {role.title()} Measurements")
         if result is None:
             self.measurement_status.setText("Measurements have not been calculated.")
             self.accept_roi_button.setEnabled(False)
@@ -371,7 +377,7 @@ class MaskReviewPanel(QWidget):
             self._rebuild_filter_controls({})
             return
         table = result["properties"]
-        self.measurement_status.setText(f"Measurements available for {len(table):,} masks." + ("" if current else " Results are outdated."))
+        self.measurement_status.setText(f"Measurements available for {len(table):,} {role} objects." + ("" if current else " Results are outdated."))
         nz = int(result["raw_mask_shape"][0])
         for control in (self.first_tissue_z, self.last_tissue_z):
             control.blockSignals(True); control.setRange(0, nz - 1); control.blockSignals(False)
@@ -397,8 +403,11 @@ class MaskReviewPanel(QWidget):
         ):
             control.blockSignals(True); control.setCurrentText(value); control.blockSignals(False)
         self._rebuild_filter_controls(result)
-        self.roi_status.setText("Reviewed and accepted." if result.get("roi_reviewed") else "Provisional 3D ROI — inspect and accept before validated counting eligibility.")
-        self.accept_roi_button.setEnabled(bool(self._result_current))
+        if nuclear:
+            self.roi_status.setText("Reviewed and accepted." if result.get("roi_reviewed") else "Provisional 3D ROI — inspect and accept before validated counting eligibility.")
+        else:
+            self.roi_status.setText("Counting ROI is available for nuclear sessions.")
+        self.accept_roi_button.setEnabled(nuclear and self._result_current)
         self.update_filter_summary(result, current)
 
     def _rebuild_filter_controls(self, result):
@@ -437,14 +446,25 @@ class MaskReviewPanel(QWidget):
         if self.intensity_master.isChecked():
             for _, enabled, low, high, item in self.intensity_controls.values():
                 if enabled.isChecked(): intensity[item["name"]] = {"column": item["column"], "minimum": low.value(), "maximum": high.value()}
-        perinuclear = {name: {"column": item["column"], "minimum_positive_fraction": control.value()} for name, (_, control, item) in self.perinuclear_controls.items()}
-        return {"minimum_volume_um3": self.minimum_volume.value(), "minimum_sphericity": self.minimum_sphericity.value(),
-                "first_tissue_z": self.first_tissue_z.value(), "last_tissue_z": self.last_tissue_z.value(),
-                "z_guard_um": self.z_guard_um.value(), "z_guard_mode": self.z_guard_mode.currentText(), "z_counting_rule": "directional_entry_v1",
-                "perinuclear_combination": self.perinuclear_combination.currentText(), "perinuclear_filters": perinuclear,
-                "intensity_combination": self.intensity_combination.currentText(),
-                "intensity_filtering_enabled": self.intensity_master.isChecked(),
-                "intensity_filters": intensity}
+        settings = {
+            "minimum_volume_um3": self.minimum_volume.value(),
+            "minimum_sphericity": self.minimum_sphericity.value(),
+            "intensity_combination": self.intensity_combination.currentText(),
+            "intensity_filtering_enabled": self.intensity_master.isChecked(),
+            "intensity_filters": intensity,
+        }
+        if self.project_state.active_session.scientific_role == "nuclear":
+            settings.update(
+                first_tissue_z=self.first_tissue_z.value(), last_tissue_z=self.last_tissue_z.value(),
+                z_guard_um=self.z_guard_um.value(), z_guard_mode=self.z_guard_mode.currentText(),
+                z_counting_rule="directional_entry_v1",
+                perinuclear_combination=self.perinuclear_combination.currentText(),
+                perinuclear_filters={
+                    name: {"column": item["column"], "minimum_positive_fraction": control.value()}
+                    for name, (_, control, item) in self.perinuclear_controls.items()
+                },
+            )
+        return settings
 
     def intensity_control_settings(self):
         return {
@@ -466,6 +486,8 @@ class MaskReviewPanel(QWidget):
     def update_filter_summary(self, result, current=True):
         self.counting_error.hide()
         qualifier = "validated" if result.get("roi_reviewed") else "preliminary — ROI review required"
+        if self.project_state.active_session.scientific_role == "cytoplasmic":
+            qualifier = "cytoplasmic objects"
         if not current: qualifier = "outdated"
         retained = len(result.get("retained_ids", ()))
         excluded = len(result.get("properties", ())) - retained
@@ -488,7 +510,8 @@ class MaskReviewPanel(QWidget):
         lines = [f"Volume: {row['volume_um3']:.4g} µm³", f"Sphericity: {row['sphericity']:.4g}",
                  "Automatic status: " + ("retained" if bool(row.get("automatic_keep")) else "excluded")]
         if row.get("automatic_failure_reasons", ""): lines.append("Exclusion reasons: " + str(row["automatic_failure_reasons"]))
-        lines.append("Z guard excluded: " + ("yes" if bool(row.get("excluded_by_z_guard")) else "no"))
+        if "excluded_by_z_guard" in row:
+            lines.append("Z guard excluded: " + ("yes" if bool(row.get("excluded_by_z_guard")) else "no"))
         for key, value in row.items():
             if ("intensity" in key or "positive_fraction" in key) and hasattr(value, "__float__"): lines.append(f"{key}: {float(value):.4g}")
         self.measurements.setText("\n".join(lines))

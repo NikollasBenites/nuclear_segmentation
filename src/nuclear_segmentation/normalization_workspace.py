@@ -6,7 +6,7 @@ from pathlib import Path
 from time import perf_counter
 
 import numpy as np
-from qtpy.QtCore import QObject, QThread, Signal, Slot
+from qtpy.QtCore import QObject, QSignalBlocker, QThread, Signal, Slot
 
 from .normalization import compare_percentiles, mask_digest, normalize_preview
 from .projection_crop import generate_xy_projection, polygon_roi_mask
@@ -793,7 +793,7 @@ class NormalizationController(QObject):
         self.remove_preview()
         self._report = None
         self._fingerprint = None
-        self.project_state.invalidate_normalization()
+        self.project_state.invalidate_normalization(active_only=True)
         if had_state and self.project_state.dataset_ready:
             self._status(
                 "Normalization settings changed. Recalculate the preview before applying."
@@ -819,6 +819,30 @@ class NormalizationController(QObject):
         if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
             self.viewer.layers.remove(self.preview_layer)
         self.preview_layer = None
+
+    def display_session(self) -> None:
+        state = self.project_state
+        self.remove_preview()
+        self._report = None
+        self._fingerprint = None
+        state.normalization_preview = None
+        configuration = state.normalization_configuration or {}
+        report = configuration.get("provenance")
+        options = self.panel.normalization_settings()
+        if state.active_session.normalization_settings is not None:
+            options = state.active_session.normalization_settings
+        elif report:
+            options.update(_options_from_report(report))
+        else:
+            options.update(channel_index=state.active_channel_index, mode="cellpose_default",
+                           lower=1.0, upper=99.0, norm3D=True, input_source="working_original")
+        with QSignalBlocker(self.panel):
+            self.panel.restore_normalization_settings(options)
+        self.panel.set_normalization_results("No preview calculated for this session.")
+        self.panel.set_normalization_status(
+            "Applied normalization restored." if state.normalization_is_current
+            else "Select normalization settings for this session."
+        )
 
     def clear_project(self) -> None:
         self.remove_preview()

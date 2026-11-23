@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from time import perf_counter
 import traceback
 
@@ -25,6 +26,10 @@ def execute_cellpose_stage(scientific_input, progress=print):
         ) from error
 
     namespace = dict(scientific_input.namespace)
+    model_name = namespace["MODEL_NAME"]
+    if (not Path(model_name).is_file() and model_name not in models.MODEL_NAMES
+            and model_name not in models.get_user_models()):
+        raise ValueError(f"Unknown Cellpose model or missing local model file: {model_name}")
     namespace.update(
         torch=torch,
         io=io,
@@ -47,11 +52,13 @@ def execute_cellpose_stage(scientific_input, progress=print):
         "maximum_label_id": int(masks.max()),
         "segmentation_channel": namespace["SEGMENTATION_CHANNEL"],
         "model_name": namespace["MODEL_NAME"],
+        "model_path": str(namespace["model"].pretrained_model),
         "device": str(namespace["DEVICE"]),
         "device_type": str(namespace["DEVICE"].type),
         "parameters": deepcopy(namespace["eval_parameters"]),
         "input_provenance": deepcopy(scientific_input.provenance),
         "z_corrections": deepcopy(namespace["Z_CORRECTIONS"]),
+        "z_correction_reports": deepcopy(namespace["z_correction_reports"]),
         "cellpose_normalize": deepcopy(namespace["CELLPOSE_NORMALIZE"]),
         "model_load_seconds": namespace["CELLPOSE_MODEL_LOAD_SECONDS"],
         "evaluation_seconds": namespace["CELLPOSE_EVAL_SECONDS"],
@@ -85,6 +92,12 @@ class SegmentationWorker(QObject):
             result = dict(
                 self.runner(scientific_input, self.progress.emit),
                 scientific_config=self.job.config(),
+                session_id=self.job.owner.session_id,
+                scientific_role=self.job.scientific_role,
+                source_channel_index=self.job.channel_index,
+                input_revision=self.job.owner.input_revision,
+                geometry_revision=self.job.owner.geometry_revision + 1,
+                normalization_provenance=self.job.normalization_report,
             )
         except Exception:
             self.failed.emit(traceback.format_exc())
@@ -136,9 +149,6 @@ class SegmentationController(QObject):
         return layer if layer is not None and layer in self.viewer.layers else None
 
     def run(self) -> bool:
-        if self.project_state.active_session.scientific_role != "nuclear":
-            self._status("Cytoplasmic segmentation execution is unavailable.")
-            return False
         if self.busy:
             self._status("Cellpose segmentation is already running.")
             return False

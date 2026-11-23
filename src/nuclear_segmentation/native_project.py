@@ -299,7 +299,10 @@ def _validate_shared_controls(payload, indexes):
         raise ValueError("The checkpoint contains invalid Z-correction channel selections.")
     for settings in payload["z_settings"].values():
         validate_options(settings)
-    normalization = payload["normalization_settings"]
+    _validate_normalization_controls(payload["normalization_settings"], indexes)
+
+
+def _validate_normalization_controls(normalization, indexes):
     if (
         normalization["channel_index"] not in indexes
         or normalization["mode"] not in {"cellpose_default", "disabled", "percentile", "roi_fixed"}
@@ -368,8 +371,11 @@ def _validated_state(dataset, payload, version):
 
     indexes = {channel.index for channel in channels}
     _validate_shared_controls(payload, indexes)
+    normalization_fields = ("normalization_configuration", "normalization_is_current")
+    previous_normalization = {key: stored[key] for key in normalization_fields}
     if version == 1:
         sessions = {"nuclear": SegmentationSession(
+            **previous_normalization,
             geometry_revision=int(stored["segmentation_result"] is not None),
             measurement_revision=int(stored["filtering_result"] is not None),
             **{key: stored.get(key) if key == "legacy_import" else stored[key]
@@ -386,6 +392,8 @@ def _validated_state(dataset, payload, version):
                 or any(char not in "0123456789abcdef" for char in session_id)
             ):
                 raise ValueError("The checkpoint contains an invalid session ID.")
+            if set(record) == set(SESSION_FIELDS).difference(normalization_fields, {"normalization_settings"}):
+                record = dict(record, normalization_settings=None, **previous_normalization)
             if set(record) != set(SESSION_FIELDS):
                 raise ValueError("The checkpoint contains an incomplete session record.")
             session = SegmentationSession(session_id, **record)
@@ -402,7 +410,7 @@ def _validated_state(dataset, payload, version):
                 or any(type(value) is not bool for value in (
                     session.segmentation_is_current, session.filtering_is_current,
                     session.scientific_roi_reviewed, session.quantification_is_current,
-                    session.roi_grid_compatible,
+                    session.roi_grid_compatible, session.normalization_is_current,
                 ))
             ):
                 raise ValueError("The checkpoint contains incompatible session metadata.")
@@ -416,10 +424,13 @@ def _validated_state(dataset, payload, version):
     shared_inputs_valid = _validate_preprocessing(state, payload)
     for session_id, session in state.sessions.items():
         state.select_session(session_id)
+        if session.normalization_settings is not None:
+            _validate_normalization_controls(session.normalization_settings, indexes)
         if session.segmentation_settings is not None:
             _validate_segmentation_controls(session.segmentation_settings)
         if not shared_inputs_valid:
             session.segmentation_is_current = False
+        _validate_normalization(state, payload, check_preview=session_id == active_id)
         _validate_results(state)
     state.select_session(active_id)
     return restored_state(state)
@@ -479,6 +490,11 @@ def _validate_preprocessing(state, payload):
         state.z_correction_applied = valid_applied
         state.normalization_is_current = False
 
+    return applied_compatible
+
+
+def _validate_normalization(state, payload, *, check_preview):
+    working_shape = state.working_dataset.standardized_shape
     normalization = state.normalization_configuration or {}
     applied = normalization.get("provenance")
     if state.normalization_is_current:
@@ -492,7 +508,7 @@ def _validate_preprocessing(state, payload):
                 state.normalization_is_current = bool(applied and cellpose_configuration(applied) == normalization)
         except (KeyError, TypeError, ValueError):
             state.normalization_is_current = False
-    reports = (applied, state.normalization_preview)
+    reports = (applied, state.normalization_preview) if check_preview else (applied,)
     for report in reports:
         if not report:
             continue
@@ -514,8 +530,6 @@ def _validate_preprocessing(state, payload):
     preview = payload["normalization_pixels"]
     if preview is not None and (preview.shape != working_shape[1:] or preview.dtype.kind not in "iuf"):
         raise ValueError("The checkpoint contains incompatible normalization preview data.")
-
-    return applied_compatible
 
 
 def _validate_review_controls(filtering, session):
@@ -574,10 +588,14 @@ def _validate_results(state):
             _label_ids(segmentation["edited_masks"], shape)
         if segmentation.get("manual_review") is not None:
             ManualReview(masks, ids, segmentation["manual_review"])
+        for key, expected in (("session_id", session.session_id), ("scientific_role", session.scientific_role),
+                              ("geometry_revision", session.geometry_revision)):
+            if key in segmentation and segmentation[key] != expected:
+                raise ValueError("The segmentation record belongs to a different session or mask revision.")
         if state.segmentation_is_current:
             try:
                 config = segmentation["scientific_config"]
-                validate_scientific_input(state, config)
+                validate_scientific_input(state, config, completed_result=segmentation)
                 provenance = segmentation.get("input_provenance")
                 state.segmentation_is_current = (
                     shape == working_shape[1:] and compatible(provenance)
@@ -647,10 +665,10 @@ def _validate_results(state):
             and filtering["input_segmentation_provenance"] == segmentation.get("input_provenance")
             and provenance == segmentation.get("input_provenance")
             and expected_markers == measured_markers
-            and measured_roi is not None
+            and (measured_roi is not None or session.scientific_role == "cytoplasmic")
             and session.roi_grid_compatible
         )
-        if state.filtering_is_current:
+        if state.filtering_is_current and session.scientific_role == "nuclear":
             try:
                 _, effective_planes = density_z_planes(
                     filtering["settings"], working_shape[1], state.voxel_spacing_zyx_um[0]

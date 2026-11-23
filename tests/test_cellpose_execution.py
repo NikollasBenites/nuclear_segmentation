@@ -89,13 +89,20 @@ class _Device:
         return self.type
 
 
+@pytest.mark.parametrize("cytoplasmic", [False, True])
 def test_authoritative_stage_maps_parameters_without_preprocessing_again(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, cytoplasmic
 ):
     state, source = _state(tmp_path)
+    if cytoplasmic:
+        state.select_session(state.create_session("MAP2", scientific_role="cytoplasmic", channel_index=1).session_id)
     config = _config(state)
+    local_model = tmp_path / "cytoplasm.model"
+    local_model.touch()
     config.update(
-        CELLPOSE_DO_3D=True,
+        MODEL_NAME=str(local_model) if cytoplasmic else config["MODEL_NAME"],
+        CELLPOSE_DO_3D=not cytoplasmic,
+        CELLPOSE_STITCH_THRESHOLD=0.35,
         CELLPROB_THRESHOLD=-2.25,
         CELLPOSE_MIN_SIZE_VOXELS=19,
         BATCH_SIZE=7,
@@ -109,6 +116,7 @@ def test_authoritative_stage_maps_parameters_without_preprocessing_again(
 
     class FakeModel:
         def __init__(self, device, pretrained_model):
+            self.pretrained_model = pretrained_model
             calls["device"] = str(device)
             calls["model"] = pretrained_model
 
@@ -128,7 +136,7 @@ def test_authoritative_stage_maps_parameters_without_preprocessing_again(
     )
     cellpose = SimpleNamespace(
         io=SimpleNamespace(logger_setup=lambda: None),
-        models=SimpleNamespace(CellposeModel=FakeModel),
+        models=SimpleNamespace(CellposeModel=FakeModel, MODEL_NAMES=[defaults()["MODEL_NAME"]], get_user_models=lambda: []),
     )
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setitem(sys.modules, "cellpose", cellpose)
@@ -140,8 +148,8 @@ def test_authoritative_stage_maps_parameters_without_preprocessing_again(
     assert calls["kwargs"] == {
         "z_axis": 0,
         "channel_axis": None,
-        "do_3D": True,
-        "stitch_threshold": 0.0,
+        "do_3D": not cytoplasmic,
+        "stitch_threshold": 0.35 if cytoplasmic else 0.0,
         "anisotropy": pytest.approx(2.0 / 0.375),
         "batch_size": 7,
         "cellprob_threshold": -2.25,
@@ -150,9 +158,10 @@ def test_authoritative_stage_maps_parameters_without_preprocessing_again(
         "resample": False,
         "rescale": 0.8,
         "normalize": True,
-        "flow3D_smooth": [1.0, 2.0, 3.0],
+        **({} if cytoplasmic else {"flow3D_smooth": [1.0, 2.0, 3.0]}),
         "diameter": 17.0,
     }
+    np.testing.assert_array_equal(calls["image"], source[int(cytoplasmic)])
     assert not np.shares_memory(calls["image"], source)
     np.testing.assert_array_equal(source, before)
     assert result["mask_shape"] == source.shape[1:]
@@ -162,6 +171,10 @@ def test_authoritative_stage_maps_parameters_without_preprocessing_again(
         result["model_input_volume"], scientific.namespace["model_input_volume"]
     )
     assert not result["model_input_volume"].flags.writeable
+    assert result["model_path"] == config["MODEL_NAME"]
+    scientific.namespace["MODEL_NAME"] = str(tmp_path / "missing-model")
+    with pytest.raises(ValueError, match="missing local model"):
+        execute_cellpose_stage(scientific, lambda message: None)
 
 
 class _Layer:
@@ -311,6 +324,8 @@ def test_failed_rerun_preserves_previous_valid_result(qapp, tmp_path):
     assert state.segmentation_is_current
     assert state.session_revision() == owner
     assert "simulated model failure" in panel.execution_log.toPlainText()
+    assert not panel.execution_section.isHidden()
+    assert not panel.return_to_results_button.isHidden()
     assert len(viewer.layers) == 1
 
     state.invalidate_segmentation()
@@ -346,7 +361,7 @@ def test_running_job_cannot_replace_a_newer_owner(qapp, tmp_path, change):
         elif change == "input":
             state.set_calibration((3.0, 0.5, 0.25))
         elif change == "session":
-            state.select_session(state.create_session("Second").session_id)
+            state.select_session(state.create_session("Second", scientific_role="cytoplasmic", channel_index=1).session_id)
         else:
             state.set_segmentation_result(_fake_result(prepare_scientific_input(state, _config(state))))
         current = state.segmentation_result

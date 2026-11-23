@@ -30,10 +30,6 @@ class SegmentationPanel(QWidget):
         root.setContentsMargins(0, 8, 0, 0)
 
         section = CollapsibleSection("segmentation_input", "Segmentation Input")
-        self.unsupported_role = QLabel("Cytoplasmic segmentation execution is unavailable.")
-        self.unsupported_role.setWordWrap(True)
-        self.unsupported_role.hide()
-        root.addWidget(self.unsupported_role)
         self.input_section = section
         form = QFormLayout()
         form.setContentsMargins(10, 8, 10, 10)
@@ -41,6 +37,7 @@ class SegmentationPanel(QWidget):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.input_values = {}
         for key, title in (
+            ("session", "Segmentation session"),
             ("source", "Source image"),
             ("channel", "Segmentation channel"),
             ("shape", "Working dimensions (Z, Y, X)"),
@@ -211,6 +208,7 @@ class SegmentationPanel(QWidget):
         project_state.z_correction_changed.connect(self.refresh)
         project_state.segmentation_result_changed.connect(self._result_changed)
         project_state.sessions_changed.connect(self._refresh_result_summary)
+        project_state.sessions_changed.connect(self.refresh)
         self.execute_button.clicked.connect(self.run_requested)
         self.view_parameters_button.toggled.connect(
             self.executed_parameters.setVisible
@@ -416,6 +414,8 @@ class SegmentationPanel(QWidget):
             if crop is not None:
                 roi = "polygon ROI retained" if crop.selection_type == "polygon" else "rectangular crop"
                 crop_text = f"Applied — {roi}"
+            session = state.active_session
+            self._set_input_text("session", f"{session.display_name} · {session.scientific_role.title()}")
             self._set_input_text("source", dataset.source_filename)
             self._set_input_text("channel", "Not designated" if channel is None else f"Index {channel.index}: {channel.name}")
             self._set_input_text("shape", " × ".join(str(int(v)) for v in shape))
@@ -455,10 +455,7 @@ class SegmentationPanel(QWidget):
                 validate_scientific_input(state, config)
         except (TypeError, ValueError) as error:
             missing.append(str(error))
-        supported = state.active_session.scientific_role == "nuclear"
-        if not supported:
-            self.readiness.setText("Cytoplasmic segmentation execution is unavailable.")
-        elif self._busy:
+        if self._busy:
             self.readiness.setText("Cellpose segmentation is running. Project inputs are locked.")
         elif self._external_busy:
             self.readiness.setText("Wait for the active project operation to finish.")
@@ -467,7 +464,7 @@ class SegmentationPanel(QWidget):
         else:
             self.readiness.setText("Scientific input is valid and ready for Cellpose execution.")
         self.execute_button.setEnabled(
-            supported and not self._busy and not self._external_busy and not missing
+            not self._busy and not self._external_busy and not missing
         )
 
     def set_external_busy(self, busy: bool) -> None:
@@ -488,12 +485,8 @@ class SegmentationPanel(QWidget):
         self.execution_progress.setVisible(running)
         self.execution_log.setVisible(running or bool(self.execution_log.toPlainText()))
         self.refresh()
-        if (
-            not running
-            and self.project_state.segmentation_result is not None
-            and self.project_state.segmentation_is_current
-        ):
-            self._show_completed_result()
+        if running:
+            self._show_configuration()
 
     def set_execution_status(self, message: str, *, append: bool = True) -> None:
         self.execution_summary.setText(str(message))
@@ -513,20 +506,12 @@ class SegmentationPanel(QWidget):
                 f"Completed — {result['object_count']:,} objects; "
                 f"mask shape {tuple(result['mask_shape'])}; device {result['device']}."
             )
-            if not self._busy:
-                self._show_completed_result()
+            self._show_completed_result()
         else:
             self.execution_summary.setText(
                 "Previous segmentation remains available but is outdated for the current settings."
             )
             self._show_configuration()
-        supported = self.project_state.active_session.scientific_role == "nuclear"
-        self.unsupported_role.setVisible(not supported)
-        self.run_new_button.setVisible(supported)
-        if not supported:
-            for section in self._configuration_sections:
-                section.hide()
-            self.return_to_results_button.hide()
         self.refresh()
 
     def dispose(self):
@@ -538,3 +523,4 @@ class SegmentationPanel(QWidget):
         state.z_correction_changed.disconnect(self.refresh)
         state.segmentation_result_changed.disconnect(self._result_changed)
         state.sessions_changed.disconnect(self._refresh_result_summary)
+        state.sessions_changed.disconnect(self.refresh)

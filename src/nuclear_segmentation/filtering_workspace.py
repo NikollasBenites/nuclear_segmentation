@@ -10,7 +10,7 @@ from qtpy.QtCore import QObject, QThread, Signal, Slot
 from .core import (
     calculate_mask_properties, calculate_perinuclear_marker_metrics, safe_key,
 )
-from .filtering import apply_filter_settings
+from .filtering import apply_filter_settings, apply_object_filters
 from .manual_review import ManualReview
 from .normalization import mask_digest
 from .runtime import validate_roi_geometry
@@ -21,7 +21,7 @@ def calculate_filtering_prerequisites(project_state, config):
     """Measure current raw masks with the same functions as legacy stages."""
     segmentation = project_state.segmentation_result
     return _measure(
-        capture_scientific_input(project_state, config), segmentation["masks"],
+        capture_scientific_input(project_state, config, completed_result=segmentation), segmentation["masks"],
         segmentation.get("input_provenance", {}),
     )
 
@@ -57,7 +57,8 @@ def _measure(job, raw_masks, segmentation_provenance):
 
     perinuclear_definitions = []
     ring_labels = {}
-    for marker in ns["PERINUCLEAR_MARKERS"]:
+    nuclear = job.scientific_role == "nuclear"
+    for marker in (ns["PERINUCLEAR_MARKERS"] if nuclear else ()):
         if not marker.get("enabled", True):
             continue
         name = str(marker["name"])
@@ -84,34 +85,40 @@ def _measure(job, raw_masks, segmentation_provenance):
             "threshold_source": source,
         })
 
-    voxel_volume = float(np.prod(ns["VOXEL_SPACING_UM"]))
-    minimum_volume = ns["INITIAL_MIN_VOLUME_UM3"]
     settings = {
-        "minimum_volume_um3": float(500 * voxel_volume if minimum_volume is None else minimum_volume),
-        "minimum_sphericity": float(ns["INITIAL_MIN_SPHERICITY"]),
-        "first_tissue_z": int(ns["INITIAL_FIRST_TISSUE_Z"]),
-        "last_tissue_z": int(masks.shape[0] - 1 if ns["INITIAL_LAST_TISSUE_Z"] is None else ns["INITIAL_LAST_TISSUE_Z"]),
-        "z_guard_um": float(ns["INITIAL_Z_GUARD_UM"]),
-        "z_guard_mode": str(ns["INITIAL_Z_GUARD_MODE"]),
-        "z_counting_rule": "directional_entry_v1",
-        "perinuclear_combination": str(ns["PERINUCLEAR_COMBINATION"]),
-        "perinuclear_filters": {item["name"]: {"column": item["column"], "minimum_positive_fraction": item["minimum_positive_fraction"]} for item in perinuclear_definitions},
         "intensity_combination": str(ns["FILTER_COMBINATION"]),
         "intensity_filtering_enabled": any(
             item["enabled"] for item in intensity_definitions
         ),
         "intensity_filters": {item["name"]: {"column": item["column"], "minimum": item["minimum"], "maximum": item["maximum"]} for item in intensity_definitions if item["enabled"]},
     }
-    filtered_properties, keep = apply_filter_settings(
-        properties, masks, ns["mntb_roi"], settings, ns["Z_SPACING_UM"]
-    )
+    if nuclear:
+        voxel_volume = float(np.prod(ns["VOXEL_SPACING_UM"]))
+        minimum_volume = ns["INITIAL_MIN_VOLUME_UM3"]
+        settings.update({
+            "minimum_volume_um3": float(500 * voxel_volume if minimum_volume is None else minimum_volume),
+            "minimum_sphericity": float(ns["INITIAL_MIN_SPHERICITY"]),
+            "first_tissue_z": int(ns["INITIAL_FIRST_TISSUE_Z"]),
+            "last_tissue_z": int(masks.shape[0] - 1 if ns["INITIAL_LAST_TISSUE_Z"] is None else ns["INITIAL_LAST_TISSUE_Z"]),
+            "z_guard_um": float(ns["INITIAL_Z_GUARD_UM"]),
+            "z_guard_mode": str(ns["INITIAL_Z_GUARD_MODE"]),
+            "z_counting_rule": "directional_entry_v1",
+            "perinuclear_combination": str(ns["PERINUCLEAR_COMBINATION"]),
+            "perinuclear_filters": {item["name"]: {"column": item["column"], "minimum_positive_fraction": item["minimum_positive_fraction"]} for item in perinuclear_definitions},
+        })
+        filtered_properties, keep = apply_filter_settings(
+            properties, masks, ns["mntb_roi"], settings, ns["Z_SPACING_UM"]
+        )
+    else:
+        settings.update(minimum_volume_um3=0.0, minimum_sphericity=0.0)
+        filtered_properties, keep = apply_object_filters(properties, settings)
     retained = filtered_properties.index[keep].to_numpy(dtype=int)
     filtered_masks = np.where(np.isin(masks, retained), masks, 0)
     return {
         "properties": filtered_properties, "background_table": background,
         "settings": settings, "retained_ids": tuple(int(v) for v in retained),
         "retained_count": int(len(retained)), "filtered_masks": filtered_masks,
-        "raw_mask_shape": tuple(masks.shape), "scientific_roi": np.array(ns["mntb_roi"], copy=True),
+        "raw_mask_shape": tuple(masks.shape), "scientific_roi": np.array(ns["mntb_roi"], copy=True) if nuclear else None,
         "roi_reviewed": False, "intensity_definitions": intensity_definitions,
         "perinuclear_definitions": perinuclear_definitions, "ring_labels": ring_labels,
         "input_segmentation_provenance": deepcopy(segmentation_provenance),
@@ -165,7 +172,9 @@ class FilteringController(QObject):
     def calculate(self):
         if self.busy or any(item.busy for item in self.conflict_operations) or not self.state.segmentation_is_current: return False
         try:
-            job = capture_scientific_input(self.state, self._measurement_config())
+            job = capture_scientific_input(
+                self.state, self._measurement_config(), completed_result=self.state.segmentation_result
+            )
         except Exception as error:
             self.status_changed.emit(f"Measurements unavailable: {error}")
             return False
@@ -221,7 +230,7 @@ class FilteringController(QObject):
                 scientific_roi=np.array(self.state.scientific_roi, copy=True),
                 roi_reviewed=bool(self.state.scientific_roi_reviewed),
             )
-        else:
+        elif result["scientific_roi"] is not None:
             self.state.set_scientific_roi(
                 result["scientific_roi"], self._roi_provenance(result),
                 reviewed=False,
@@ -282,19 +291,22 @@ class FilteringController(QObject):
             name: item for name, item in settings["intensity_filters"].items()
             if item["column"] in columns
         }
-        settings["perinuclear_filters"] = {
-            name: item for name, item in settings["perinuclear_filters"].items()
-            if item["column"] in columns
-        }
         masks = self.state.segmentation_result["masks"]
-        # Explicit recalculation uses the desktop counting rule regardless of the
-        # historical rule. Keep the original settings in legacy provenance.
-        settings["z_counting_rule"] = "directional_entry_v1"
-        properties, keep = apply_filter_settings(
-            current["properties"], masks, roi, settings,
-            self.state.voxel_spacing_zyx_um[0],
-            manual_review=self._compatible_manual_review(masks, current["properties"].index, settings, roi),
-        )
+        if self.state.active_session.scientific_role == "cytoplasmic":
+            properties, keep = apply_object_filters(current["properties"], settings)
+        else:
+            settings["perinuclear_filters"] = {
+                name: item for name, item in settings["perinuclear_filters"].items()
+                if item["column"] in columns
+            }
+            # Explicit recalculation uses the desktop counting rule regardless of the
+            # historical rule. Keep the original settings in legacy provenance.
+            settings["z_counting_rule"] = "directional_entry_v1"
+            properties, keep = apply_filter_settings(
+                current["properties"], masks, roi, settings,
+                self.state.voxel_spacing_zyx_um[0],
+                manual_review=self._compatible_manual_review(masks, current["properties"].index, settings, roi),
+            )
         retained = properties.index[keep].to_numpy(dtype=int)
         return dict(
             current, properties=properties, settings=settings,

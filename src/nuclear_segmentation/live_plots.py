@@ -215,7 +215,7 @@ class LivePlots(QWidget):
         ax.set_title('Segmentation input — full stack' if kind == 'Z profile' else kind + ' — current selection')
         ax.grid(alpha=.2); ax.legend(loc='best')
         note = ' ROI pending review.' if self.ns.get('roi_reviewed') is False else ''
-        self.status.setText(('Full stack profile (includes zeros). Z boundaries follow filters.'
+        self.status.setText(('Full stack profile (includes zeros).'
                              if kind == 'Z profile' else f'Retained: {int(selected.sum())} / {len(props)}. Automatic update.') + note)
         self._apply_canvas_theme()
         self.canvas.draw_idle()
@@ -315,7 +315,7 @@ class ProjectLivePlots(LivePlots):
                 properties.index.isin(retained), index=properties.index
             ),
             current_filter_settings=lambda: filtering['settings'],
-            roi_reviewed=bool(state.scientific_roi_reviewed),
+            roi_reviewed=state.scientific_roi_reviewed if state.active_session.scientific_role == "nuclear" else None,
             segmentation_volume=volume,
             PERINUCLEAR_MARKER_RESULTS={
                 item['name']: {'fraction_column': item['column']}

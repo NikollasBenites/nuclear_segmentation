@@ -363,7 +363,8 @@ class PreprocessingPanel(QWidget):
         )
         if (
             corrected
-            and int(channel_index) == self.project_state.segmentation_channel_index
+            and int(channel_index) == self.project_state.active_channel_index
+            and self.project_state.z_correction_options[int(channel_index)].get("segmentation", True)
             and (newly_effective or prefer_effective and previous is None)
         ):
             wanted = "z_corrected"

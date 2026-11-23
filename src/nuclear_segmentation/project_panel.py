@@ -206,7 +206,7 @@ class ProjectPanel(QWidget):
         name.setMaxLength(80)
         role = QComboBox()
         role.addItem("Nuclear", "nuclear")
-        role.addItem("Cytoplasmic (execution unavailable)", "cytoplasmic")
+        role.addItem("Cytoplasmic", "cytoplasmic")
         source = QComboBox()
         for channel in self.project_state.channels:
             source.addItem(channel.name, channel.index)

@@ -29,6 +29,42 @@ def calculate_perinuclear_filter_keep(properties, settings):
     raise ValueError('Perinuclear combination must be "any" or "all".')
 
 
+def _intensity_keep(properties, settings):
+    intensity_conditions = []
+    for name, item in settings["intensity_filters"].items():
+        if item["minimum"] > item["maximum"]:
+            raise ValueError(f"{name} minimum intensity exceeds its maximum.")
+        intensity_conditions.append(
+            properties[item["column"]].between(
+                item["minimum"], item["maximum"], inclusive="both"
+            )
+        )
+    if not intensity_conditions:
+        intensity_keep = pd.Series(True, index=properties.index)
+    elif settings["intensity_combination"] == "all":
+        intensity_keep = pd.concat(intensity_conditions, axis=1).all(axis=1)
+    elif settings["intensity_combination"] == "any":
+        intensity_keep = pd.concat(intensity_conditions, axis=1).any(axis=1)
+    else:
+        raise ValueError('Intensity combination must be "any" or "all".')
+
+    return intensity_keep
+
+
+def apply_object_filters(properties, settings):
+    result = properties.copy()
+    volume = result["volume_um3"] >= settings["minimum_volume_um3"]
+    shape = result["sphericity"] >= settings["minimum_sphericity"]
+    intensity = _intensity_keep(result, settings)
+    keep = volume & shape & intensity
+    result["automatic_keep"] = keep
+    result["automatic_failure_reasons"] = [
+        "; ".join(reason for reason, passed in zip(("volume", "sphericity", "intensity"), checks) if not passed)
+        for checks in zip(volume, shape, intensity)
+    ]
+    return result, keep
+
+
 def apply_filter_settings(properties, masks, roi, settings, z_spacing_um,
                           manual_review=None):
     """Apply the authoritative legacy automatic and eligibility rules."""
@@ -51,23 +87,7 @@ def apply_filter_settings(properties, masks, roi, settings, z_spacing_um,
         & (~result["excluded_by_z_guard"])
     )
     perinuclear_keep = calculate_perinuclear_filter_keep(result, settings)
-    intensity_conditions = []
-    for name, item in settings["intensity_filters"].items():
-        if item["minimum"] > item["maximum"]:
-            raise ValueError(f"{name} minimum intensity exceeds its maximum.")
-        intensity_conditions.append(
-            result[item["column"]].between(
-                item["minimum"], item["maximum"], inclusive="both"
-            )
-        )
-    if not intensity_conditions:
-        intensity_keep = pd.Series(True, index=result.index)
-    elif settings["intensity_combination"] == "all":
-        intensity_keep = pd.concat(intensity_conditions, axis=1).all(axis=1)
-    elif settings["intensity_combination"] == "any":
-        intensity_keep = pd.concat(intensity_conditions, axis=1).any(axis=1)
-    else:
-        raise ValueError('Intensity combination must be "any" or "all".')
+    intensity_keep = _intensity_keep(result, settings)
 
     inside, in_z, counting_z = sampling_membership(
         result, roi, settings, z_spacing_um

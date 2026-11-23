@@ -153,3 +153,29 @@ def test_rejects_incompatible_crop_and_missing_applied_report(tmp_path):
     state.z_correction_applied.add(0)
     with pytest.raises(ValueError, match="reports"):
         validate_scientific_input(state, _config(state))
+
+
+def test_cytoplasmic_normalization_requires_its_inference_channel_and_route(tmp_path):
+    from nuclear_segmentation.normalization_workspace import calculate_normalization, cellpose_configuration
+
+    state, image = _state(tmp_path)
+    state.select_session(state.create_session("Marker objects", scientific_role="cytoplasmic", channel_index=1).session_id)
+    options = dict(channel_index=0, mode="percentile", lower=1, upper=99, norm3D=True)
+    def apply_preview(**changes):
+        report, _ = calculate_normalization(state, dict(options, **changes))
+        state.apply_normalization(cellpose_configuration(report))
+
+    apply_preview()
+    with pytest.raises(ValueError, match="preview for Marker"):
+        prepare_scientific_input(state, _config(state))
+
+    state.set_z_correction_preview(1, Z_DEFAULTS, _z_report(state, 1, Z_DEFAULTS))
+    state.apply_z_corrections([1])
+    apply_preview(channel_index=1)
+    with pytest.raises(ValueError, match="z_corrected"):
+        prepare_scientific_input(state, _config(state))
+    apply_preview(channel_index=1, input_source="z_corrected")
+    scientific = prepare_scientific_input(state, _config(state))
+    corrected, _ = correct_z(image[1], Z_DEFAULTS)
+    np.testing.assert_array_equal(scientific.namespace["model_input_volume"], corrected)
+    np.testing.assert_array_equal(scientific.namespace["channel_volumes"]["Marker"], image[1])
