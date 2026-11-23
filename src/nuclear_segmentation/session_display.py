@@ -11,6 +11,7 @@ class SessionMaskDisplay(QObject):
     status = Signal(str)
 
     _keys = {
+        "edited": "nucytoseg_edited_segmentation",
         "raw": "nucytoseg_raw_segmentation",
         "filtered": "nucytoseg_filtered_segmentation",
         "roi": "nucytoseg_scientific_roi",
@@ -23,6 +24,7 @@ class SessionMaskDisplay(QObject):
         self.selection = selection
         self.layers = {}
         self._syncing = False
+        self.suspended = False
         viewer.layers.events.inserted.connect(self._inserted)
         viewer.layers.events.removed.connect(self._removed)
 
@@ -54,7 +56,7 @@ class SessionMaskDisplay(QObject):
 
     def _appearance_changed(self, event):
         layer = event.source
-        if self._syncing or not self.state.owns_mask_layer(layer):
+        if self.suspended or self._syncing or not self.state.owns_mask_layer(layer):
             return
         role = next(key for key, value in self.layers.items() if value is layer)
         settings = self.preferences.setdefault(role, {})
@@ -62,7 +64,7 @@ class SessionMaskDisplay(QObject):
         if event.type == "visible" and role != "roi":
             selected_target = self._mode() == "selected" and role == self.preferences["selected_layer"]
             if not selected_target:
-                for key in ("raw", "filtered"):
+                for key in ("raw", "edited", "filtered"):
                     other = self.layers.get(key)
                     if other is not None:
                         self.preferences.setdefault(key, {})["visible"] = other.visible
@@ -99,7 +101,18 @@ class SessionMaskDisplay(QObject):
         finally:
             self._syncing = False
 
+    def suspend(self):
+        self.suspended = True
+        for layer in self.layers.values():
+            layer.visible = False
+
+    def resume(self):
+        self.suspended = False
+        self.sync(restore_selection=True)
+
     def sync(self, *, restore_selection=False):
+        if self.suspended:
+            return
         mode = self._mode()
         filtered = self.layers.get("filtered")
         retained = (self.state.filtering_result or {}).get("retained_ids", ())
@@ -113,6 +126,8 @@ class SessionMaskDisplay(QObject):
             selected = self.selection.label_for_layer(filtered)
             if selected is not None and selected not in retained:
                 self.selection.clear_selection(filtered)
+        if self._mode() == "edited" and "edited" not in self.layers:
+            self.preferences["mode"] = "raw"
         if self._mode() == "filtered" and not self.state.filtering_is_current:
             self.preferences["mode"] = "raw"
         for role, layer in self.layers.items():
@@ -136,10 +151,11 @@ class SessionMaskDisplay(QObject):
             visibility = "" if layer is not None and layer.visible else " · hidden"
             message = f"Selected only: Mask ID {self.preferences['selected_id']} ({role}){visibility}."
         elif mode == "custom":
-            visible = [key for key in ("raw", "filtered") if key in self.layers and self.layers[key].visible]
+            visible = [key for key in ("raw", "edited", "filtered") if key in self.layers and self.layers[key].visible]
             message = "Visible masks: " + (" and ".join(visible) if visible else "none") + "."
         else:
-            message = "Showing all raw segmentation masks." if mode == "raw" else "Showing all retained masks."
+            message = {"raw": "Showing all raw segmentation masks.", "edited": "Showing committed edited masks.",
+                       "filtered": "Showing all retained masks."}[mode]
         self.status.emit(message)
 
     def show(self, mode):
@@ -149,24 +165,24 @@ class SessionMaskDisplay(QObject):
         if mode == "selected":
             layer = self.selection.selected_layer
             label = self.selection.selected_mask_id
-            role = next((key for key in ("raw", "filtered") if self.layers.get(key) is layer), None)
+            role = next((key for key in ("raw", "edited", "filtered") if self.layers.get(key) is layer), None)
             if layer is None or label is None or role is None or not self.state.owns_mask_layer(layer):
-                self.status.emit("Select a raw or filtered mask with Review / Select first.")
+                self.status.emit("Select a segmentation mask with Review / Select first.")
                 return
             self.preferences.update(selected_layer=role, selected_id=int(label),
                                     geometry_revision=self.state.active_session.geometry_revision)
-        for key in ("raw", "filtered"):
+        for key in ("raw", "edited", "filtered"):
             self.preferences.get(key, {}).pop("visible", None)
         self.preferences["mode"] = mode
         self.sync()
-        if mode in ("raw", "filtered") and mode in self.layers:
+        if mode in ("raw", "edited", "filtered") and mode in self.layers:
             self.viewer.layers.selection.active = self.layers[mode]
         self.changed.emit()
 
     def selection_cleared(self, layer):
         if self._mode() == "selected" and self.layers.get(self.preferences["selected_layer"]) is layer:
             role = self.preferences["selected_layer"]
-            self.show(role if self.state.filtering_is_current else "raw")
+            self.show("raw" if role == "filtered" and not self.state.filtering_is_current else role)
 
     def selection_changed(self, layer, label):
         if (label is not None and self._mode() == "selected"

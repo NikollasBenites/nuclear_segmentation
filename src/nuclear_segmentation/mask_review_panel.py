@@ -332,6 +332,7 @@ class MaskReviewPanel(QWidget):
         self._selected_id = None if mask_id is None else int(mask_id)
         self._selected_is_raw = self.project_state.owns_mask_layer(layer) and bool(
             metadata.get("nucytoseg_raw_segmentation")
+            or metadata.get("nucytoseg_edited_segmentation")
             or metadata.get("nucytoseg_filtered_segmentation")
         )
         self._selected_identity = (
@@ -645,16 +646,17 @@ class MaskReviewPanel(QWidget):
         elif current:
             self.segmentation_status.setText("Segmentation: available and current")
             self.mask_count.setText(
-                f"Detected masks: {int(result['object_count']):,}"
+                f"Detected masks: {int(result.get('edited_object_count', result['object_count'])):,}"
             )
             self.review_status.setText(
-                "Raw masks are ready for visual review. Use selection and visibility "
+                ("Committed edits are ready for visual review. " if result.get("edit_history") else
+                 "Raw masks are ready for visual review. ") + "Use selection and visibility "
                 "controls to inspect individual masks."
             )
         else:
             self.segmentation_status.setText("Segmentation: outdated")
             self.mask_count.setText(
-                f"Detected masks: {int(result['object_count']):,}"
+                f"Detected masks: {int(result.get('edited_object_count', result['object_count'])):,}"
             )
             self.review_status.setText(
                 "Previous masks remain visible for inspection but are outdated. "

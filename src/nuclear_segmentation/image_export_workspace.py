@@ -18,6 +18,7 @@ from qtpy.QtWidgets import QFileDialog
 from .config import validate_config
 from .core import calibrated_label_tiff, safe_filename, safe_key, software_versions
 from .filtering import calculate_perinuclear_filter_keep
+from .geometry_edit import effective_masks
 from .image_export import export_images
 from .manual_review import ManualReview
 from .normalization import mask_digest
@@ -34,7 +35,8 @@ def _write_scientific_package(namespace):
         raise ValueError(error)
     if "tiff" in export["outputs"]:
         # The ImageJ encoder used for this package requires uint16 label IDs.
-        if masks.dtype.kind not in "iu" or masks.min() < 0 or masks.max() > np.iinfo(np.uint16).max:
+        if any(array.dtype.kind not in "iu" or array.min() < 0 or array.max() > np.iinfo(np.uint16).max
+               for array in (masks, namespace["original_cellpose_masks"])):
             raise ValueError("Scientific TIFF export requires integer label IDs from 0 to 65,535.")
         names = [safe_filename(name).casefold() for name in export["settings"]["perinuclear_filters"]]
         if len(names) != len(set(names)) or "perinuclear_marker" in names:
@@ -198,7 +200,7 @@ class ImageExportController(QObject):
         filtering = state.filtering_result
         quantification = state.quantification_result
         config = validate_config(segmentation["scientific_config"])
-        masks = segmentation["masks"]
+        masks = effective_masks(segmentation)
         roi = state.scientific_roi
         spacing = tuple(state.voxel_spacing_zyx_um)
         properties = filtering["properties"]
@@ -333,6 +335,7 @@ class ImageExportController(QObject):
             roi_plane_counts=np.asarray(quantification["roi_plane_counts"]),
             mntb_roi=roi,
             masks=masks,
+            original_cellpose_masks=segmentation["masks"],
             filtered_masks=filtering["filtered_masks"],
             filter_properties=properties,
             saved_manual_review=segmentation.get("manual_review"),

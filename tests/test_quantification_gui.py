@@ -651,3 +651,25 @@ def test_scientific_export_recovers_from_write_failure_and_preserves_existing_re
     assert not destination.exists()
     assert previous.read_text() == "previous results\n"
     assert list(existing.iterdir()) == [previous]
+
+
+def test_edited_export_preserves_raw_and_uses_committed_marker_geometry(scientific_export, qapp, tmp_path):
+    from nuclear_segmentation.geometry_edit import GeometryEdit
+
+    window, measure = scientific_export
+    state, raw = measure(marker=True)
+    edit = GeometryEdit(state)
+    edit.remove(13)
+    edit.commit()
+    assert window.filtering.calculate()
+    _wait(qapp, lambda: not window.filtering.busy)
+    window.filtering.accept_roi()
+    panel = window.context_panel.export_page
+    for key, field in panel.scientific_options.items():
+        field.setChecked(key == "tiff")
+    destination = tmp_path / "edited"
+    assert window.image_export.export_scientific(destination)
+    _wait(qapp, lambda: not window.image_export.busy)
+    np.testing.assert_array_equal(tifffile.imread(destination / "cellpose_raw_masks.tif"), raw)
+    np.testing.assert_array_equal(tifffile.imread(destination / "Marker_associated_dapi_nuclei.tif"),
+                                  np.where(raw == 13, 0, raw))

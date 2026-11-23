@@ -45,6 +45,7 @@ from .session_display import SessionMaskDisplay
 from .segmentation_execution import SegmentationController
 from .filtering_workspace import FilteringController
 from .viewer_toolbar import ViewerToolbar
+from .geometry_panel import GeometryPanel
 from .workflow_navigation import WorkflowNavigation
 from .ui_icons import icon
 from .workspace_settings import (
@@ -252,9 +253,6 @@ class DesktopWindow(QMainWindow):
         self.context_panel.project_page.load_pending_requested.connect(
             self.load_pending_image
         )
-        self.context_panel.project_page.analysis_mode_changed.connect(
-            self._set_analysis_mode
-        )
         self.context_panel.project_page.channel_panel.change_requested.connect(
             self._update_channel_configuration
         )
@@ -264,6 +262,9 @@ class DesktopWindow(QMainWindow):
         self.context_panel.project_page.close_requested.connect(self.close_project)
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
+        self.geometry_panel = GeometryPanel(self, review_panel)
+        self.segmentation.conflict_operations += (self.geometry_panel,)
+        self.filtering.conflict_operations += (self.geometry_panel,)
         self._connect_project_actions()
         project_panel = self.context_panel.project_page
         project_panel.session_selected.connect(self._select_session)
@@ -489,9 +490,6 @@ class DesktopWindow(QMainWindow):
     def _update_active_layer_status(self, layer) -> None:
         self.layer_status.setText(f"Layer: {layer.name}" if layer is not None else "Layer: none")
 
-    def _set_analysis_mode(self, mode: str) -> None:
-        self.project_state.analysis_mode = str(mode)
-
     def _apply_manual_calibration(self, spacing) -> None:
         if not self.project_state.dataset_ready:
             self.statusBar().showMessage("Load a dataset before applying calibration", 5000)
@@ -564,7 +562,7 @@ class DesktopWindow(QMainWindow):
             prep.z_correction_panel.inspected_channel_changed,
             prep.channel_combo.currentIndexChanged, prep.method_combo.currentIndexChanged,
             self.context_panel.segmentation_page.configuration_changed,
-            self.context_panel.mask_review_page.filters_edited, panel.analysis_mode_changed,
+            self.context_panel.mask_review_page.filters_edited,
         ):
             signal.connect(self._mark_project_dirty)
         self._update_project_actions()
@@ -575,7 +573,7 @@ class DesktopWindow(QMainWindow):
         self._update_project_actions()
 
     def _update_project_actions(self):
-        available = self._import_thread is None
+        available = self._import_thread is None and not self.geometry_panel.busy
         self.import_legacy_action.setEnabled(available)
         for action in self.project_actions[:2]:
             action.setEnabled(available)
@@ -588,6 +586,9 @@ class DesktopWindow(QMainWindow):
         label.setToolTip(str(path or ""))
 
     def _project_idle(self):
+        if self.geometry_panel.busy:
+            self.statusBar().showMessage("Commit or discard the active mask preview first.", 5000)
+            return False
         if self._import_thread is not None or any(controller.busy for controller in (
             self.crop_workspace, self.normalization, self.z_correction, self.image_preparation,
             self.image_export, self.segmentation, self.filtering,
@@ -805,7 +806,6 @@ class DesktopWindow(QMainWindow):
             for key in normalization_keys:
                 setattr(state, key, restored[key])
             project = self.context_panel.project_page
-            project.analysis_mode.setCurrentIndex(project.analysis_mode.findData(state.analysis_mode))
             project.time_index.setValue(dataset.time_index)
             project.axes_override.setText(dataset.axes_override or "")
             for field, spacing in zip(project.spacing_fields, state.voxel_spacing_zyx_um, strict=True):
@@ -957,6 +957,8 @@ class DesktopWindow(QMainWindow):
             state.restoring_project = was_restoring
 
     def close_project(self, *, confirm: bool = True) -> bool:
+        if self.geometry_panel.busy:
+            return False
         if self._import_thread is not None:
             self.statusBar().showMessage(
                 "Wait for the active image import to finish before closing the project.",
@@ -1381,7 +1383,7 @@ class DesktopWindow(QMainWindow):
 
     def _mask_selection_changed(self, layer, mask_id) -> None:
         self.selected_mask_panel.set_selection(layer, mask_id)
-        if layer is None or layer not in (self.segmentation.result_layer, self.filtering.filtered_layer):
+        if layer is None or layer not in (self.segmentation.result_layer, self.filtering.filtered_layer, self.mask_display.layers.get("edited")):
             layer = mask_id = None
         self.context_panel.mask_review_page.set_selection(layer, mask_id)
 
@@ -1598,7 +1600,8 @@ class DesktopWindow(QMainWindow):
             controls.setFixedHeight(min(72 + extra // 2, controls.widget().sizeHint().height()))
 
     def closeEvent(self, event) -> None:
-        if self._project_job is not None:
+        if self.geometry_panel.busy or self._project_job is not None:
+            self.statusBar().showMessage("Finish the active operation before closing.", 5000)
             event.ignore()
             return
         if self._import_thread is not None and self._import_thread.isRunning():

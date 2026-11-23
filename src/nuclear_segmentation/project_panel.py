@@ -27,7 +27,6 @@ from .ui_icons import icon
 class ProjectPanel(QWidget):
     open_requested = Signal()
     load_pending_requested = Signal()
-    analysis_mode_changed = Signal(str)
     calibration_requested = Signal(object)
     section_state_changed = Signal(str, bool)
     close_requested = Signal()
@@ -134,17 +133,6 @@ class ProjectPanel(QWidget):
         self.channel_panel = ChannelConfigurationPanel(project_state)
         channels_layout.addRow(self.channel_panel)
         layout.addWidget(channels)
-
-        mode_section, mode_form = self._section("analysis_mode", "Analysis Mode")
-        self.analysis_mode = QComboBox()
-        self.analysis_mode.addItem("New Segmentation", "segment")
-        self.analysis_mode.addItem("Resume Analysis", "resume")
-        self.analysis_mode.addItem("Density Only", "density_only")
-        self.analysis_mode.currentIndexChanged.connect(
-            lambda: self.analysis_mode_changed.emit(self.analysis_mode.currentData())
-        )
-        mode_form.addRow(self.analysis_mode)
-        layout.addWidget(mode_section)
 
         self.open_button = QPushButton("Open Image…")
         self.open_button.clicked.connect(self.open_requested)

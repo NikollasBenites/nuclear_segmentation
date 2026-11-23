@@ -15,6 +15,7 @@ from qtpy.QtCore import QObject, QLockFile, Signal, Slot
 from .core import density_z_planes
 from .image_import import load_tiff_dataset, load_verified_image, source_digest
 from .lif_import import load_lif_dataset
+from .geometry_edit import effective_masks, validate_history
 from .manual_review import ManualReview
 from .normalization import mask_digest
 from .normalization_workspace import _options_from_report, cellpose_configuration, normalization_fingerprint
@@ -314,7 +315,7 @@ def _validate_normalization_controls(normalization, indexes):
 
 
 def _validate_display_state(display, indexes):
-    if not isinstance(display, dict) or display.get("mode", "raw") not in ("raw", "filtered", "selected", "custom"):
+    if not isinstance(display, dict) or display.get("mode", "raw") not in ("raw", "edited", "filtered", "selected", "custom"):
         raise ValueError("Invalid session display mode.")
     channels = display.get("channels", {})
     if not isinstance(channels, dict) or any(
@@ -322,7 +323,7 @@ def _validate_display_state(display, indexes):
         for index, visible in channels.items()
     ):
         raise ValueError("Invalid session channel visibility.")
-    for role in ("raw", "filtered", "roi"):
+    for role in ("raw", "edited", "filtered", "roi"):
         settings = display.get(role, {})
         if not isinstance(settings, dict) or type(settings.get("visible", True)) is not bool:
             raise ValueError("Invalid session layer visibility.")
@@ -330,7 +331,7 @@ def _validate_display_state(display, indexes):
         if type(opacity) not in (int, float) or not 0 <= opacity <= 1:
             raise ValueError("Invalid session layer opacity.")
     if display.get("mode") == "selected" and (
-        display.get("selected_layer") not in ("raw", "filtered")
+        display.get("selected_layer") not in ("raw", "edited", "filtered")
         or type(display.get("selected_id")) is not int or display["selected_id"] <= 0
         or type(display.get("geometry_revision")) is not int
     ):
@@ -612,10 +613,24 @@ def _validate_results(state):
             array = segmentation.get(key)
             if array is not None and array.shape != shape:
                 raise ValueError(f"Incompatible {key} shape in the checkpoint.")
-        if segmentation.get("edited_masks") is not None:
-            _label_ids(segmentation["edited_masks"], shape)
         if segmentation.get("manual_review") is not None:
             ManualReview(masks, ids, segmentation["manual_review"])
+        validate_history(segmentation, session)
+        edited = segmentation.get("edited_masks")
+        if edited is not None:
+            ids = _label_ids(edited, shape)
+            edited.setflags(write=False)
+            if segmentation.get("edit_history"):
+                if segmentation.get("edited_object_count") != len(ids):
+                    raise ValueError("The committed label count differs from the edited geometry.")
+            elif not np.array_equal(masks, edited):
+                # Older checkpoints could store edits while measuring the original labels.
+                segmentation["edited_object_count"] = len(ids)
+                if segmentation.get("manual_review") is not None:
+                    segmentation["original_manual_review"] = segmentation.pop("manual_review")
+                if (state.filtering_result or {}).get("geometry_revision") != session.geometry_revision:
+                    state.clear_filtering_result(emit=False)
+                    state.scientific_roi_reviewed = False
         for key, expected in (("session_id", session.session_id), ("scientific_role", session.scientific_role),
                               ("geometry_revision", session.geometry_revision)):
             if key in segmentation and segmentation[key] != expected:
@@ -642,6 +657,11 @@ def _validate_results(state):
     roi = state.scientific_roi
     effective_planes = None
     if filtering is not None:
+        if segmentation and segmentation.get("edit_history") and (
+            filtering.get("geometry_revision") != session.geometry_revision
+            or filtering.get("session_id") != session.session_id
+        ):
+            raise ValueError("Measurements belong to a different geometry revision.")
         _validate_review_controls(filtering, session)
         intensity_controls = session.intensity_controls
         if intensity_controls is not None and (
@@ -660,7 +680,7 @@ def _validate_results(state):
         ):
             raise ValueError("The checkpoint's filtered masks or measurements do not match its segmentation.")
         if any(not np.array_equal(saved, np.where(np.isin(raw, retained), raw, 0))
-               for saved, raw in zip(filtered, segmentation["masks"])):
+               for saved, raw in zip(filtered, effective_masks(segmentation))):
             raise ValueError("Filtered label geometry does not match the raw masks.")
         filtered.setflags(write=False)
         measured_roi = filtering["scientific_roi"]
@@ -722,6 +742,8 @@ def _validate_results(state):
     quant = state.quantification_result
     state.quantification_is_current = bool(
         state.quantification_is_current and quant and state.filtering_is_current
+        and (not segmentation.get("edit_history") or (quant.get("geometry_revision") == session.geometry_revision
+             and quant.get("session_id") == session.session_id))
         and state.scientific_roi_reviewed and quant["density_status"] == "valid"
         and np.isfinite(quant["roi_effective_volume_um3"]) and quant["roi_effective_volume_um3"] > 0
         and quant["roi_reviewed"] and effective_planes is not None

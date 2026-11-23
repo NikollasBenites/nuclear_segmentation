@@ -11,6 +11,7 @@ from .core import (
     calculate_mask_properties, calculate_perinuclear_marker_metrics, safe_key,
 )
 from .filtering import apply_filter_settings, apply_object_filters
+from .geometry_edit import effective_masks
 from .manual_review import ManualReview
 from .normalization import mask_digest
 from .runtime import validate_roi_geometry
@@ -18,10 +19,10 @@ from .scientific_input import capture_scientific_input, prepare_captured_scienti
 
 
 def calculate_filtering_prerequisites(project_state, config):
-    """Measure current raw masks with the same functions as legacy stages."""
+    """Measure the committed session geometry with the same functions as legacy stages."""
     segmentation = project_state.segmentation_result
     return _measure(
-        capture_scientific_input(project_state, config, completed_result=segmentation), segmentation["masks"],
+        capture_scientific_input(project_state, config, completed_result=segmentation), effective_masks(segmentation),
         segmentation.get("input_provenance", {}),
     )
 
@@ -34,7 +35,7 @@ def _measure(job, raw_masks, segmentation_provenance):
         raise ValueError("Raw masks do not match the current working ZYX grid.")
     properties, background = calculate_mask_properties(
         masks, ns["channel_volumes"], ns["CHANNELS"], ns["VOXEL_SPACING_UM"],
-        ns["GLOBAL_BACKGROUND_PERCENTILE"],
+        ns["GLOBAL_BACKGROUND_PERCENTILE"], allow_empty=True,
     )
     intensity_prefix = (
         "mean_intensity_" if ns["INTENSITY_MODE"] == "raw"
@@ -45,8 +46,8 @@ def _measure(job, raw_masks, segmentation_provenance):
         if not item.get("measure", True):
             continue
         column = intensity_prefix + safe_key(item["name"])
-        low = float(np.floor(properties[column].min()))
-        high = float(np.ceil(properties[column].max()))
+        low = float(np.floor(properties[column].min())) if len(properties) else 0.0
+        high = float(np.ceil(properties[column].max())) if len(properties) else 1.0
         if high <= low:
             high = low + 1.0
         intensity_definitions.append({
@@ -67,7 +68,7 @@ def _measure(job, raw_masks, segmentation_provenance):
         metrics, rings, threshold, source = calculate_perinuclear_marker_metrics(
             masks, ns["channel_volumes"][name], ns["VOXEL_SPACING_UM"], name,
             marker.get("ring_inner_um", .5), marker.get("ring_outer_um", 3.0),
-            marker.get("pixel_threshold"),
+            marker.get("pixel_threshold"), allow_empty=True,
         )
         properties = properties.join(metrics, how="left", validate="one_to_one")
         column = f"{safe_key(name).lower()}_ring_positive_fraction"
@@ -115,6 +116,7 @@ def _measure(job, raw_masks, segmentation_provenance):
     retained = filtered_properties.index[keep].to_numpy(dtype=int)
     filtered_masks = np.where(np.isin(masks, retained), masks, 0)
     return {
+        "geometry_revision": job.owner.geometry_revision, "session_id": job.owner.session_id,
         "properties": filtered_properties, "background_table": background,
         "settings": settings, "retained_ids": tuple(int(v) for v in retained),
         "retained_count": int(len(retained)), "filtered_masks": filtered_masks,
@@ -136,7 +138,7 @@ class FilteringWorker(QObject):
         super().__init__()
         self.job = job
         self.measurement_revision = measurement_revision
-        self.raw_masks = segmentation["masks"]
+        self.raw_masks = effective_masks(segmentation)
         self.segmentation_provenance = deepcopy(segmentation.get("input_provenance", {}))
 
     @Slot()
@@ -294,7 +296,7 @@ class FilteringController(QObject):
             name: item for name, item in settings["intensity_filters"].items()
             if item["column"] in columns
         }
-        masks = self.state.segmentation_result["masks"]
+        masks = effective_masks(self.state.segmentation_result)
         if self.state.active_session.scientific_role == "cytoplasmic":
             properties, keep = apply_object_filters(current["properties"], settings)
         else:
@@ -344,7 +346,7 @@ class FilteringController(QObject):
         spacing = self.state.voxel_spacing_zyx_um
         oy, ox = self.state.working_offset_yx
         validate_roi_geometry(
-            self.roi_layer, spacing, self.state.segmentation_result["masks"].shape,
+            self.roi_layer, spacing, effective_masks(self.state.segmentation_result).shape,
             translate=(0, oy * spacing[1], ox * spacing[2]),
         )
 
@@ -357,7 +359,7 @@ class FilteringController(QObject):
             self.panel.roi_status.setText(str(error))
             return
         roi = np.asarray(self.roi_layer.data) > 0
-        if roi.shape != self.state.segmentation_result["masks"].shape or not roi.any():
+        if roi.shape != effective_masks(self.state.segmentation_result).shape or not roi.any():
             self.panel.roi_status.setText("Invalid or empty scientific ROI."); return
         expected_provenance = self._roi_provenance(self.state.filtering_result)
         if (self.state.scientific_roi_provenance is not None

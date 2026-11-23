@@ -82,10 +82,12 @@ def calculate_quantification_result(project_state):
     reason_sets = reasons.map(
         lambda text: {item.strip() for item in text.split(";") if item.strip()}
     )
-    total = int(segmentation["object_count"])
+    total = len(properties)
     retained = len(retained_ids)
     result = {
         **density,
+        "geometry_revision": project_state.active_session.geometry_revision,
+        "session_id": project_state.active_session_id,
         "density": density,
         "roi_plane_counts": tuple(plane_counts.tolist()),
         "effective_sampling_planes": tuple(effective_planes.tolist()),
@@ -100,13 +102,13 @@ def calculate_quantification_result(project_state):
             properties["excluded_by_sampling_roi"].astype(bool).sum()
         ),
         "failed_morphology": int(
-            reason_sets.map(lambda items: bool({"volume", "sphericity"} & items)).sum()
+            sum(bool({"volume", "sphericity"} & items) for items in reason_sets)
         ),
         "failed_intensity": int(
-            reason_sets.map(lambda items: "intensity" in items).sum()
+            sum("intensity" in items for items in reason_sets)
         ),
         "failed_perinuclear": int(
-            reason_sets.map(lambda items: "shell association" in items).sum()
+            sum("shell association" in items for items in reason_sets)
         ),
         "eligible_sampling_planes": int(effective_planes.sum()),
         "first_tissue_z": int(settings["first_tissue_z"]),
@@ -140,7 +142,7 @@ class QuantificationPanel(QWidget):
         root.addWidget(self.status)
 
         self.summary_values = self._section(root, "quantification_summary", "Quantification Summary", (
-            ("total", "Total Cellpose masks"),
+            ("total", "Total segmentation masks"),
             ("retained", "Retained masks"),
             ("excluded", "Excluded masks"),
         ))
@@ -232,7 +234,7 @@ class QuantificationPanel(QWidget):
             state.clear_quantification_result()
             self._clear("Quantification unavailable: a current segmentation is required.")
             return
-        self.summary_values["total"].setText(f"{int(segmentation['object_count']):,}")
+        self.summary_values["total"].setText(f"{int(segmentation.get('edited_object_count', segmentation['object_count'])):,}")
         if filtering is None:
             state.clear_quantification_result()
             self._clear("Quantification pending: calculate scientific measurements.", preserve_total=True)
@@ -264,7 +266,7 @@ class QuantificationPanel(QWidget):
             return
         self._clear("Quantification pending: review the measurements and ROI.")
         if state.segmentation_is_current:
-            self.summary_values["total"].setText(f"{state.segmentation_result['object_count']:,}")
+            self.summary_values["total"].setText(f"{state.segmentation_result.get('edited_object_count', state.segmentation_result['object_count']):,}")
         if state.filtering_is_current:
             retained = len(state.filtering_result["retained_ids"])
             total = len(state.filtering_result["properties"])

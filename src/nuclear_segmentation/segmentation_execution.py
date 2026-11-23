@@ -125,6 +125,7 @@ class SegmentationController(QObject):
         self._worker = None
         self._job = None
         self._result_layer = None
+        self._edited_layer = None
         self._started = None
         self._timer = QTimer(self)
         self._timer.setInterval(250)
@@ -291,8 +292,7 @@ class SegmentationController(QObject):
             and np.shape(result["masks"]) == state.working_dataset.standardized_shape[1:]
         )
         if current or display_outdated:
-            if self._result_layer is not None and self._result_layer in self.viewer.layers:
-                self.viewer.layers.remove(self._result_layer)
+            self.clear_project()
             spacing = tuple(self.project_state.voxel_spacing_zyx_um)
             offset_y, offset_x = self.project_state.working_offset_yx
             self._result_layer = self.viewer.add_labels(
@@ -305,6 +305,15 @@ class SegmentationController(QObject):
                 },
             )
             self._result_layer.editable = False
+            if result.get("edited_masks") is not None and (
+                result.get("edit_history") or not np.array_equal(result["edited_masks"], result["masks"])
+            ):
+                self._edited_layer = self.viewer.add_labels(
+                    result["edited_masks"], name=f"{state.active_session.display_name} · Committed edits",
+                    scale=spacing, translate=self._result_layer.translate,
+                    metadata={**state.mask_layer_metadata(), "nucytoseg_edited_segmentation": True},
+                )
+                self._edited_layer.editable = False
         elif self._result_layer is not None and self._result_layer in self.viewer.layers:
             self._result_layer.name = self._result_layer_name(current)
 
@@ -326,6 +335,9 @@ class SegmentationController(QObject):
             layer.name = self._result_layer_name(state.segmentation_is_current)
 
     def clear_project(self) -> None:
+        if self._edited_layer is not None and self._edited_layer in self.viewer.layers:
+            self.viewer.layers.remove(self._edited_layer)
+        self._edited_layer = None
         if self._result_layer is not None and self._result_layer in self.viewer.layers:
             self.viewer.layers.remove(self._result_layer)
         self._result_layer = None

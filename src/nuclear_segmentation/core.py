@@ -527,6 +527,7 @@ def calculate_mask_properties(
     channel_configuration,
     voxel_spacing,
     background_percentile=50.0,
+    *, allow_empty=False,
 ):
     voxel_volume_um3 = float(np.prod(voxel_spacing))
     rows = []
@@ -602,10 +603,20 @@ def calculate_mask_properties(
 
         rows.append(row)
 
-    if not rows:
+    if rows:
+        table = pd.DataFrame(rows).set_index("label").sort_index()
+    elif allow_empty:
+        columns = ["size_voxels", "volume_um3", "surface_area_um2", "sphericity",
+                   "equivalent_sphere_diameter_um", "z_extent_planes", "z_extent_um"]
+        for axis in "zyx":
+            columns.extend([f"centroid_{axis}_px", f"centroid_{axis}_um", f"min_{axis}", f"max_{axis}"])
+        for item in measured_channels:
+            columns.extend(f"{metric}_{safe_key(item['name'])}" for metric in (
+                "mean_intensity", "median_intensity", "max_intensity", "p95_intensity",
+                "integrated_intensity", "background_corrected_mean"))
+        table = pd.DataFrame(columns=columns, dtype=float)
+    else:
         raise RuntimeError("Cellpose did not produce any masks to measure.")
-
-    table = pd.DataFrame(rows).set_index("label").sort_index()
     table.index = table.index.astype(int)
     table.index.name = "label"
     background_table = pd.DataFrame(
@@ -653,6 +664,7 @@ def calculate_perinuclear_marker_metrics(
     inner_distance_um=0.5,
     outer_distance_um=3.0,
     pixel_threshold=None,
+    *, allow_empty=False,
 ):
     nucleus_masks = np.asarray(nucleus_masks)
     intensity_volume = np.asarray(intensity_volume)
@@ -743,10 +755,13 @@ def calculate_perinuclear_marker_metrics(
             }
         )
 
-    if not rows:
+    if rows:
+        table = pd.DataFrame(rows).set_index("label").sort_index()
+    elif allow_empty:
+        table = pd.DataFrame(columns=[f"{prefix}_ring_{field}" for field in (
+            "voxels", "mean", "median", "p75", "positive_fraction")], dtype=float)
+    else:
         raise RuntimeError("No DAPI masks were available for MAP2 association.")
-
-    table = pd.DataFrame(rows).set_index("label").sort_index()
     table.index = table.index.astype(int)
     table.index.name = "label"
     return table, ring_labels, resolved_threshold, threshold_source

@@ -284,7 +284,7 @@ if _reviewed_export_destination is not None:
     report_path = sample_export_directory / "analysis_report.pdf"
 
     if "tiff" in outputs:
-        calibrated_label_tiff(raw_mask_path, masks, VOXEL_SPACING_UM)
+        calibrated_label_tiff(raw_mask_path, original_cellpose_masks if desktop_export is not None else masks, VOXEL_SPACING_UM)
         calibrated_label_tiff(filtered_mask_path, export_masks, VOXEL_SPACING_UM, require_uint16=True)
         calibrated_label_tiff(
             sample_export_directory / "mntb_roi.tif", mntb_roi.astype(np.uint8), VOXEL_SPACING_UM
