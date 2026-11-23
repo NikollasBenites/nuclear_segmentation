@@ -126,6 +126,7 @@ class SegmentationController(QObject):
         self._job = None
         self._result_layer = None
         self._edited_layer = None
+        self._retained_layer = None
         self._started = None
         self._timer = QTimer(self)
         self._timer.setInterval(250)
@@ -138,6 +139,7 @@ class SegmentationController(QObject):
         panel.run_requested.connect(self.run)
         panel.configuration_changed.connect(self._configuration_changed)
         project_state.segmentation_result_changed.connect(self._sync_result_layer)
+        project_state.filtering_result_changed.connect(self._filtering_changed)
         project_state.sessions_changed.connect(self._refresh_result_layer_name)
 
     @property
@@ -309,11 +311,30 @@ class SegmentationController(QObject):
                 result.get("edit_history") or not np.array_equal(result["edited_masks"], result["masks"])
             ):
                 self._edited_layer = self.viewer.add_labels(
-                    result["edited_masks"], name=f"{state.active_session.display_name} · Committed edits",
+                    result["edited_masks"], name=f"{state.active_session.display_name} · Committed — All",
                     scale=spacing, translate=self._result_layer.translate,
                     metadata={**state.mask_layer_metadata(), "nucytoseg_edited_segmentation": True},
                 )
                 self._edited_layer.editable = False
+                history = result.get("edit_history", ())
+                display = state.active_session.display_state
+                if (current and history and "reviewed_ids" in history[-1]
+                        and display.get("pending_geometry_revision") == history[-1]["result_revision"]):
+                    masks = result["edited_masks"]
+                    ids = history[-1]["reviewed_ids"]
+                    retained = masks
+                    if len(ids) != result["edited_object_count"]:
+                        retained = np.zeros_like(masks)
+                        if ids:
+                            for z, plane in enumerate(masks):
+                                np.copyto(retained[z], plane, where=np.isin(plane, ids))
+                        retained.setflags(write=False)
+                    self._retained_layer = self.viewer.add_labels(
+                        retained, name=f"{state.active_session.display_name} · Committed — Retained (Provisional — Recalculation Required)",
+                        scale=spacing, translate=self._result_layer.translate,
+                        metadata={**state.mask_layer_metadata(), "nucytoseg_retained_segmentation": True},
+                    )
+                    self._retained_layer.editable = False
         elif self._result_layer is not None and self._result_layer in self.viewer.layers:
             self._result_layer.name = self._result_layer_name(current)
 
@@ -334,7 +355,17 @@ class SegmentationController(QObject):
             layer.metadata["session_display_name"] = display_name
             layer.name = self._result_layer_name(state.segmentation_is_current)
 
+    def _filtering_changed(self, result, current):
+        if result is not None and (current or result.get("incompatible_settings")):
+            self._remove_retained()
+
+    def _remove_retained(self):
+        if self._retained_layer is not None and self._retained_layer in self.viewer.layers:
+            self.viewer.layers.remove(self._retained_layer)
+        self._retained_layer = None
+
     def clear_project(self) -> None:
+        self._remove_retained()
         if self._edited_layer is not None and self._edited_layer in self.viewer.layers:
             self.viewer.layers.remove(self._edited_layer)
         self._edited_layer = None
@@ -352,6 +383,7 @@ class SegmentationController(QObject):
         self.clear_project()
         self.panel.run_requested.disconnect(self.run)
         self.panel.configuration_changed.disconnect(self._configuration_changed)
+        self.project_state.filtering_result_changed.disconnect(self._filtering_changed)
         self.project_state.sessions_changed.disconnect(self._refresh_result_layer_name)
         self.project_state.segmentation_result_changed.disconnect(
             self._sync_result_layer

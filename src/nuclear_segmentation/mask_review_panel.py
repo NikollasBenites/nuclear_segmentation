@@ -334,6 +334,7 @@ class MaskReviewPanel(QWidget):
         self._selected_is_raw = self.project_state.owns_mask_layer(layer) and bool(
             metadata.get("nucytoseg_raw_segmentation")
             or metadata.get("nucytoseg_edited_segmentation")
+            or metadata.get("nucytoseg_retained_segmentation")
             or metadata.get("nucytoseg_filtered_segmentation")
         )
         self._selected_identity = (
@@ -400,6 +401,9 @@ class MaskReviewPanel(QWidget):
             return
         table = result["properties"]
         self.measurement_status.setText(f"Measurements available for {len(table):,} {role} objects." + ("" if current else " Results are outdated."))
+        if result.get("incompatible_settings") and not current:
+            names = ", ".join(result["incompatible_settings"])
+            self.measurement_status.setText(f"Review incompatible filter settings for {names} and recalculate.")
         nz = int(result["raw_mask_shape"][0])
         for control in (self.first_tissue_z, self.last_tissue_z):
             control.blockSignals(True); control.setRange(0, nz - 1); control.blockSignals(False)
@@ -448,9 +452,11 @@ class MaskReviewPanel(QWidget):
         for item in intensity_definitions:
             group = QGroupBox(f"{item['name']} (channel {item['index'] + 1})")
             form = QFormLayout(group); enabled = QCheckBox("Enable"); enabled.setChecked(item["name"] in active_names)
-            low = SyncedNumericControl(item["minimum"], item["maximum"], 9)
-            high = SyncedNumericControl(item["minimum"], item["maximum"], 9)
             limits = result_settings.get("intensity_filters", {}).get(item["name"], item)
+            minimum = min(item["minimum"], limits["minimum"])
+            maximum = max(item["maximum"], limits["maximum"])
+            low = SyncedNumericControl(minimum, maximum, 9)
+            high = SyncedNumericControl(minimum, maximum, 9)
             low.setValue(limits["minimum"]); high.setValue(limits["maximum"])
             form.addRow(enabled); form.addRow("Minimum", low); form.addRow("Maximum", high)
             enabled.toggled.connect(self._intensity_channel_changed); low.valueChanged.connect(self._schedule_filters); high.valueChanged.connect(self._schedule_filters)
@@ -497,6 +503,9 @@ class MaskReviewPanel(QWidget):
     def restore_intensity_controls(self, settings):
         for index, values in settings.items():
             _, enabled, low, high, _ = self.intensity_controls[index]
+            for control in (low, high):
+                with QSignalBlocker(control):
+                    control.setRange(min(control.editor.minimum(), values[1]), max(control.editor.maximum(), values[2]))
             for widget, method, value in zip(
                 (enabled, low, high), (enabled.setChecked, low.setValue, high.setValue), values, strict=True
             ):
@@ -681,6 +690,11 @@ class MaskReviewPanel(QWidget):
                 "Rerun segmentation before further scientific review."
             )
         self._refresh_actions()
+        session = self.project_state.active_session
+        if current and session.display_state.get("pending_geometry_revision") == session.geometry_revision:
+            self.measurement_status.setText("Geometry changed. Recalculate measurements and filtering.")
+            if session.filter_controls is not None:
+                self.filter_summary.setText("Previous filter settings are available for recalculation.")
         self.calculate_button.setEnabled(result is not None and current)
         self.accept_roi_button.setEnabled(
             result is not None

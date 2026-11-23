@@ -41,6 +41,7 @@ class GeometryEdit:
         source = self.filter_record["filtered_masks"] if filtered else self.base
         self.preview = np.array(source, dtype=np.promote_types(self.base.dtype, np.uint32),
                                 order="C", copy=True)
+        self.paused = False
         self.operation = "paint/erase"
         self.parameters = {}
 
@@ -49,9 +50,12 @@ class GeometryEdit:
         return (self.filter_record is not None and self.state.filtering_is_current
                 and self.state.filtering_result is self.filter_record)
 
-    def is_pristine(self):
+    def has_changes(self):
         source = self.filter_record["filtered_masks"] if self.filtered else self.base
-        return self.operation == "paint/erase" and np.array_equal(self.preview, source)
+        return any(not np.array_equal(a, b) for a, b in zip(self.preview, source, strict=True))
+
+    def is_pristine(self):
+        return self.operation == "paint/erase" and not self.has_changes()
 
     @property
     def excluded_ids(self):
@@ -76,11 +80,13 @@ class GeometryEdit:
             if np.any(changed & hidden) or np.isin(preview[changed], self.excluded_ids).any():
                 if self.filtered:
                     raise ValueError("Edit touches an excluded object or uses its ID. Undo the stroke or discard and use Edit All Masks.")
-                raise ValueError("This edit changes an excluded object. Commit or discard before switching to filtered masks.")
+                raise ValueError("This edit changes an excluded object. Save or discard before switching to filtered masks.")
 
     def set_filtered(self, filtered):
         if filtered == self.filtered:
             return
+        if self.paused or self.operation != "paint/erase":
+            raise ValueError("Resume ordinary brush editing before changing scope.")
         if not self.filter_current:
             raise ValueError("Current filtering is unavailable.")
         self._validate_scope()
@@ -97,8 +103,8 @@ class GeometryEdit:
             raise ValueError(f"Object {label} is absent from this session.")
 
     def _pristine(self):
-        if not self.is_pristine():
-            raise ValueError("Commit or discard the current preview before starting another operation.")
+        if self.paused or not self.is_pristine():
+            raise ValueError("Save or discard the current preview before starting another operation.")
 
     def remove(self, label):
         self._pristine()
@@ -169,6 +175,22 @@ class GeometryEdit:
                       affected_ids=sorted(set(map(int, np.union1d(before, after))) - {0}),
                       before_signature=mask_signature(self.base), after_signature=mask_signature(edited),
                       indexes=indexes, before=before, after=after)
+        record["editing_scope"] = "filtered" if self.filtered else "all"
+        if self.filtered:
+            # Hidden IDs cannot participate in a validated filtered edit. The surviving
+            # retained IDs plus newly created labels describe its complete visible result.
+            kept = set(map(int, self.filter_record["retained_ids"])).intersection(result_ids)
+            record["reviewed_ids"] = sorted(kept.union(record["new_ids"]))
+        filtering = state.filtering_result
+        if filtering is not None:
+            record["filter_definitions"] = {
+                "intensity": {item["index"]: item["column"] for item in filtering.get("intensity_definitions", ())},
+                "perinuclear": {item["name"]: (item["column"], item["channel_index"], item["ring_inner_um"],
+                                               item["ring_outer_um"], item["configured_pixel_threshold"])
+                                for item in filtering.get("perinuclear_definitions", ())},
+            }
+        elif result.get("edit_history") and "filter_definitions" in result["edit_history"][-1]:
+            record["filter_definitions"] = result["edit_history"][-1]["filter_definitions"]
         if result.get("manual_review") is not None:
             record["previous_manual_review"] = result["manual_review"]
         edited.setflags(write=False)
@@ -177,13 +199,18 @@ class GeometryEdit:
                       edit_base_signature=result.get("edit_base_signature", record["before_signature"]),
                       edited_object_count=len(result_ids),
                       geometry_revision=revision + 1, manual_review=None)
+        if state.filtering_result is not None and "settings" in state.filtering_result:
+            state.active_session.filter_controls = state.filtering_result["settings"]
+        elif state.active_session.display_state.get("pending_geometry_revision") != revision:
+            state.active_session.filter_controls = None
+            state.active_session.intensity_controls = None
         state.clear_filtering_result()
-        state.active_session.intensity_controls = None
-        state.active_session.filter_controls = None
         state.scientific_roi_reviewed = False
         state.scientific_roi_changed.emit(state.scientific_roi, False)
         state.segmentation_result = stored
-        state.active_session.display_state["mode"] = "edited"
+        display = state.active_session.display_state
+        display["pending_geometry_revision"] = revision + 1
+        display["mode"] = "retained" if self.filtered else "edited"
         state.segmentation_result_changed.emit(stored, True)
 
     @classmethod
@@ -233,6 +260,12 @@ def validate_history(result, session):
             raise ValueError("Unknown geometry operation.")
         if datetime.fromisoformat(record["timestamp"]).tzinfo is None:
             raise ValueError("Geometry timestamps require a time zone.")
+        if "reviewed_ids" in record:
+            reviewed = record["reviewed_ids"]
+            if (record.get("editing_scope") != "filtered" or not isinstance(reviewed, list)
+                    or any(type(label) is not int or label <= 0 for label in reviewed)
+                    or reviewed != sorted(set(reviewed)) or not set(reviewed).issubset(np.unique(masks))):
+                raise ValueError("Invalid provisional retained IDs in geometry history.")
         indexes = record["indexes"]
         if (record["session_id"] != session.session_id or record["result_revision"] != revision
                 or record["source_revision"] != revision - 1 or record["after_signature"] != signature

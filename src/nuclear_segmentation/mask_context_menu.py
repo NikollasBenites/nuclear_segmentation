@@ -48,7 +48,7 @@ class MaskContextMenu:
         layer = self.viewer.layers.selection.active
         if layer is not None and self.state.owns_mask_layer(layer) and any(
             layer.metadata.get(key) for key in ("nucytoseg_edit_preview", "nucytoseg_raw_segmentation",
-                                                "nucytoseg_edited_segmentation", "nucytoseg_filtered_segmentation")
+                                                "nucytoseg_retained_segmentation", "nucytoseg_edited_segmentation", "nucytoseg_filtered_segmentation")
         ):
             self.layer = layer
             layer.mouse_drag_callbacks.append(self._gesture)
@@ -63,7 +63,7 @@ class MaskContextMenu:
         layers = self.window.mask_display.layers
         if layer is layers.get("filtered") and not self.state.filtering_is_current:
             return False
-        return any(layer is layers.get(role) for role in ("raw", "edited", "filtered"))
+        return any(layer is layers.get(role) for role in ("raw", "edited", "retained", "filtered"))
 
     def _label_at(self, layer, position, axes, direction):
         if not self._can_pick(layer) or tuple(self.viewer.dims.displayed) != axes:
@@ -122,7 +122,7 @@ class MaskContextMenu:
                 allowed["start"] = "Start Editing"
             return allowed
         allowed = {"properties": "Show Object Properties"}
-        if subpage == "mask_editing" and edit.operation == "paint/erase":
+        if subpage == "mask_editing" and not self.panel.paused and edit.operation == "paint/erase":
             allowed["select"] = "Select Object"
             if edit.is_pristine() and edit.allows_label(hit.label):
                 if self.panel.merge_target.findData(hit.label) < 0:

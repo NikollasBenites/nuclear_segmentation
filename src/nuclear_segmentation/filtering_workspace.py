@@ -185,6 +185,9 @@ class FilteringController(QObject):
             deepcopy(self.panel.filter_settings())
             if self.state.filtering_result is not None else None
         )
+        session = self.state.active_session
+        if session.display_state.get("pending_geometry_revision") == session.geometry_revision:
+            self._pending_filter_settings = deepcopy(session.filter_controls)
         legacy = self.state.legacy_import
         if self._pending_filter_settings is None and legacy and self.state.segmentation_result.get("legacy_imported"):
             self._pending_filter_settings = deepcopy(legacy["settings"])
@@ -238,13 +241,59 @@ class FilteringController(QObject):
                 result["scientific_roi"], self._roi_provenance(result),
                 reviewed=False,
             )
+        session = self.state.active_session
+        reviewing_settings = bool((self.state.filtering_result or {}).get("incompatible_settings"))
+        pending = session.display_state.get("pending_geometry_revision") == session.geometry_revision
+        controls = {}
+        incompatible = []
+        if pending and self._pending_filter_settings is not None:
+            definitions = self.state.segmentation_result["edit_history"][-1].get("filter_definitions", {})
+            columns = {item["index"]: item["column"] for item in result["intensity_definitions"]}
+            for index, values in (session.intensity_controls or {}).items():
+                if index in columns and definitions.get("intensity", {}).get(index) == columns[index]:
+                    controls[index] = values
+                else:
+                    incompatible.append(f"channel {index + 1}")
+            markers = {item["name"]: (item["column"], item["channel_index"], item["ring_inner_um"],
+                                      item["ring_outer_um"], item["configured_pixel_threshold"])
+                       for item in result["perinuclear_definitions"]}
+            for name, item in list(self._pending_filter_settings.get("perinuclear_filters", {}).items()):
+                if name not in markers or definitions.get("perinuclear", {}).get(name) != markers[name]:
+                    incompatible.append(name)
+                    del self._pending_filter_settings["perinuclear_filters"][name]
+            current = {item["name"]: item for item in result["intensity_definitions"]}
+            for name, item in list(self._pending_filter_settings["intensity_filters"].items()):
+                if (name not in current or item["column"] != current[name]["column"]
+                        or definitions.get("intensity", {}).get(current[name]["index"]) != item["column"]):
+                    incompatible.append(name)
+                    del self._pending_filter_settings["intensity_filters"][name]
+                    if name in current:
+                        controls.pop(current[name]["index"], None)
         if self._pending_filter_settings is not None:
             result = self._result_with_settings(
                 result, self._pending_filter_settings, result["scientific_roi"]
             )
         self.state.active_session.roi_grid_compatible = True
-        self.state.set_filtering_result(result); self._create_layers(result)
-        self.panel.configure_filtering(result, True); self.status_changed.emit("Scientific measurements and preliminary filters are ready.")
+        if incompatible:
+            result = dict(result, incompatible_settings=tuple(dict.fromkeys(incompatible)))
+        elif reviewing_settings:
+            session.display_state["mode"] = "filtered"
+        self.state.set_filtering_result(result, current=not incompatible)
+        self._create_layers(result)
+        self.panel.configure_filtering(result, current=not incompatible)
+        if pending:
+            self.panel.restore_intensity_controls(controls)
+            session.filter_controls = result["settings"]
+            session.intensity_controls = self.panel.intensity_control_settings()
+            if not incompatible:
+                self.viewer.layers.selection.active = self.filtered_layer
+        if incompatible:
+            self.filtered_layer.name = "Live filtered masks — outdated"
+            message = "Review incompatible filter settings for " + ", ".join(dict.fromkeys(incompatible)) + " and recalculate."
+            self.panel.measurement_status.setText(message)
+        else:
+            message = "Scientific measurements and preliminary filters are ready."
+        self.status_changed.emit(message)
     def _failed(self, text):
         message = str(text).strip().splitlines()[-1]; self.panel.measurement_status.setText("Measurement failed: " + message); self.status_changed.emit("Measurement failed: " + message)
     def _finished(self):

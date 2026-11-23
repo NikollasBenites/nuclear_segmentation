@@ -661,6 +661,7 @@ class ProjectState(QObject):
         stored["masks"] = masks
         self.clear_filtering_result()
         self.clear_scientific_roi()
+        self.active_session.display_state.pop("pending_geometry_revision", None)
         self.segmentation_result = stored
         self.segmentation_is_current = True
         self.segmentation_result_changed.emit(stored, True)
@@ -694,16 +695,19 @@ class ProjectState(QObject):
         if emit:
             self.segmentation_result_changed.emit(None, False)
 
-    def set_filtering_result(self, result: dict[str, Any]) -> None:
+    def set_filtering_result(self, result: dict[str, Any], *, current: bool = True) -> None:
         self.clear_quantification_result()
         stored = dict(result)
         filtered = np.asarray(stored["filtered_masks"])
         filtered.setflags(write=False)
         stored["filtered_masks"] = filtered
         self.active_session.measurement_revision += 1
+        display = self.active_session.display_state
+        if display.pop("pending_geometry_revision", None) is not None:
+            display["mode"] = "filtered" if current else "edited"
         self.filtering_result = stored
-        self.filtering_is_current = True
-        self.filtering_result_changed.emit(stored, True)
+        self.filtering_is_current = current
+        self.filtering_result_changed.emit(stored, current)
 
     def invalidate_filtering(self) -> None:
         self.active_session.measurement_revision += 1
@@ -765,6 +769,9 @@ class ProjectState(QObject):
             scientific_roi=np.array(mask, dtype=bool, copy=True),
             roi_reviewed=bool(reviewed),
         )
+        display = self.active_session.display_state
+        if display.pop("pending_geometry_revision", None) is not None:
+            display["mode"] = "filtered"
         self.filtering_result = stored
         self.filtering_result_changed.emit(stored, self.filtering_is_current)
 

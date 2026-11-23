@@ -589,7 +589,7 @@ class DesktopWindow(QMainWindow):
 
     def _project_idle(self):
         if self.geometry_panel.busy:
-            self.statusBar().showMessage("Commit or discard the active mask preview first.", 5000)
+            self.statusBar().showMessage("Save or discard the active mask preview first.", 5000)
             return False
         if self._import_thread is not None or any(controller.busy for controller in (
             self.crop_workspace, self.normalization, self.z_correction, self.image_preparation,
@@ -1387,7 +1387,7 @@ class DesktopWindow(QMainWindow):
         self.selected_mask_panel.set_selection(layer, mask_id)
         if layer is None or layer not in (
             self.segmentation.result_layer, self.filtering.filtered_layer,
-            self.mask_display.layers.get("edited"), self.geometry_panel.layer,
+            self.mask_display.layers.get("edited"), self.mask_display.layers.get("retained"), self.geometry_panel.layer,
         ):
             layer = mask_id = None
         self.context_panel.mask_review_page.set_selection(layer, mask_id)
@@ -1638,6 +1638,7 @@ class DesktopWindow(QMainWindow):
             self._finish_loading_dialog()
             self.save_layout()
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
+            self.geometry_panel.dispose()
             self.mask_context_menu.dispose()
             self.mask_display.dispose()
             self.mask_selection.dispose()

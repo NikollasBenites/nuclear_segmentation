@@ -73,18 +73,30 @@ class ViewerToolbar(QWidget):
         layer = self.active_layer()
         if self._is_labels(layer):
             self._observed_layer = layer
+            layer.events.mode.connect(self._sync_layer_mode)
             layer.events.visible.connect(self._refresh_tools)
             layer.events.editable.connect(self._refresh_tools)
         self._refresh_tools()
+        self._sync_layer_mode()
         self.status_changed.emit(
             f"Active layer: {layer.name}" if layer is not None else "No active layer"
         )
 
     def _disconnect_observed_layer(self):
         if self._observed_layer is not None:
+            self._observed_layer.events.mode.disconnect(self._sync_layer_mode)
             self._observed_layer.events.visible.disconnect(self._refresh_tools)
             self._observed_layer.events.editable.disconnect(self._refresh_tools)
             self._observed_layer = None
+
+    def _sync_layer_mode(self, event=None):
+        layer = self._observed_layer
+        mode = str(layer.mode) if layer is not None else "pan_zoom"
+        if mode == "pan_zoom" and self.buttons["review"].isChecked():
+            return
+        if mode in ("paint", "erase", "pan_zoom", "pick") and not self.buttons[mode].isChecked():
+            self.buttons[mode].setChecked(True)
+            self.tool_changed.emit(mode)
 
     def _refresh_tools(self, event=None):
         layer = self.active_layer()
@@ -120,7 +132,11 @@ class ViewerToolbar(QWidget):
             self.status_changed.emit("Choose a visible, editable Labels layer.")
             return False
         try:
-            layer.mode = requested
+            if layer is self._observed_layer:
+                with layer.events.mode.blocker(self._sync_layer_mode):
+                    layer.mode = requested
+            else:
+                layer.mode = requested
         except (AttributeError, ValueError) as exc:
             self.status_changed.emit(f"Viewer tool unavailable: {exc}")
             return False

@@ -486,12 +486,18 @@ def test_filtered_commit_resumes_with_excluded_geometry_and_undo(project, tmp_pa
     edit = GeometryEdit(state, filtered=True)
     edit.remove(child)
     edit.commit()
+    retained = window.mask_display.layers["retained"]
+    assert retained.visible and not retained.data.any()
+    retained.opacity = .39
     folder = tmp_path / "filtered-edit"
     save(window, app, folder)
     open_saved(window, app, folder)
     assert not warnings
     np.testing.assert_array_equal(state.segmentation_result["masks"], raw)
     np.testing.assert_array_equal(effective_masks(state.segmentation_result), np.where(before == child, 0, before))
+    retained = window.mask_display.layers["retained"]
+    assert retained.visible and not retained.data.any() and retained.opacity == pytest.approx(.39)
+    assert state.active_session.filter_controls == record["settings"]
     assert state.segmentation_result["edit_history"][-1]["removed_ids"] == [child]
     GeometryEdit.undo(state)
     np.testing.assert_array_equal(effective_masks(state.segmentation_result), before)
@@ -518,3 +524,219 @@ def test_empty_and_outdated_filtering_never_removes_objects(retained_second_mask
     assert not panel.edit.filtered and panel.selected_id is None
     np.testing.assert_array_equal(panel.layer.data, raw)
     panel.discard()
+
+
+def test_editing_controls_brush_planes_and_paused_split(review_window, tmp_path):
+    window, raw = review_window
+    panel = window.geometry_panel
+    state = window.project_state
+    toolbar = window.viewer_toolbar
+    assert panel.transaction_controls.isHidden() and not panel.buttons["start"].isHidden()
+    assert panel.buttons["undo"].isHidden()
+    panel.set_expanded(False)
+    panel.start()
+    preview = panel.layer
+    assert panel.expanded and not panel.transaction_controls.isHidden()
+    assert panel.brush_size.value() == preview.brush_size == 3
+    assert "1.50 × 1.50 µm (nominal XY)" in panel.brush_readout.text()
+    _click_mask(preview, (0, 1, 1))
+    panel.buttons["paint"].click()
+    assert toolbar.buttons["paint"].isChecked() and str(preview.mode) == "paint"
+    toolbar.activate_tool("erase")
+    assert panel.buttons["erase"].isChecked()
+    panel.brush_slider.setValue(1)
+    assert panel.brush_size.value() == preview.brush_size == 1
+    preview.brush_size = 52
+    assert panel.brush_size.value() == panel.brush_slider.value() == 52
+    panel.brush_size.setValue(3)
+    for order, plane in [((1, 0, 2), "XZ"), ((2, 0, 1), "YZ")]:
+        panel.viewer.dims.order = order
+        assert f"1.50 × 6.00 µm (nominal {plane})" in panel.brush_readout.text()
+        before_stroke = preview.data.copy()
+        preview.paint((2, 4, 4), 1)
+        changed = np.nonzero(preview.data != before_stroke)
+        assert changed[0].size and set(changed[order[0]]) == {4}
+        preview.undo()
+    panel.viewer.dims.order = (0, 1, 2)
+    calibration = state.calibration_source
+    state.calibration_source = None
+    preview.brush_size = 1
+    assert "physical size unknown" in panel.brush_readout.text()
+    state.calibration_source = calibration
+    panel.buttons["review"].click()
+    assert panel.selected_id == panel.brush_id == 1
+    panel.split()
+    child = panel.brush_id
+    preview.paint((0, 1, 1), child)
+    expected = preview.data.copy()
+    owner = state.session_revision()
+    panel.buttons["toggle_pause"].click()
+    assert panel.paused and not preview.editable and "Paused" in panel.status.text()
+    preview.brush_size = 9
+    assert preview.brush_size == 1
+    with pytest.raises(ValueError):
+        panel.edit.set_filtered(True)
+    assert not panel.buttons["split"].isEnabled() and not toolbar.activate_tool("erase")
+    assert not window.save_project(tmp_path / "busy")
+    assert not window.close_project(confirm=False) and not window.filtering.calculate()
+    panel.set_expanded(False)
+    panel.viewer.layers.selection.active = window.segmentation.result_layer
+    panel.toggle_pause()
+    assert not panel.paused and panel.layer is preview and preview.editable
+    assert panel.selected_id == 1 and panel.brush_id == child == preview.selected_label
+    assert panel.brush_size.value() == 1 and toolbar.buttons["review"].isChecked()
+    assert state.session_revision() == owner
+    np.testing.assert_array_equal(preview.data, expected)
+    panel.commit()
+    assert panel.transaction_controls.isHidden() and not panel.buttons["undo"].isHidden()
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), expected)
+
+
+@pytest.mark.parametrize("choice", ["Cancel", "Discard Changes", "Save Changes"])
+def test_stop_dialog_from_pause(review_window, choice):
+    from qtpy.QtCore import QTimer
+    from qtpy.QtWidgets import QApplication
+
+    window, raw = review_window
+    state = window.project_state
+    panel = window.geometry_panel
+    initial = state.session_revision()
+    panel.start()
+    panel.stop()
+    assert not panel.busy and state.session_revision() == initial
+    panel.start()
+    preview = panel.layer
+    preview.data[0, 0, 0] = 2
+    panel.toggle_pause()
+
+    def respond():
+        dialog = QApplication.activeModalWidget()
+        assert dialog.windowTitle() == "Stop Editing?"
+        next(button for button in dialog.buttons() if button.text().replace("&", "") == choice).click()
+
+    QTimer.singleShot(0, respond)
+    panel.buttons["stop"].click()
+    if choice == "Cancel":
+        assert panel.paused and panel.layer is preview and preview.data[0, 0, 0] == 2
+        panel.discard()
+    assert not panel.busy
+    assert state.active_session.geometry_revision == initial.geometry_revision + (choice == "Save Changes")
+    assert effective_masks(state.segmentation_result)[0, 0, 0] == (2 if choice == "Save Changes" else 0)
+    assert raw[0, 0, 0] == 0
+
+
+def test_filtered_save_split_recalculate_same_thresholds(retained_second_mask, qapp):
+    from test_desktop_normalization import _wait
+
+    window, raw, _ = retained_second_mask
+    state = window.project_state
+    panel = window.geometry_panel
+    settings = state.filtering_result["settings"]
+    panel.start()
+    _click_mask(panel.layer, (0, 5, 6))
+    panel.split()
+    child = panel.brush_id
+    panel.layer.paint((0, 5, 6), child)
+    expected = panel.edit.preview.copy()
+    panel.commit()
+    retained = window.mask_display.layers["retained"]
+    complete = window.mask_display.layers["edited"]
+    assert retained.visible and not complete.visible and not retained.editable
+    assert "Provisional — Recalculation Required" in retained.name
+    assert window.mask_selection.selected_layer is retained and window.mask_selection.selected_mask_id == 2
+    np.testing.assert_array_equal(retained.data, expected)
+    assert complete.data[0, 1, 1] == 1 and complete.data[0, 5, 6] == child
+    assert raw[0, 5, 6] == 2 and state.filtering_result is None
+    assert state.active_session.filter_controls == settings
+    assert state.segmentation_result["edit_history"][-1]["reviewed_ids"] == [2, child]
+    assert window.filtering.calculate()
+    _wait(qapp, lambda: not window.filtering.busy)
+    assert state.filtering_is_current and state.filtering_result["settings"] == settings
+    assert retained not in panel.viewer.layers and window.filtering.filtered_layer.visible
+    assert window.mask_display.preferences["mode"] == "filtered"
+    assert set(state.filtering_result["properties"].index) == {1, 2, child}
+
+
+def test_filtered_merge_retains_target_and_isolates_sessions(retained_second_mask):
+    window, raw, _ = retained_second_mask
+    state = window.project_state
+    # Retain IDs 1 and 2 while excluding a third label on the same grid.
+    masks = raw.copy()
+    masks[:, 0, 0] = 83
+    result = dict(state.segmentation_result, masks=masks, object_count=3)
+    filters = dict(state.filtering_result, retained_ids=(1, 2), retained_count=2,
+                   filtered_masks=raw.copy())
+    state.set_segmentation_result(result)
+    window.filtering._calculated(filters)
+    panel = window.geometry_panel
+    panel.start()
+    for pos in ((0, 1, 1), (0, 5, 6)):
+        _click_mask(panel.layer, pos)
+        panel.add_merge()
+    panel.merge_target.setCurrentIndex(panel.merge_target.findData(2))
+    panel.merge()
+    panel.toggle_pause()
+    panel.toggle_pause()
+    panel.commit()
+    retained = window.mask_display.layers["retained"]
+    np.testing.assert_array_equal(retained.data, np.where(raw, 2, 0))
+    assert state.segmentation_result["edit_history"][-1]["reviewed_ids"] == [2]
+    assert (effective_masks(state.segmentation_result)[:, 0, 0] == 83).all()
+    retained.opacity = .42
+    other = state.create_session("Second channel", scientific_role="cytoplasmic", channel_index=0)
+    state.select_session(other.session_id)
+    state.set_segmentation_result(result)
+    assert retained not in panel.viewer.layers and "retained" not in window.mask_display.layers
+    panel.start()
+    _click_mask(panel.layer, (0, 5, 6))
+    panel.remove()
+    panel.commit()
+    assert window.mask_display.layers["edited"].visible and "retained" not in window.mask_display.layers
+    state.select_session("nuclear")
+    restored = window.mask_display.layers["retained"]
+    assert restored.visible and restored.opacity == pytest.approx(.42)
+    np.testing.assert_array_equal(restored.data, np.where(raw, 2, 0))
+    panel.undo()
+    assert "retained" not in window.mask_display.layers
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), masks)
+
+
+def test_changed_filter_definition_requires_review(retained_second_mask, qapp):
+    from test_desktop_normalization import _wait
+
+    window, raw, _ = retained_second_mask
+    state = window.project_state
+    panel = window.geometry_panel
+    panel.start()
+    panel.edit.preview[0, 0, 0] = 2
+    panel.commit()
+    channel = next(iter(state.active_session.filter_controls["intensity_filters"]))
+    # Simulate a saved threshold defined on a different intensity measurement.
+    state.active_session.filter_controls["intensity_filters"][channel]["column"] = "previous_measurement"
+    assert window.filtering.calculate()
+    _wait(qapp, lambda: not window.filtering.busy)
+    review = window.context_panel.mask_review_page
+    assert not state.filtering_is_current and state.quantification_result is None
+    assert channel in review.measurement_status.text() and "incompatible" in review.measurement_status.text()
+
+
+def test_thresholds_survive_narrower_measured_range(retained_second_mask, qapp):
+    from test_desktop_normalization import _wait
+
+    window, _, _ = retained_second_mask
+    state = window.project_state
+    review = window.context_panel.mask_review_page
+    settings = review.filter_settings()
+    controls = review.intensity_control_settings()
+    panel = window.geometry_panel
+    panel.start()
+    _click_mask(panel.layer, (0, 5, 6))
+    panel.remove()
+    panel.commit()
+    assert not window.mask_display.layers["retained"].data.any()
+    assert window.filtering.calculate()
+    _wait(qapp, lambda: not window.filtering.busy)
+    assert state.filtering_is_current and state.filtering_result["retained_count"] == 0
+    assert state.filtering_result["intensity_definitions"][0]["maximum"] < controls[0][2]
+    assert review.filter_settings() == settings
+    assert review.intensity_control_settings() == controls
