@@ -123,7 +123,7 @@ class MaskSelectionController(QObject):
         value = layer.get_value(
             event.position,
             view_direction=event.view_direction,
-            dims_displayed=event.dims_displayed,
+            dims_displayed=list(event.dims_displayed),
             world=True,
         )
         self.select_mask(layer, self._normalize_value(value))
@@ -250,6 +250,7 @@ class MaskSelectionController(QObject):
                 affine=affine,
                 metadata={INTERNAL_HIGHLIGHT_KEY: True},
             )
+            overlay.editable = False
             overlay.contour = 2 if self.viewer.dims.ndisplay == 2 else 0
             self._highlight_layer = overlay
             if active in self.viewer.layers:

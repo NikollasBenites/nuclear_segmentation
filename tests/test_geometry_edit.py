@@ -16,6 +16,7 @@ def test_preview_discard_worker_conflicts_and_2d_3d(review_window, tmp_path):
     assert "analysis_mode" not in window.context_panel.project_page.sections
     panel.start()
     assert not window.segmentation.result_layer.editable
+    window.mask_selection.select_mask(panel.layer, 2)
     panel.layer.brush_size = 1
     panel.layer.paint((0, 4, 4), 2)
     panel.layer.paint((0, 1, 1), 0)
@@ -176,9 +177,9 @@ def test_rendered_geometry_preview(qapp, tmp_path):
         window.navigation.set_subpage("mask_editing", emit=True)
         panel.buttons["start"].click()
         assert panel.busy
-        panel.label.setValue(90000)
+        _click_mask(panel.layer, (0, 1, 1))
         panel.split()
-        panel.layer.paint((0, 1, 1), panel.label.value())
+        panel.layer.paint((0, 1, 1), panel.brush_id)
         window.viewer_toolbar.set_ndisplay(3)
         qapp.processEvents()
         assert not panel.layer.editable
@@ -254,3 +255,127 @@ def test_pre_proofreading_checkpoint_with_edited_geometry(project, tmp_path):
     assert effective_masks(state.segmentation_result)[0, 1, 1] == 17
     assert state.segmentation_result["edited_object_count"] == 2
     assert "original_manual_review" in state.segmentation_result
+
+
+def _click_mask(layer, data_position, *, volume=False):
+    from types import SimpleNamespace
+    from napari.utils.interactions import mouse_press_callbacks
+    event = SimpleNamespace(position=layer.data_to_world(data_position), type="mouse_press",
+                            view_direction=(1, 0, 0) if volume else None,
+                            dims_displayed=(0, 1, 2) if volume else (1, 2))
+    mouse_press_callbacks(layer, event)
+
+
+def test_interactive_selection_layers_and_split(review_window):
+    window, raw = review_window
+    panel = window.geometry_panel
+    viewer = window.embedding.viewer
+    image = viewer.add_image(np.zeros_like(raw), name="Reference channel")
+    template = viewer.add_labels(raw.copy(), name="Other editable labels")
+    panel.start()
+    preview = panel.layer
+    callback = window.mask_selection._on_mouse_press
+    assert callback in preview.mouse_drag_callbacks
+    assert panel.selected_id is None and panel.brush_id is None
+    assert not window.viewer_toolbar.activate_tool("paint")
+    _click_mask(preview, (0, 1, 1))
+    assert panel.selected_object.text() == panel.brush_label.text() == "1"
+    assert window.context_panel.mask_review_page.mask_id.text().endswith("ID: 1")
+    _click_mask(preview, (0, 0, 0))
+    assert panel.selected_object.text() == "None" and panel.brush_label.text() == ""
+    assert not preview.editable
+    _click_mask(preview, (0, 5, 6))
+    assert panel.selected_id == panel.brush_id == preview.selected_label == 2
+    assert window.viewer_toolbar.activate_tool("paint")
+    assert window.viewer_toolbar.activate_tool("review")
+    assert panel.selected_id == panel.brush_id == 2
+    window.layers_section.header.click()
+    expanded = window.layers_section.expanded
+    window.layers_section.header.click()
+    assert window.layers_section.expanded != expanded
+    tree = window.layer_panel
+    tree.tree.setCurrentIndex(tree.model.item_for_layer(image).index())
+    window.image_display_panel.opacity.setValue(.36)
+    assert image.opacity == .36
+    comparison = window.segmentation.result_layer
+    tree.model.toggle_visibility(comparison)
+    tree.tree.setCurrentIndex(tree.model.item_for_layer(comparison).index())
+    window.image_display_panel.opacity.setValue(.29)
+    assert window.mask_display.preferences["raw"]["opacity"] == .29
+    tree.tree.setCurrentIndex(tree.model.item_for_layer(template).index())
+    assert viewer.layers.selection.active is template
+    assert not template.editable and not window.viewer_toolbar.activate_tool("erase")
+    window.image_display_panel.opacity.setValue(.43)
+    assert template.opacity == .43
+    tree.model.toggle_visibility(preview)
+    assert not preview.visible
+    panel.buttons["return_preview"].click()
+    assert preview.visible and viewer.layers.selection.active is preview
+    assert panel.selected_id == 2
+    window.viewer_toolbar.set_ndisplay(3)
+    assert not window.viewer_toolbar.activate_tool("paint")
+    _click_mask(preview, (-1, 1, 1), volume=True)
+    assert panel.selected_id == 1
+    panel.buttons["split"].click()
+    child = panel.edit.parameters["new_id"]
+    assert panel.selected_id == 1 and panel.brush_id == preview.selected_label == child
+    assert viewer.dims.ndisplay == 2 and str(preview.mode) == "paint"
+    preview.selected_label = 0
+    assert preview.selected_label == child
+    preview.paint((0, 1, 1), child)
+    panel.buttons["commit"].click()
+    assert template.editable and callback not in preview.mouse_drag_callbacks
+    assert effective_masks(window.project_state.segmentation_result)[0, 1, 1] == child
+    assert raw[0, 1, 1] == 1
+
+
+def test_click_merge_nonconsecutive_targets_and_undo(review_window):
+    window, original = review_window
+    raw = original.copy()
+    raw[raw == 2] = 97
+    state = window.project_state
+    state.set_segmentation_result(dict(state.segmentation_result, masks=raw, maximum_label_id=97))
+    panel = window.geometry_panel
+    panel.start()
+    for position in ((0, 1, 1), (0, 5, 6), (0, 5, 6)):
+        _click_mask(panel.layer, position)
+        panel.buttons["add_merge"].click()
+    assert [panel.merge_list.item(i).text() for i in range(panel.merge_list.count())] == ["1", "97"]
+    assert not panel.buttons["merge"].isEnabled()
+    panel.merge_target.setCurrentIndex(1)
+    panel.buttons["remove_merge"].click()
+    assert panel.merge_target.currentIndex() == -1 and panel.merge_list.count() == 1
+    panel.buttons["clear_merge"].click()
+    assert panel.merge_list.count() == 0
+    for position in ((0, 5, 6), (0, 1, 1)):
+        _click_mask(panel.layer, position)
+        panel.buttons["add_merge"].click()
+    panel.merge_target.setCurrentIndex(panel.merge_target.findData(97))
+    panel.buttons["merge"].click()
+    assert np.array_equal(panel.layer.data, np.where(raw, 97, 0))
+    panel.commit()
+    panel.undo()
+    assert np.array_equal(effective_masks(state.segmentation_result), raw)
+
+
+@pytest.mark.parametrize("change", ["remove", "replace", "session"])
+def test_invalid_preview_can_only_be_discarded(review_window, change):
+    window, raw = review_window
+    panel = window.geometry_panel
+    state = window.project_state
+    panel.start()
+    layer = panel.layer
+    _click_mask(layer, (0, 1, 1))
+    if change == "remove":
+        panel.viewer.layers.remove(layer)
+    elif change == "replace":
+        layer.data = raw.copy()
+    else:
+        other = state.create_session("Other", scientific_role="cytoplasmic", channel_index=0)
+        state.select_session(other.session_id)
+    with pytest.raises(ValueError):
+        panel.commit()
+    assert not layer.editable and not panel.buttons["commit"].isEnabled()
+    panel.discard()
+    assert window.mask_selection._on_mouse_press not in layer.mouse_drag_callbacks
+    assert raw[0, 1, 1] == 1

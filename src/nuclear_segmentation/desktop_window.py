@@ -235,7 +235,6 @@ class DesktopWindow(QMainWindow):
             self.normalization.prepare_display_change
         )
         self.mask_selection.status_changed.connect(self.statusBar().showMessage)
-        self.mask_selection.selection_changed.connect(self._mask_selection_changed)
         review_panel = self.context_panel.mask_review_page
         self.mask_display = SessionMaskDisplay(self.embedding.viewer, self.project_state, self.mask_selection, self)
         self.mask_display.status.connect(review_panel.set_visualization_status)
@@ -263,6 +262,7 @@ class DesktopWindow(QMainWindow):
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
         self.geometry_panel = GeometryPanel(self, review_panel)
+        self.mask_selection.selection_changed.connect(self._mask_selection_changed)
         self.segmentation.conflict_operations += (self.geometry_panel,)
         self.filtering.conflict_operations += (self.geometry_panel,)
         self._connect_project_actions()
@@ -1383,7 +1383,10 @@ class DesktopWindow(QMainWindow):
 
     def _mask_selection_changed(self, layer, mask_id) -> None:
         self.selected_mask_panel.set_selection(layer, mask_id)
-        if layer is None or layer not in (self.segmentation.result_layer, self.filtering.filtered_layer, self.mask_display.layers.get("edited")):
+        if layer is None or layer not in (
+            self.segmentation.result_layer, self.filtering.filtered_layer,
+            self.mask_display.layers.get("edited"), self.geometry_panel.layer,
+        ):
             layer = mask_id = None
         self.context_panel.mask_review_page.set_selection(layer, mask_id)
 

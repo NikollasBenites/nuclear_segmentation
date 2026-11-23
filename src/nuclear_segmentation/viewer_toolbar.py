@@ -57,6 +57,7 @@ class ViewerToolbar(QWidget):
             self.buttons[key] = button
             layout.addWidget(button)
         layout.addStretch(1)
+        self._observed_layer = None
         viewer.layers.selection.events.active.connect(self._active_layer_changed)
         self.buttons["pan_zoom"].setChecked(True)
         self._active_layer_changed()
@@ -68,13 +69,30 @@ class ViewerToolbar(QWidget):
         return layer is not None and type(layer).__name__.lower() == "labels"
 
     def _active_layer_changed(self, event=None) -> None:
-        editable = self._is_labels(self.active_layer())
-        for key in ("review", "paint", "erase", "pick"):
-            self.buttons[key].setEnabled(editable)
+        self._disconnect_observed_layer()
         layer = self.active_layer()
+        if self._is_labels(layer):
+            self._observed_layer = layer
+            layer.events.visible.connect(self._refresh_tools)
+            layer.events.editable.connect(self._refresh_tools)
+        self._refresh_tools()
         self.status_changed.emit(
             f"Active layer: {layer.name}" if layer is not None else "No active layer"
         )
+
+    def _disconnect_observed_layer(self):
+        if self._observed_layer is not None:
+            self._observed_layer.events.visible.disconnect(self._refresh_tools)
+            self._observed_layer.events.editable.disconnect(self._refresh_tools)
+            self._observed_layer = None
+
+    def _refresh_tools(self, event=None):
+        layer = self.active_layer()
+        labels = self._is_labels(layer)
+        for key in ("review", "pick"):
+            self.buttons[key].setEnabled(labels)
+        for key in ("paint", "erase"):
+            self.buttons[key].setEnabled(labels and layer.editable and layer.visible)
 
     def set_ndisplay(self, dimensions: int) -> bool:
         if dimensions not in (2, 3):
@@ -98,6 +116,9 @@ class ViewerToolbar(QWidget):
         if layer is None:
             self.status_changed.emit("Select a layer before choosing a viewer tool")
             return False
+        if mode in {"paint", "erase"} and (not layer.editable or not layer.visible):
+            self.status_changed.emit("Choose a visible, editable Labels layer.")
+            return False
         try:
             layer.mode = requested
         except (AttributeError, ValueError) as exc:
@@ -109,4 +130,5 @@ class ViewerToolbar(QWidget):
         return True
 
     def dispose(self) -> None:
+        self._disconnect_observed_layer()
         self.viewer.layers.selection.events.active.disconnect(self._active_layer_changed)

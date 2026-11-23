@@ -56,7 +56,7 @@ class SessionMaskDisplay(QObject):
 
     def _appearance_changed(self, event):
         layer = event.source
-        if self.suspended or self._syncing or not self.state.owns_mask_layer(layer):
+        if self._syncing or not self.state.owns_mask_layer(layer) or (self.suspended and event.type == "visible"):
             return
         role = next(key for key, value in self.layers.items() if value is layer)
         settings = self.preferences.setdefault(role, {})
@@ -159,6 +159,8 @@ class SessionMaskDisplay(QObject):
         self.status.emit(message)
 
     def show(self, mode):
+        if self.suspended:
+            return
         if mode == "filtered" and (not self.state.filtering_is_current or "filtered" not in self.layers):
             self.status.emit(f"Calculate current filtering results to show retained masks. Current display: {self._mode()}.")
             return
@@ -185,7 +187,7 @@ class SessionMaskDisplay(QObject):
             self.show("raw" if role == "filtered" and not self.state.filtering_is_current else role)
 
     def selection_changed(self, layer, label):
-        if (label is not None and self._mode() == "selected"
+        if (not self.suspended and label is not None and self._mode() == "selected"
                 and self.layers.get(self.preferences["selected_layer"]) is layer
                 and self.state.owns_mask_layer(layer) and layer.show_selected_label
                 and label != self.preferences["selected_id"]):
