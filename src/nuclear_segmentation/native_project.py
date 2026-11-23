@@ -315,7 +315,7 @@ def _validate_normalization_controls(normalization, indexes):
 
 
 def _validate_display_state(display, indexes):
-    if not isinstance(display, dict) or display.get("mode", "raw") not in ("raw", "edited", "retained", "filtered", "selected", "custom"):
+    if not isinstance(display, dict) or display.get("mode", "raw") not in ("raw", "edited", "retained", "before", "filtered", "selected", "custom"):
         raise ValueError("Invalid session display mode.")
     channels = display.get("channels", {})
     if not isinstance(channels, dict) or any(
@@ -323,7 +323,7 @@ def _validate_display_state(display, indexes):
         for index, visible in channels.items()
     ):
         raise ValueError("Invalid session channel visibility.")
-    for role in ("raw", "edited", "retained", "filtered", "roi"):
+    for role in ("raw", "edited", "retained", "before", "filtered", "roi"):
         settings = display.get(role, {})
         if not isinstance(settings, dict) or type(settings.get("visible", True)) is not bool:
             raise ValueError("Invalid session layer visibility.")

@@ -11,6 +11,7 @@ class SessionMaskDisplay(QObject):
     status = Signal(str)
 
     _keys = {
+        "before": "nucytoseg_before_editing",
         "retained": "nucytoseg_retained_segmentation",
         "edited": "nucytoseg_edited_segmentation",
         "raw": "nucytoseg_raw_segmentation",
@@ -65,7 +66,7 @@ class SessionMaskDisplay(QObject):
         if event.type == "visible" and role != "roi":
             selected_target = self._mode() == "selected" and role == self.preferences["selected_layer"]
             if not selected_target:
-                for key in ("raw", "edited", "retained", "filtered"):
+                for key in ("raw", "edited", "retained", "before", "filtered"):
                     other = self.layers.get(key)
                     if other is not None:
                         self.preferences.setdefault(key, {})["visible"] = other.visible
@@ -129,8 +130,9 @@ class SessionMaskDisplay(QObject):
                 self.selection.clear_selection(filtered)
         if self._mode() == "edited" and "edited" not in self.layers:
             self.preferences["mode"] = "raw"
-        if self._mode() == "retained" and "retained" not in self.layers:
-            self.preferences["mode"] = "edited" if "edited" in self.layers else "raw"
+        if self._mode() in ("before", "retained") and self._mode() not in self.layers:
+            if "pending_geometry_revision" not in self.preferences:
+                self.preferences["mode"] = "filtered" if self.state.filtering_is_current else "raw"
         if self._mode() == "filtered" and not self.state.filtering_is_current:
             self.preferences["mode"] = "raw"
         for role, layer in self.layers.items():
@@ -157,10 +159,14 @@ class SessionMaskDisplay(QObject):
             visibility = "" if layer is not None and layer.visible else " · hidden"
             message = f"Selected only: Mask ID {self.preferences['selected_id']} ({role}){visibility}."
         elif mode == "custom":
-            visible = [key for key in ("raw", "edited", "retained", "filtered") if key in self.layers and self.layers[key].visible]
+            names = {"edited": "complete geometry (diagnostic)", "before": "filtered before editing (outdated)",
+                     "retained": "committed retained (provisional)"}
+            visible = [names.get(role, role) for role in ("raw", "edited", "retained", "before", "filtered")
+                       if role in self.layers and self.layers[role].visible]
             message = "Visible masks: " + (" and ".join(visible) if visible else "none") + "."
         else:
-            message = {"raw": "Showing all raw segmentation masks.", "edited": "Showing committed edited masks.",
+            message = {"raw": "Showing all raw segmentation masks.", "edited": "Showing complete committed geometry (diagnostic).",
+                       "before": "Filtered — Before Editing (Outdated)",
                        "retained": "Committed — Retained · Provisional — Recalculation Required",
                        "filtered": "Showing all retained masks."}[mode]
         self.status.emit(message)
@@ -180,11 +186,11 @@ class SessionMaskDisplay(QObject):
                 return
             self.preferences.update(selected_layer=role, selected_id=int(label),
                                     geometry_revision=self.state.active_session.geometry_revision)
-        for key in ("raw", "edited", "retained", "filtered"):
+        for key in ("raw", "edited", "retained", "before", "filtered"):
             self.preferences.get(key, {}).pop("visible", None)
         self.preferences["mode"] = mode
         self.sync()
-        if mode in ("raw", "edited", "retained", "filtered") and mode in self.layers:
+        if mode in ("raw", "edited", "retained", "before", "filtered") and mode in self.layers:
             self.viewer.layers.selection.active = self.layers[mode]
         self.changed.emit()
 

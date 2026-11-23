@@ -177,10 +177,12 @@ class GeometryEdit:
                       indexes=indexes, before=before, after=after)
         record["editing_scope"] = "filtered" if self.filtered else "all"
         if self.filtered:
-            # Hidden IDs cannot participate in a validated filtered edit. The surviving
-            # retained IDs plus newly created labels describe its complete visible result.
-            kept = set(map(int, self.filter_record["retained_ids"])).intersection(result_ids)
-            record["reviewed_ids"] = sorted(kept.union(record["new_ids"]))
+            # Record the accepted visible labels before hidden geometry is restored
+            # into the authoritative result. This includes split children and merge targets.
+            visible_ids = set()
+            for plane in self.preview:
+                visible_ids.update(map(int, np.unique(plane)))
+            record["reviewed_ids"] = sorted(visible_ids - {0})
         filtering = state.filtering_result
         if filtering is not None:
             record["filter_definitions"] = {

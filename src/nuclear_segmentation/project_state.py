@@ -703,8 +703,8 @@ class ProjectState(QObject):
         stored["filtered_masks"] = filtered
         self.active_session.measurement_revision += 1
         display = self.active_session.display_state
-        if display.pop("pending_geometry_revision", None) is not None:
-            display["mode"] = "filtered" if current else "edited"
+        if current and display.pop("pending_geometry_revision", None) is not None:
+            display["mode"] = "filtered"
         self.filtering_result = stored
         self.filtering_is_current = current
         self.filtering_result_changed.emit(stored, current)
@@ -769,9 +769,6 @@ class ProjectState(QObject):
             scientific_roi=np.array(mask, dtype=bool, copy=True),
             roi_reviewed=bool(reviewed),
         )
-        display = self.active_session.display_state
-        if display.pop("pending_geometry_revision", None) is not None:
-            display["mode"] = "filtered"
         self.filtering_result = stored
         self.filtering_result_changed.emit(stored, self.filtering_is_current)
 

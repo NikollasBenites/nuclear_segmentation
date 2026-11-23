@@ -61,3 +61,10 @@ Record macOS and Apple Silicon model, Python, PyQt6 and napari versions, acquisi
 - [ ] Repeat the v2, v1 and legacy opening checks above, including a Phase 2D.4.2 checkpoint. Repeat editing cycles in the real viewer, secondary-click objects and inspect for obsolete layers or duplicate callbacks.
 
 The brush readout reports nominal dimensions along the displayed axes. Pixel rounding and napari's rasterization determine the actual footprint. Paused previews live in memory until Save Changes or Discard Changes. The checkpoint stores complete committed geometry, edit history and the provisional retained IDs. Scientific measurements always use complete committed geometry.
+
+### Phase 2D.4.3.1 comparison layers on native macOS
+
+- [ ] In Nuclear and Cytoplasmic sessions with overlapping IDs, retain one known object and exclude another. Record the filtered view in each session.
+- [ ] Save a filtered brush correction, split, merge or removal. Confirm only **Committed — Retained (Provisional)** is visible among the mask layers. Inspect **Filtered — Before Editing (Outdated)**, **Committed — All (Diagnostic)** and Raw Cellpose masks separately. Compare the input, accepted correction, excluded object and original voxels.
+- [ ] Switch sessions, then save and reopen with the outdated comparison visible. Verify the session, display choice and object coordinates. Undo a saved edit and check that scientific filtering still requires recalculation.
+- [ ] Repeat in both editing directions. Recalculate successfully and verify Live Filtered Masks replaces both comparison layers. Check retained IDs, nuclear ROI review and density availability in the correct session.

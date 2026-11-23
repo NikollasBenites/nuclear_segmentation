@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 import traceback
+from weakref import ref
 
 import numpy as np
 from qtpy.QtCore import QObject, QThread, QTimer, Signal, Slot
@@ -127,6 +129,8 @@ class SegmentationController(QObject):
         self._result_layer = None
         self._edited_layer = None
         self._retained_layer = None
+        self._before_layer = None
+        self._filtered_reference = None
         self._started = None
         self._timer = QTimer(self)
         self._timer.setInterval(250)
@@ -279,6 +283,8 @@ class SegmentationController(QObject):
         )
 
     def _sync_result_layer(self, result, current: bool) -> None:
+        filtered_reference = self._filtered_reference
+        self._filtered_reference = None
         if result is None:
             self.clear_project()
             return
@@ -299,6 +305,7 @@ class SegmentationController(QObject):
             offset_y, offset_x = self.project_state.working_offset_yx
             self._result_layer = self.viewer.add_labels(
                 result["masks"], name=self._result_layer_name(current), scale=spacing,
+                visible=state.active_session.display_state.get("mode") not in ("retained", "before"),
                 translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
                 metadata={
                     **state.mask_layer_metadata(),
@@ -311,7 +318,8 @@ class SegmentationController(QObject):
                 result.get("edit_history") or not np.array_equal(result["edited_masks"], result["masks"])
             ):
                 self._edited_layer = self.viewer.add_labels(
-                    result["edited_masks"], name=f"{state.active_session.display_name} · Committed — All",
+                    result["edited_masks"], name=f"{state.active_session.display_name} · Committed — All (Diagnostic)",
+                    visible=state.active_session.display_state.get("mode") not in ("retained", "before"),
                     scale=spacing, translate=self._result_layer.translate,
                     metadata={**state.mask_layer_metadata(), "nucytoseg_edited_segmentation": True},
                 )
@@ -329,8 +337,27 @@ class SegmentationController(QObject):
                             for z, plane in enumerate(masks):
                                 np.copyto(retained[z], plane, where=np.isin(plane, ids))
                         retained.setflags(write=False)
+                    record = history[-1]
+                    source_owner = replace(state.session_revision(), geometry_revision=record["source_revision"])
+                    snapshot = None
+                    if filtered_reference and filtered_reference[0] == source_owner:
+                        snapshot = filtered_reference[1]()
+                    if snapshot is None:
+                        # A filtered edit cannot touch excluded voxels. Reverse just its
+                        # validated changes in the retained output to recover the input.
+                        snapshot = retained.copy()
+                        snapshot.flat[record["indexes"]] = record["before"]
+                        snapshot.setflags(write=False)
+                    self._before_layer = self.viewer.add_labels(
+                        snapshot, name=f"{state.active_session.display_name} · Filtered — Before Editing (Outdated)",
+                        visible=False, scale=spacing, translate=self._result_layer.translate,
+                        metadata={**state.mask_layer_metadata(), "nucytoseg_before_editing": True,
+                                  "source_geometry_revision": record["source_revision"]},
+                    )
+                    self._before_layer.editable = False
                     self._retained_layer = self.viewer.add_labels(
-                        retained, name=f"{state.active_session.display_name} · Committed — Retained (Provisional — Recalculation Required)",
+                        retained, name=f"{state.active_session.display_name} · Committed — Retained (Provisional)",
+                        visible=display.get("mode") == "retained",
                         scale=spacing, translate=self._result_layer.translate,
                         metadata={**state.mask_layer_metadata(), "nucytoseg_retained_segmentation": True},
                     )
@@ -356,10 +383,14 @@ class SegmentationController(QObject):
             layer.name = self._result_layer_name(state.segmentation_is_current)
 
     def _filtering_changed(self, result, current):
-        if result is not None and (current or result.get("incompatible_settings")):
+        if current and result is not None:
+            self._filtered_reference = (self.project_state.session_revision(), ref(result["filtered_masks"]))
             self._remove_retained()
 
     def _remove_retained(self):
+        if self._before_layer is not None and self._before_layer in self.viewer.layers:
+            self.viewer.layers.remove(self._before_layer)
+        self._before_layer = None
         if self._retained_layer is not None and self._retained_layer in self.viewer.layers:
             self.viewer.layers.remove(self._retained_layer)
         self._retained_layer = None

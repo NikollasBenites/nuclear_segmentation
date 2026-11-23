@@ -186,7 +186,8 @@ class FilteringController(QObject):
             if self.state.filtering_result is not None else None
         )
         session = self.state.active_session
-        if session.display_state.get("pending_geometry_revision") == session.geometry_revision:
+        if (self.state.filtering_result is None
+                and session.display_state.get("pending_geometry_revision") == session.geometry_revision):
             self._pending_filter_settings = deepcopy(session.filter_controls)
         legacy = self.state.legacy_import
         if self._pending_filter_settings is None and legacy and self.state.segmentation_result.get("legacy_imported"):
@@ -246,7 +247,7 @@ class FilteringController(QObject):
         pending = session.display_state.get("pending_geometry_revision") == session.geometry_revision
         controls = {}
         incompatible = []
-        if pending and self._pending_filter_settings is not None:
+        if pending and not reviewing_settings and self._pending_filter_settings is not None:
             definitions = self.state.segmentation_result["edit_history"][-1].get("filter_definitions", {})
             columns = {item["index"]: item["column"] for item in result["intensity_definitions"]}
             for index, values in (session.intensity_controls or {}).items():

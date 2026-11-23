@@ -191,6 +191,29 @@ def test_rendered_geometry_preview(qapp, tmp_path):
         assert edited.data[0, 1, 1] != raw[0, 1, 1]
         window.mask_display.show("raw")
         assert window.segmentation.result_layer.visible and not edited.visible
+
+        state = window.project_state
+        child = int(edited.data[0, 1, 1])
+        record = calculate_filtering_prerequisites(state, state.segmentation_result["scientific_config"])
+        source = np.where(edited.data == child, edited.data, 0)
+        window.filtering._calculated(dict(record, retained_ids=(child,), retained_count=1,
+                                         filtered_masks=source))
+        panel.start()
+        _click_mask(panel.layer, (0, 1, 1))
+        panel.layer.brush_size = 1
+        panel.layer.paint((0, 0, 0), child)
+        panel.buttons["commit"].click()
+        for dimensions in (2, 3):
+            window.viewer_toolbar.set_ndisplay(dimensions)
+            qapp.processEvents()
+            layers = window.mask_display.layers
+            assert {role for role, layer in layers.items() if layer.visible} == {"retained"}
+            assert layers["retained"].data[0, 0, 0] == child
+            panel.buttons["show_before"].click()
+            qapp.processEvents()
+            assert layers["before"].visible and layers["before"].data[0, 0, 0] == 0
+            assert not layers["retained"].visible and not layers["raw"].visible
+            panel.buttons["show_retained"].click()
     finally:
         if panel.busy:
             panel.discard()
@@ -489,6 +512,7 @@ def test_filtered_commit_resumes_with_excluded_geometry_and_undo(project, tmp_pa
     retained = window.mask_display.layers["retained"]
     assert retained.visible and not retained.data.any()
     retained.opacity = .39
+    window.geometry_panel.buttons["show_before"].click()
     folder = tmp_path / "filtered-edit"
     save(window, app, folder)
     open_saved(window, app, folder)
@@ -496,6 +520,10 @@ def test_filtered_commit_resumes_with_excluded_geometry_and_undo(project, tmp_pa
     np.testing.assert_array_equal(state.segmentation_result["masks"], raw)
     np.testing.assert_array_equal(effective_masks(state.segmentation_result), np.where(before == child, 0, before))
     retained = window.mask_display.layers["retained"]
+    snapshot = window.mask_display.layers["before"]
+    assert snapshot.visible and not retained.visible and not snapshot.editable
+    np.testing.assert_array_equal(snapshot.data, np.where(before == child, before, 0))
+    window.geometry_panel.buttons["show_retained"].click()
     assert retained.visible and not retained.data.any() and retained.opacity == pytest.approx(.39)
     assert state.active_session.filter_controls == record["settings"]
     assert state.segmentation_result["edit_history"][-1]["removed_ids"] == [child]
@@ -642,7 +670,7 @@ def test_filtered_save_split_recalculate_same_thresholds(retained_second_mask, q
     retained = window.mask_display.layers["retained"]
     complete = window.mask_display.layers["edited"]
     assert retained.visible and not complete.visible and not retained.editable
-    assert "Provisional — Recalculation Required" in retained.name
+    assert retained.name.endswith("Committed — Retained (Provisional)")
     assert window.mask_selection.selected_layer is retained and window.mask_selection.selected_mask_id == 2
     np.testing.assert_array_equal(retained.data, expected)
     assert complete.data[0, 1, 1] == 1 and complete.data[0, 5, 6] == child
@@ -652,6 +680,7 @@ def test_filtered_save_split_recalculate_same_thresholds(retained_second_mask, q
     assert window.filtering.calculate()
     _wait(qapp, lambda: not window.filtering.busy)
     assert state.filtering_is_current and state.filtering_result["settings"] == settings
+    assert "before" not in window.mask_display.layers
     assert retained not in panel.viewer.layers and window.filtering.filtered_layer.visible
     assert window.mask_display.preferences["mode"] == "filtered"
     assert set(state.filtering_result["properties"].index) == {1, 2, child}
@@ -718,6 +747,11 @@ def test_changed_filter_definition_requires_review(retained_second_mask, qapp):
     review = window.context_panel.mask_review_page
     assert not state.filtering_is_current and state.quantification_result is None
     assert channel in review.measurement_status.text() and "incompatible" in review.measurement_status.text()
+    assert window.mask_display.layers["retained"].visible and "before" in window.mask_display.layers
+    assert window.filtering.calculate()
+    _wait(qapp, lambda: not window.filtering.busy)
+    assert state.filtering_is_current and window.filtering.filtered_layer.visible
+    assert "before" not in window.mask_display.layers and "retained" not in window.mask_display.layers
 
 
 def test_thresholds_survive_narrower_measured_range(retained_second_mask, qapp):
@@ -740,3 +774,72 @@ def test_thresholds_survive_narrower_measured_range(retained_second_mask, qapp):
     assert state.filtering_result["intensity_definitions"][0]["maximum"] < controls[0][2]
     assert review.filter_settings() == settings
     assert review.intensity_control_settings() == controls
+
+
+@pytest.mark.parametrize("edit_cytoplasmic", [True, False])
+def test_filtered_before_and_after_are_session_owned(retained_second_mask, edit_cytoplasmic, qapp):
+    from test_desktop_normalization import _wait
+
+    window, nuclear_raw, _ = retained_second_mask
+    state = window.project_state
+    display = window.mask_display
+    nuclear = state.active_session
+    config = state.segmentation_result["scientific_config"]
+    display.show("filtered")
+    cyto = state.create_session("MAP2", scientific_role="cytoplasmic", channel_index=0)
+    state.select_session(cyto.session_id)
+    # Both sessions use labels 1 and 2, with opposite identities in the bright region.
+    cyto_raw = np.where(nuclear_raw, 3 - nuclear_raw, 0).astype(nuclear_raw.dtype)
+    state.set_segmentation_result(dict(masks=cyto_raw, mask_shape=cyto_raw.shape, object_count=2,
+                                       device="cpu", scientific_config=config))
+    assert window.filtering.calculate()
+    _wait(qapp, lambda: not window.filtering.busy)
+    review = window.context_panel.mask_review_page
+    review.intensity_master.setChecked(True)
+    _, enabled, lower, _, _ = review.intensity_controls[0]
+    enabled.setChecked(True)
+    lower.editor.setValue(lower.value() + 1)
+    _wait(qapp, lambda: not review._filter_timer.isActive())
+    assert cyto.filtering_result["retained_ids"] == (1,)
+    display.show("filtered")
+    active, other = (cyto, nuclear) if edit_cytoplasmic else (nuclear, cyto)
+    state.select_session(active.session_id)
+    source = active.filtering_result["filtered_masks"]
+    other_filter = other.filtering_result
+    other_revision = other.geometry_revision
+    raw = active.segmentation_result["masks"].copy()
+    kept, = active.filtering_result["retained_ids"]
+    excluded = (raw != kept) & (raw != 0)
+    assert excluded.any()
+    panel = window.geometry_panel
+    panel.start()
+    _click_mask(panel.layer, (0, 5, 6))
+    panel.layer.brush_size = 1
+    panel.layer.paint((0, 5, 6), 0)
+    panel.layer.paint((0, 0, 0), kept)
+    expected = source.copy()
+    expected[0, 5, 6] = 0
+    expected[0, 0, 0] = kept
+    panel.buttons["commit"].click()
+    qapp.processEvents()
+    snapshot = display.layers["before"]
+    assert snapshot.data is source and not snapshot.editable and not snapshot.data.flags.writeable
+    assert snapshot.metadata["source_geometry_revision"] == active.geometry_revision - 1
+    assert snapshot.metadata["mask_type"] == active.scientific_role
+    assert {role for role, layer in display.layers.items() if layer.visible} == {"retained"}
+    np.testing.assert_array_equal(display.layers["retained"].data, expected)
+    np.testing.assert_array_equal(display.layers["edited"].data[excluded], raw[excluded])
+    np.testing.assert_array_equal(display.layers["raw"].data, raw)
+    assert active.filtering_result is None and active.quantification_result is None
+    panel.buttons["show_before"].click()
+    state.select_session(other.session_id)
+    assert other.filtering_result is other_filter and other.filtering_is_current
+    assert other.geometry_revision == other_revision and display.layers["filtered"].visible
+    assert display.layers["filtered"].data is other_filter["filtered_masks"]
+    assert "before" not in display.layers and "retained" not in display.layers
+    state.select_session(active.session_id)
+    assert display.layers["before"].visible and not display.layers["edited"].visible
+    np.testing.assert_array_equal(display.layers["before"].data, source)
+    panel.undo()
+    assert not active.filtering_is_current and "before" not in display.layers
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), raw)

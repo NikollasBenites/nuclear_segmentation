@@ -100,8 +100,9 @@ class GeometryPanel(CollapsibleSection):
         merge.addWidget(QLabel("Retained target ID"))
         merge.addWidget(self.merge_target)
         merge.addWidget(button("merge", "Preview Merge"))
-        review.show_raw_button.parentWidget().layout().insertWidget(1, button("show_edited", "Show Committed — All"))
+        review.show_raw_button.parentWidget().layout().insertWidget(1, button("show_edited", "Show Complete Geometry (Diagnostic)"))
         review.show_raw_button.parentWidget().layout().insertWidget(2, button("show_retained", "Show Committed — Retained"))
+        review.show_raw_button.parentWidget().layout().insertWidget(3, button("show_before", "Show Filtered — Before Editing"))
         self.merge_target.currentIndexChanged.connect(self.refresh)
         self.merge_list.currentRowChanged.connect(self.refresh)
         self.status = QLabel()
@@ -227,6 +228,8 @@ class GeometryPanel(CollapsibleSection):
         self.buttons["show_edited"].setEnabled(not self.busy and "edited" in self.window.mask_display.layers)
         self.buttons["undo"].setVisible(self.buttons["undo"].isEnabled())
         self.buttons["show_retained"].setVisible("retained" in self.window.mask_display.layers)
+        self.buttons["show_before"].setVisible("before" in self.window.mask_display.layers)
+        self.buttons["show_before"].setEnabled(not self.busy)
         self.buttons["show_retained"].setEnabled(not self.busy)
         if self.busy:
             active = self.viewer.layers.selection.active is self.layer and self.layer.visible
@@ -597,6 +600,9 @@ class GeometryPanel(CollapsibleSection):
         self._dimensions()
         self.refresh()
         self.status.setText(f"Merge preview retains ID {retained}. Save or discard.")
+
+    def show_before(self):
+        self.window.mask_display.show("before")
 
     def show_retained(self):
         self.window.mask_display.show("retained")
