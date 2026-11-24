@@ -41,6 +41,7 @@ def test_merge_split_remove_validation_and_repeated_undo(review_window):
     with pytest.raises(ValueError):
         edit.merge([1, 2], 3)
     edit.merge([1, 2], 2)
+    edit.apply_operation()
     edit.commit()
     merged = effective_masks(state.segmentation_result)
     assert np.array_equal(merged, np.where(raw, 2, 0))
@@ -49,10 +50,11 @@ def test_merge_split_remove_validation_and_repeated_undo(review_window):
     new = edit.split(2)
     edit.preview[raw == 1] = new
     edit.preview[0, 0, 0] = new
-    with pytest.raises(ValueError):
-        edit.commit()
+    with pytest.raises(ValueError, match="outside"):
+        edit.apply_operation()
     assert effective_masks(state.segmentation_result) is merged
     edit.preview[0, 0, 0] = 0
+    edit.apply_operation()
     edit.commit()
     split = effective_masks(state.segmentation_result)
     assert new > 2 and np.array_equal(split, np.where(raw == 1, new, raw))
@@ -96,6 +98,7 @@ def test_native_edited_geometry_measurement_and_undo(project, tmp_path):
     child = edit.split(90000)
     edit.preview[0][raw[0] == 90000] = child
     expected = edit.preview.copy()
+    edit.apply_operation()
     state.set_quantification_result({"previous": True})
     edit.commit()
     assert state.quantification_result is None and not state.filtering_is_current
@@ -177,8 +180,7 @@ def test_rendered_geometry_preview(qapp, tmp_path):
         window.show()
         window.project_state.set_dataset(_dataset(tmp_path / "render.tif"))
         raw = _segment(window)
-        window.set_workflow("mask_review")
-        window.navigation.set_subpage("mask_editing", emit=True)
+        window.set_workflow("proofreading")
         panel.buttons["start"].click()
         assert panel.busy
         _click_mask(panel.layer, (0, 1, 1))
@@ -189,6 +191,10 @@ def test_rendered_geometry_preview(qapp, tmp_path):
         from qtpy.QtGui import QKeySequence
         canvas = window.embedding.qt_viewer.canvas.native
         canvas.setFocus()
+        from qtpy.QtCore import Qt
+        QTest.keyClick(canvas, Qt.Key.Key_Escape)
+        assert window.viewer_toolbar.buttons["review"].isChecked() and panel.edit.operation == "split"
+        assert panel.selected_id == 90000 and panel.layer.data[0, 1, 2] == panel.brush_id
         panel.set_expanded(False)
         QTest.keySequence(canvas, QKeySequence("Ctrl+Z"))
         assert panel.layer.data[0, 1, 1] == panel.brush_id
@@ -202,6 +208,7 @@ def test_rendered_geometry_preview(qapp, tmp_path):
         assert not panel.layer.editable
         window.viewer_toolbar.set_ndisplay(2)
         qapp.processEvents()
+        panel.apply_operation()
         panel.commit()
         edited = window.mask_display.layers["edited"]
         assert edited.visible and not edited.editable
@@ -252,6 +259,7 @@ def test_edited_cytoplasmic_geometry_drives_worker_filter_and_display(project):
     child = edit.split(90000)
     edit.preview[0][raw[0] == 90000] = child
     expected = edit.preview.copy()
+    edit.apply_operation()
     edit.commit()
     assert window.filtering.calculate()
     _wait(app, lambda: not window.filtering.busy)
@@ -363,6 +371,7 @@ def test_interactive_selection_layers_and_split(review_window):
     preview.selected_label = 0
     assert preview.selected_label == child
     preview.paint((0, 1, 1), child)
+    panel.buttons["apply_operation"].click()
     panel.buttons["commit"].click()
     assert template.editable and callback not in preview.mouse_drag_callbacks
     assert effective_masks(window.project_state.segmentation_result)[0, 1, 1] == child
@@ -393,6 +402,7 @@ def test_click_merge_nonconsecutive_targets_and_undo(review_window):
     panel.merge_target.setCurrentIndex(panel.merge_target.findData(97))
     panel.buttons["merge"].click()
     assert np.array_equal(panel.layer.data, np.where(raw, 97, 0))
+    panel.apply_operation()
     panel.commit()
     panel.undo()
     assert np.array_equal(effective_masks(state.segmentation_result), raw)
@@ -452,7 +462,8 @@ def test_filtered_selection_scope_and_hidden_geometry(retained_second_mask):
         assert panel.edit.filtered and panel.scope.currentIndex() == 0
         assert preview[pos] == value
         preview[pos] = 0
-    preview[0, 0, 0] = 2
+    panel.layer.brush_size = 1
+    panel.layer.paint((0, 0, 0), 2)
     panel.scope.setCurrentIndex(1)
     np.testing.assert_array_equal(preview[hidden], raw[hidden])
     preview[0, 1, 1] = 0
@@ -486,8 +497,7 @@ def test_collapsing_editor_preserves_transaction_and_merge(review_window, qapp):
     from qtpy.QtWidgets import QScrollArea
 
     window, raw = review_window
-    window.set_workflow("mask_review")
-    window.navigation.set_subpage("mask_editing", emit=True)
+    window.set_workflow("proofreading")
     panel = window.geometry_panel
     window.resize(800, 520)
     window.show()
@@ -529,6 +539,7 @@ def test_filtered_commit_resumes_with_excluded_geometry_and_undo(project, tmp_pa
     first = GeometryEdit(state)
     child = first.split(90000)
     first.preview[0][raw[0] == 90000] = child
+    first.apply_operation()
     first.commit()
     before = effective_masks(state.segmentation_result)
     record = calculate_filtering_prerequisites(state, state.segmentation_result["scientific_config"])
@@ -637,7 +648,7 @@ def test_editing_controls_brush_planes_and_paused_split(review_window, tmp_path)
         preview.paint((2, 4, 4), 1)
         changed = np.nonzero(preview.data != before_stroke)
         assert changed[0].size and set(changed[order[0]]) == {4}
-        preview.undo()
+        panel.undo_preview()
     panel.viewer.dims.order = (0, 1, 2)
     calibration = state.calibration_source
     state.calibration_source = None
@@ -668,6 +679,7 @@ def test_editing_controls_brush_planes_and_paused_split(review_window, tmp_path)
     assert panel.brush_size.value() == 1 and toolbar.buttons["review"].isChecked()
     assert state.session_revision() == owner
     np.testing.assert_array_equal(preview.data, expected)
+    panel.apply_operation()
     panel.commit()
     assert panel.transaction_controls.isHidden() and not panel.buttons["undo"].isHidden()
     np.testing.assert_array_equal(effective_masks(state.segmentation_result), expected)
@@ -687,7 +699,8 @@ def test_stop_dialog_from_pause(review_window, choice):
     assert not panel.busy and state.session_revision() == initial
     panel.start()
     preview = panel.layer
-    preview.data[0, 0, 0] = 2
+    preview.brush_size = 1
+    preview.paint((0, 0, 0), 2)
     panel.toggle_pause()
 
     def respond():
@@ -719,6 +732,7 @@ def test_filtered_save_split_recalculate_same_thresholds(retained_second_mask, q
     child = panel.brush_id
     panel.layer.paint((0, 5, 6), child)
     expected = panel.edit.preview.copy()
+    panel.apply_operation()
     panel.commit()
     retained = window.mask_display.layers["filtered"]
     assert "edited" not in window.mask_display.layers and "before" not in window.mask_display.layers
@@ -760,6 +774,7 @@ def test_filtered_merge_retains_target_and_isolates_sessions(retained_second_mas
     panel.merge()
     panel.toggle_pause()
     panel.toggle_pause()
+    panel.apply_operation()
     panel.commit()
     retained = window.mask_display.layers["filtered"]
     np.testing.assert_array_equal(retained.data, np.where(raw, 2, 0))
@@ -791,7 +806,8 @@ def test_changed_filter_definition_requires_review(retained_second_mask, qapp):
     state = window.project_state
     panel = window.geometry_panel
     panel.start()
-    panel.edit.preview[0, 0, 0] = 2
+    panel.layer.brush_size = 1
+    panel.layer.paint((0, 0, 0), 2)
     panel.commit()
     channel = next(iter(state.active_session.filter_controls["intensity_filters"]))
     # Simulate a saved threshold defined on a different intensity measurement.
@@ -921,8 +937,11 @@ def test_repeated_provisional_edits_keep_scope_and_allocate_unused_ids(retained_
             panel.commit()
         panel.edit.preview[0, 1, 1] = 0
         assert not panel.edit.allows_label(1)
-        assert panel.edit.split(2) == expected_child
-        panel.edit.preview[position] = expected_child
+        _click_mask(panel.layer, (0, 5, 7))
+        panel.split()
+        assert panel.brush_id == expected_child
+        panel.layer.paint(position, expected_child)
+        panel.apply_operation()
         panel.commit()
         assert working is window.filtering.filtered_layer and working.visible
         assert working.opacity == pytest.approx(.38) and not working.editable
@@ -953,6 +972,7 @@ def test_all_scope_reconciliation_and_ambiguous_merge(retained_second_mask):
     assert state.provisional_ids == [2] and not working.data[0, 0, 0]
     edit = GeometryEdit(state)
     edit.merge([1, 2], 2)
+    edit.apply_operation()
     edit.commit()
     assert state.provisional_ids is None and state.filtering_result is None
     assert window.filtering.filtered_layer is None
@@ -977,7 +997,8 @@ def test_auto_recalculate_failure_and_retry(retained_second_mask, qapp, monkeypa
             raise ValueError("test measurement failure")
         scoped.setattr(filtering_workspace, "_measure", fail)
         panel.start()
-        panel.edit.preview[0, 0, 0] = 2
+        panel.layer.brush_size = 1
+        panel.layer.paint((0, 0, 0), 2)
         panel.commit()
         assert window.filtering.busy and "Recalculating" in panel.scientific_status.text()
         _wait(qapp, lambda: not window.filtering.busy)
@@ -993,7 +1014,8 @@ def test_auto_recalculate_failure_and_retry(retained_second_mask, qapp, monkeypa
     assert window.filtering.filtered_layer is working and not state.scientific_roi_reviewed
     assert "Measurements up to date" in panel.scientific_status.text()
     panel.start()
-    panel.edit.preview[0, 0, 1] = 2
+    panel.layer.brush_size = 1
+    panel.layer.paint((0, 0, 1), 2)
     panel.commit()
     _wait(qapp, lambda: not window.filtering.busy)
     assert state.filtering_is_current and statuses.count("Recalculating measurements and filters…") == 3
@@ -1088,29 +1110,25 @@ def test_quick_operation_history_while_paused(review_window, operation):
         panel.add_merge()
         panel.merge_target.setCurrentIndex(panel.merge_target.findData(2))
     getattr(panel, operation)()
-    parameters = panel.edit.parameters.copy()
-    selected = panel.selected_id
     if operation == "split":
         layer.paint((0, 1, 1), panel.brush_id)
+        panel.undo_preview()
+        np.testing.assert_array_equal(layer.data, raw)
+        panel.redo_preview()
+    if operation in ("split", "merge"):
+        panel.apply_operation()
     expected = layer.data.copy()
     size = layer.brush_size
     panel.toggle_pause()
-    if operation == "split":
-        panel.undo_preview()
-        assert panel.edit.operation == "split" and panel.brush_id == parameters["new_id"]
     panel.undo_preview()
     np.testing.assert_array_equal(layer.data, raw)
     assert panel.paused and not layer.editable and panel.edit.operation == "paint/erase"
     assert "Paused" in panel.status.text() and "No pending changes" in panel.status.text()
     assert not panel.buttons["undo_preview"].isEnabled()
     panel.redo_preview()
-    if operation == "split":
-        panel.redo_preview()
-    assert panel.edit.operation == operation and panel.edit.parameters == parameters
     np.testing.assert_array_equal(layer.data, expected)
     assert panel.paused and not layer.editable and layer.brush_size == size
-    assert panel.selected_id == selected and not panel.buttons["paint"].isEnabled()
-    assert not panel.buttons["redo_preview"].isEnabled()
+    assert not panel.buttons["paint"].isEnabled() and not panel.buttons["redo_preview"].isEnabled()
     panel.toggle_pause()
     panel.commit()
     np.testing.assert_array_equal(effective_masks(window.project_state.segmentation_result), expected)
@@ -1155,6 +1173,7 @@ def test_quick_history_scope_hidden_labels_and_new_preview(retained_second_mask)
 
 def test_quick_shortcuts_text_focus_and_saved_history(review_window, qapp):
     import sys
+    from qtpy.QtCore import Qt
     from qtpy.QtGui import QKeySequence
     from qtpy.QtTest import QTest
 
@@ -1162,16 +1181,18 @@ def test_quick_shortcuts_text_focus_and_saved_history(review_window, qapp):
     state, panel = window.project_state, window.geometry_panel
     window.show()
     window.activateWindow()
-    window.set_workflow("mask_review")
-    window.navigation.set_subpage("mask_editing", emit=True)
+    window.set_workflow("proofreading")
     panel.start()
     _click_mask(panel.layer, (0, 1, 1))
     layer = panel.layer
     layer.brush_size = 1
     layer.paint((0, 0, 0), 1)
+    window.viewer_toolbar.activate_tool("paint")
     for field in (panel.brush_label, panel.brush_size.lineEdit()):
         field.setFocus()
         qapp.processEvents()
+        QTest.keyClick(field, Qt.Key.Key_Escape)
+        assert str(layer.mode) == "paint"
         field.selectAll()
         QTest.keyClicks(field, "2")
         QTest.keySequence(field, QKeySequence("Ctrl+Z"))
@@ -1180,6 +1201,13 @@ def test_quick_shortcuts_text_focus_and_saved_history(review_window, qapp):
             assert field.text() == "1"
     target = window.embedding.qt_viewer
     target.setFocus()
+    window.viewer_toolbar.activate_tool("erase")
+    with layer.block_history():
+        QTest.keyClick(target, Qt.Key.Key_Escape)
+        assert str(layer.mode) == "erase"
+    QTest.keyClick(target, Qt.Key.Key_Escape)
+    assert window.viewer_toolbar.buttons["review"].isChecked() and panel.busy
+    assert panel.selected_id == 1 and layer.data[0, 0, 0] == 1
     panel.set_expanded(False)
     QTest.keySequence(target, QKeySequence("Ctrl+Z"))
     assert layer.data[0, 0, 0] == 0
@@ -1219,3 +1247,299 @@ def test_new_stroke_after_undoing_removal_starts_a_new_branch(review_window):
     assert panel.edit.operation == "paint/erase" and panel.layer.data[0, 0, 0] == 1
     np.testing.assert_array_equal(panel.layer.data[raw == 1], raw[raw == 1])
     panel.discard()
+
+
+def test_mixed_proofreading_sequence_and_hidden_geometry(retained_second_mask):
+    window, raw, _ = retained_second_mask
+    panel, state = window.geometry_panel, window.project_state
+    masks = raw.copy()
+    masks[0, 3, 3:5] = 6
+    masks[0, 4, 4:6] = 7
+    filtering = dict(state.filtering_result, retained_ids=(2, 6, 7), retained_count=3,
+                     filtered_masks=np.where(masks == 1, 0, masks))
+    state.set_segmentation_result(dict(state.segmentation_result, masks=masks))
+    window.filtering._calculated(filtering)
+    working = window.filtering.filtered_layer
+    revision = state.session_revision()
+    window.set_workflow("proofreading")
+    panel.start()
+    layer = panel.layer
+    panel.viewer.dims.set_point(0, panel.layer.data_to_world((0, 0, 0))[0])
+    snapshots = [layer.data.copy()]
+
+    def accept():
+        snapshots.append(layer.data.copy())
+        assert panel.layer is layer and state.session_revision() == revision and state.filtering_is_current
+
+    _click_mask(layer, (0, 5, 6))
+    layer.brush_size = 1
+    layer.paint((0, 3, 0), 2)
+    accept()
+    _click_mask(layer, (0, 3, 3))
+    panel.remove()
+    accept()
+    for pos in [(0, 4, 4), (0, 5, 6)]:
+        _click_mask(layer, pos)
+        panel.add_merge()
+    panel.merge_target.setCurrentIndex(panel.merge_target.findData(2))
+    panel.merge()
+    with pytest.raises(ValueError, match="Apply or cancel"):
+        panel.commit()
+    panel.apply_operation()
+    accept()
+    # Split the newly merged region. It originally belonged to ID 7.
+    _click_mask(layer, (0, 4, 4))
+    panel.split()
+    child = panel.brush_id
+    layer.paint((0, 4, 4), child)
+    panel.apply_operation()
+    accept()
+    _click_mask(layer, (0, 4, 4))
+    assert panel.brush_id == panel.selected_id == child
+    layer.paint((0, 0, 0), child)
+    accept()
+
+    # A canceled split or merge preserves every earlier accepted change.
+    panel.split()
+    layer.paint((0, 4, 4), panel.brush_id)
+    panel.cancel_operation()
+    np.testing.assert_array_equal(layer.data, snapshots[-1])
+    for pos in [(0, 4, 4), (0, 5, 6)]:
+        _click_mask(layer, pos)
+        panel.add_merge()
+    panel.merge_target.setCurrentIndex(panel.merge_target.findData(2))
+    panel.merge()
+    panel.cancel_operation()
+    np.testing.assert_array_equal(layer.data, snapshots[-1])
+    assert panel.edit.operation == "paint/erase"
+    _click_mask(layer, (0, 4, 4))
+    panel.remove()
+    assert not (layer.data == child).any()
+    panel.undo_preview()
+    np.testing.assert_array_equal(layer.data, snapshots[-1])
+
+    for expected in reversed(snapshots[:-1]):
+        panel.undo_preview()
+        np.testing.assert_array_equal(layer.data, expected)
+    assert not panel.buttons["undo_preview"].isEnabled()
+    for expected in snapshots[1:]:
+        panel.redo_preview()
+        np.testing.assert_array_equal(layer.data, expected)
+
+    # Out-of-band data changes fail validation and leave the journal recoverable.
+    layer.data[0, 0, 1] = child
+    with pytest.raises(ValueError, match="operation sequence"):
+        panel.commit()
+    assert panel.busy and len(panel.edit.steps) == 5 and state.session_revision() == revision
+    layer.data[0, 0, 1] = 0
+    panel.commit()
+    record = state.segmentation_result["edit_history"][-1]
+    assert record["result_revision"] == revision.geometry_revision + 1
+    assert [step["operation"] for step in record["steps"]] == ["paint/erase", "remove", "merge", "split", "paint/erase"]
+    assert state.provisional_ids == [2, child] and not state.filtering_is_current
+    assert working is window.filtering.filtered_layer
+    np.testing.assert_array_equal(working.data, snapshots[-1])
+    assert (effective_masks(state.segmentation_result)[masks == 1] == 1).all()
+    validate_history(state.segmentation_result, state.active_session)
+    panel.undo()
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), masks)
+    assert state.provisional_ids == [2, 6, 7]
+
+
+def test_split_clips_paint_and_restores_parent_on_erase(retained_second_mask):
+    window, raw, _ = retained_second_mask
+    panel = window.geometry_panel
+    panel.start()
+    layer = panel.layer
+    _click_mask(layer, (0, 5, 6))
+    panel.split()
+    child = panel.brush_id
+    original = layer.data.copy()
+    with pytest.raises(ValueError, match="Paint a child"):
+        panel.apply_operation()
+    layer.brush_size = 5
+    layer.paint((0, 5, 6), child)
+    assert (layer.data[raw != 2] == 0).all()
+    assert (layer.data[0] == child).sum() == 4
+    layer.paint((0, 1, 1), child)
+    layer.paint((0, 0, 0), child)
+    assert np.array_equal(layer.data != 0, original != 0)
+    for z in range(1, raw.shape[0]):
+        layer.paint((z, 5, 6), child)
+    with pytest.raises(ValueError, match="parent must keep"):
+        panel.apply_operation()
+    assert panel.edit.pending_source is not None and not panel.buttons["commit"].isEnabled()
+    layer.brush_size = 1
+    layer.paint((0, 5, 6), 0)
+    assert layer.data[0, 5, 6] == 2
+    panel.undo_preview()
+    assert layer.data[0, 5, 6] == child
+    panel.redo_preview()
+    panel.apply_operation()
+    assert not panel.buttons["apply_operation"].isVisibleTo(panel)
+    panel.commit()
+    committed = effective_masks(window.project_state.segmentation_result)
+    np.testing.assert_array_equal(committed != 0, raw != 0)
+    assert np.all(committed[raw == 1] == 1)
+
+
+def test_checkpoint_replays_mixed_operations_and_rejects_corrupt_steps(project, tmp_path):
+    window, app, _, _, warnings = project
+    state = window.project_state
+    raw = _segment(window)
+    from test_desktop_normalization import _wait
+    measured = calculate_filtering_prerequisites(state, state.segmentation_result["scientific_config"])
+    window.filtering._calculated(dict(measured, retained_ids=(90000,), retained_count=1, filtered_masks=raw.copy()))
+    edit = GeometryEdit(state, filtered=True)
+    original_revision = edit.owner.geometry_revision
+    child = edit.split(90000)
+    edit.preview[0, 1, 1] = child
+    edit.apply_operation()
+    edit.preview[0, 0, 0] = child
+    edit.merge([child, 90000], child)
+    edit.apply_operation()
+    edit.commit()
+    expected = effective_masks(state.segmentation_result).copy()
+    save(window, app, tmp_path / "mixed")
+    open_saved(window, app, tmp_path / "mixed")
+    assert not warnings and state.geometry_pending and not state.filtering_is_current
+    assert state.provisional_ids == [child]
+    np.testing.assert_array_equal(window.filtering.filtered_layer.data, expected)
+    assert state.active_session.geometry_revision == original_revision + 1
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), expected)
+    record = state.segmentation_result["edit_history"][-1]
+    first, *rest = record["steps"]
+    damaged = dict(first, parameters=dict(first["parameters"], parent=child))
+    with pytest.raises(ValueError, match="split"):
+        validate_history(dict(state.segmentation_result, edit_history=[dict(record, steps=[damaged, *rest])]),
+                         state.active_session)
+    assert window.filtering.calculate()
+    _wait(app, lambda: not window.filtering.busy)
+    assert state.filtering_is_current
+    measured_masks = state.filtering_result["filtered_masks"].copy()
+    save(window, app, tmp_path / "mixed-current")
+    open_saved(window, app, tmp_path / "mixed-current")
+    assert not warnings and state.filtering_is_current and not state.geometry_pending
+    np.testing.assert_array_equal(state.filtering_result["filtered_masks"], measured_masks)
+    GeometryEdit.undo(state)
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), raw)
+
+
+def test_split_edge_and_indexed_writes_protect_an_adjacent_object(review_window):
+    window, raw = review_window
+    state, panel = window.project_state, window.geometry_panel
+    masks = np.zeros_like(raw)
+    masks[:, 2:5, 2:5] = 1
+    masks[:, 2:5, 5] = 2
+    state.set_segmentation_result(dict(state.segmentation_result, masks=masks))
+    panel.start()
+    _click_mask(panel.layer, (0, 2, 4))
+    panel.split()
+    child = panel.brush_id
+    layer = panel.layer
+    layer.brush_size = 3
+    layer.paint((0, 2, 4), child)
+    changed = layer.data != masks
+    assert changed.any() and np.all(masks[changed] == 1)
+    panel.viewer.dims.order = (1, 0, 2)
+    layer.paint((1, 2, 4), child)
+    assert layer.data[1, 2, 4] == child and np.all(masks[layer.data != masks] == 1)
+    panel.viewer.dims.order = (0, 1, 2)
+    indices = (np.array([0, 0, 0]), np.array([2, 2, 1]), np.array([4, 5, 4]))
+    layer.data_setitem(indices, np.array([0, child, child]))
+    assert list(layer.data[indices]) == [1, 2, 0]
+    panel.cancel_operation()
+    assert "_paint_region_with_mask" not in vars(layer) and "data_setitem" not in vars(layer)
+    np.testing.assert_array_equal(layer.data, masks)
+    panel.discard()
+
+
+def test_mixed_all_mask_membership_stays_ambiguous(retained_second_mask):
+    window, raw, _ = retained_second_mask
+    state = window.project_state
+    edit = GeometryEdit(state)
+    child = edit.split(2)
+    edit.preview[0, 5, 6] = child
+    edit.apply_operation()
+    edit.merge([child, 1], 1)
+    edit.apply_operation()
+    edit.commit()
+    record = state.segmentation_result["edit_history"][-1]
+    assert record["affected_ids"] == [1, 2, child] and child not in record["new_ids"]
+    assert "reviewed_ids" not in record and state.provisional_ids is None
+    assert GeometryEdit(state).next_id > child
+    validate_history(state.segmentation_result, state.active_session)
+    GeometryEdit.undo(state)
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), raw)
+    assert state.provisional_ids == [2]
+
+
+def test_all_scope_rejects_changed_retained_selection(retained_second_mask):
+    window, _, _ = retained_second_mask
+    state, panel = window.project_state, window.geometry_panel
+    panel.scope.setCurrentIndex(1)
+    panel.start()
+    panel.layer.brush_size = 1
+    panel.layer.paint((0, 0, 0), 2)
+    revision = state.session_revision()
+    state.invalidate_filtering()
+    assert not panel.buttons["commit"].isEnabled() and not panel.buttons["undo_preview"].isEnabled()
+    with pytest.raises(ValueError, match="selection changed"):
+        panel.edit.commit()
+    assert panel.busy and len(panel.edit.steps) == 1 and state.session_revision() == revision
+    panel.discard()
+
+
+def test_auto_recalculation_runs_once_for_applied_batch(retained_second_mask, qapp, monkeypatch):
+    from test_desktop_normalization import _wait
+    window, _, working = retained_second_mask
+    state, panel = window.project_state, window.geometry_panel
+    calls = []
+    from nuclear_segmentation import filtering_workspace
+    measure = filtering_workspace._measure
+
+    def count_calculations(job, masks, provenance):
+        calls.append(job.owner.geometry_revision)
+        return measure(job, masks, provenance)
+
+    monkeypatch.setattr(filtering_workspace, "_measure", count_calculations)
+    panel.auto_recalculate.setChecked(True)
+    panel.start()
+    _click_mask(panel.layer, (0, 5, 6))
+    panel.split()
+    panel.layer.paint((0, 5, 6), panel.brush_id)
+    panel.apply_operation()
+    panel.viewer.dims.set_point(0, panel.layer.data_to_world((0, 0, 0))[0])
+    _click_mask(panel.layer, (0, 5, 6))
+    panel.remove()
+    revision = panel.edit.owner.geometry_revision
+    assert not calls and state.filtering_is_current
+    panel.commit()
+    _wait(qapp, lambda: not window.filtering.busy)
+    assert calls == [revision + 1] and state.filtering_is_current
+    assert window.filtering.filtered_layer is working
+
+
+def test_apply_split_then_merge_to_new_child_from_panel(review_window):
+    window, raw = review_window
+    panel = window.geometry_panel
+    panel.start()
+    layer = panel.layer
+    panel.viewer.dims.set_point(0, panel.layer.data_to_world((0, 0, 0))[0])
+    _click_mask(layer, (0, 1, 1))
+    panel.split()
+    child = panel.brush_id
+    layer.paint((0, 1, 1), child)
+    panel.apply_operation()
+    for pos in ((0, 1, 1), (0, 1, 2)):
+        _click_mask(layer, pos)
+        panel.add_merge()
+    panel.merge_target.setCurrentIndex(panel.merge_target.findData(child))
+    panel.merge()
+    panel.apply_operation()
+    assert panel.selected_id == panel.brush_id == child
+    assert panel.edit.operation == "paint/erase" and not panel.merge_list.count()
+    panel.commit()
+    result = window.project_state.segmentation_result
+    assert [step["operation"] for step in result["edit_history"][-1]["steps"]] == ["split", "merge"]
+    np.testing.assert_array_equal(effective_masks(result), np.where(raw == 1, child, raw))

@@ -30,8 +30,8 @@ WORKFLOWS = (
     WorkflowDefinition("mask_review", "Mask Review", "review", (
         ("filtering", "Filtering"),
         ("roi_counting", "ROI & Counting"),
-        ("mask_editing", "Mask Editing"),
     )),
+    WorkflowDefinition("proofreading", "Proofreading", "paint"),
     WorkflowDefinition("matching", "Matching", "link"),
     WorkflowDefinition("quantification", "Quantification", "bars"),
     WorkflowDefinition("quality_control", "Quality Control", "quality"),

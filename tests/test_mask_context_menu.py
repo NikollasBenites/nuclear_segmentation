@@ -28,8 +28,7 @@ def click(layer, position, *, axes=(1, 2), direction=None, modifiers=(), drag=Fa
 
 
 def editing_page(window):
-    window.set_workflow("mask_review")
-    window.navigation.set_subpage("mask_editing", emit=True)
+    window.set_workflow("proofreading")
 
 
 def actions(window):
@@ -73,7 +72,7 @@ def test_menu_selection_properties_and_transactions(review_window):
     assert panel.selected_id == panel.brush_id == 1
     click(preview, (0, 5, 6))
     actions(window)["Remove Object"].trigger()
-    assert panel.edit.operation == "remove" and not (preview.data == 2).any()
+    assert panel.edit.steps[-1]["operation"] == "remove" and not (preview.data == 2).any()
     assert effective_masks(state.segmentation_result) is raw
     panel.commit()
     assert not (effective_masks(state.segmentation_result) == 2).any()
@@ -211,7 +210,8 @@ def test_raw_context_for_removed_id_and_dirty_preview(review_window):
     preview.paint((0, 0, 0), 2)
     click(preview, (0, 5, 6))
     choices = actions(window)
-    assert set(choices) == {"Select Object", "Show Object Properties"}
+    assert set(choices) == {"Select Object", "Show Object Properties", "Split Object", "Remove Object",
+                            "Add to Merge Selection"}
     panel.discard()
     assert window.mask_context_menu.menu is None
     assert window.mask_context_menu._gesture not in preview.mouse_drag_callbacks
@@ -255,6 +255,6 @@ def test_filtered_menu_respects_scope_and_review_subpage(retained_second_mask):
     window.navigation.set_subpage("filtering", emit=True)
     click(filtered, (0, 5, 6))
     actions(window)["Start Editing"].trigger()
-    assert window.navigation.current_subpage == "mask_editing"
+    assert window.navigation.current_workflow == "proofreading"
     assert window.geometry_panel.selected_id == window.geometry_panel.brush_id == 2
     window.geometry_panel.discard()

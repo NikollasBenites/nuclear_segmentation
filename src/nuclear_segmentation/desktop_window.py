@@ -1442,6 +1442,8 @@ class DesktopWindow(QMainWindow):
             context_visible=self.toggle_context_action.isChecked(),
             workflow=self.navigation.current_workflow,
             workflow_subpages=self.navigation.subpage_selections(),
+            proofreading_sections=tuple((section.key, section.expanded) for section in
+                                        self.context_panel.mask_review_page.proofreading_page.findChildren(CollapsibleSection)),
             project_sections=tuple(
                 self.context_panel.project_page.section_states().items()
             ),
@@ -1464,6 +1466,10 @@ class DesktopWindow(QMainWindow):
         self.navigation.restore_subpages(snapshot.workflow_subpages)
         self.set_workflow(snapshot.workflow)
         self.context_panel.project_page.set_section_states(snapshot.project_sections)
+        states = dict(snapshot.proofreading_sections)
+        for section in self.context_panel.mask_review_page.proofreading_page.findChildren(CollapsibleSection):
+            if section.key in states:
+                section.set_expanded(states[section.key], emit=False)
         return restored
 
     def save_layout(self) -> None:

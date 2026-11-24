@@ -51,6 +51,8 @@ class ContextPanel(QWidget):
             elif key == "mask_review":
                 self.mask_review_page = MaskReviewPanel(project_state)
                 page = self.mask_review_page
+            elif key == "proofreading":
+                page = self._scroll(self.mask_review_page.proofreading_page, horizontal=True)
             elif key == "quantification":
                 self.quantification_page = QuantificationPanel(project_state)
                 page = self._scroll(self.quantification_page)

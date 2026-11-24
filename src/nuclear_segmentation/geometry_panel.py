@@ -103,6 +103,7 @@ class GeometryPanel(CollapsibleSection):
             control.setToolTip(self.shortcuts.tooltip(action))
         fields.addRow(self.buttons["undo_preview"], self.buttons["redo_preview"])
         fields.addRow(self.buttons["review"])
+        fields.addRow(button("apply_operation", "Apply Operation"), button("cancel_operation", "Cancel Operation"))
         self.tool_hint = QLabel()
         self.tool_hint.setWordWrap(True)
         fields.addRow(self.tool_hint)
@@ -133,7 +134,7 @@ class GeometryPanel(CollapsibleSection):
         self.status = QLabel()
         self.status.setWordWrap(True)
         self.layout().insertWidget(1, self.status)
-        review.pages["mask_editing"].layout().insertWidget(1, self)
+        review.proofreading_page.layout().insertWidget(1, self)
         self.state.segmentation_result_changed.connect(self._sync_scope)
         window.filtering.status_changed.connect(self.refresh)
         self.viewer.dims.events.ndisplay.connect(self._dimensions)
@@ -158,7 +159,7 @@ class GeometryPanel(CollapsibleSection):
         current = self.state.proofreading_ids is not None
         self.scope.model().item(0).setEnabled(current)
         if self.busy:
-            if self.edit.filtered and not self.edit.filter_current:
+            if not self.edit.selection_current:
                 self._preview_changed()
             return
         with QSignalBlocker(self.scope):
@@ -183,7 +184,6 @@ class GeometryPanel(CollapsibleSection):
                 self.status.setText(str(error))
                 return
             self.strokes.clear()
-            self.undone_operation = None
             self._dimensions()
             self.layer.refresh()
             if self.selected_id is not None and not self.edit.allows_label(self.selected_id):
@@ -240,6 +240,9 @@ class GeometryPanel(CollapsibleSection):
         available = self.busy and self._owns_preview()
         self.buttons["undo_preview"].setEnabled(bool(available and self._can_replay(False)))
         self.buttons["redo_preview"].setEnabled(bool(available and self._can_replay(True)))
+        for name in ("apply_operation", "cancel_operation"):
+            self.buttons[name].setVisible(self.busy and self.edit.pending_source is not None)
+            self.buttons[name].setEnabled(bool(available))
         choosing = available and not self.paused and self.edit.operation == "paint/erase"
         selected = (choosing and self.selected_id is not None and self.layer.visible
                     and self.viewer.layers.selection.active is self.layer)
@@ -250,7 +253,7 @@ class GeometryPanel(CollapsibleSection):
         self.buttons["toggle_pause"].setText("Resume Editing" if self.paused else "Pause Editing")
         self.buttons["toggle_pause"].setEnabled(bool(available))
         self.buttons["return_preview"].setEnabled(bool(available))
-        self.buttons["commit"].setEnabled(bool(available))
+        self.buttons["commit"].setEnabled(bool(available and self.edit.pending_source is None))
         self.buttons["discard"].setEnabled(self.busy)
         self.buttons["remove_merge"].setEnabled(bool(choosing and self.merge_list.currentRow() >= 0))
         self.buttons["clear_merge"].setEnabled(bool(choosing and self.merge_list.count()))
@@ -261,7 +264,12 @@ class GeometryPanel(CollapsibleSection):
         history = result.get("edit_history", ())
         if history is not getattr(self, "_displayed_history", None):
             self.history.clear()
-            self.history.addItems([f"Revision {r['result_revision']} · {r['operation']}" for r in reversed(history)])
+            for record in reversed(history):
+                self.history.addItem(f"Revision {record['result_revision']} · {record['operation']}")
+                for number, step in enumerate(record.get("steps", ()), 1):
+                    ids = ", ".join(map(str, step["affected_ids"]))
+                    self.history.addItem(f"    {number}. {step['operation']} · IDs {ids}")
+                    self.history.item(self.history.count() - 1).setToolTip(str(step["parameters"] or "Brush stroke"))
             self._displayed_history = history
         self.buttons["undo"].setVisible(self.buttons["undo"].isEnabled())
         self.advanced.setVisible(result.get("edited_masks") is not None)
@@ -364,7 +372,12 @@ class GeometryPanel(CollapsibleSection):
     def _painted(self, event):
         if not self._owns_preview():
             return
-        self.undone_operation = None
+        if self.edit.operation == "paint/erase":
+            step = self.strokes.brush_step(event.value)
+            if step["indexes"].size:
+                self.edit.add_step(step)
+            else:
+                self.strokes.clear()
         self.strokes.changed_voxels += self.strokes.count_change(event.value)
         self._history_status()
         self.refresh()
@@ -382,42 +395,78 @@ class GeometryPanel(CollapsibleSection):
             status = "Paused · " + status
         self.status.setText(f"{self._scope_text()} · {status}")
 
-    def _begin_object_history(self):
-        # GeometryEdit has validated that the new operation starts from a pristine preview.
-        self.strokes.clear()
-        self.strokes.changed_voxels = 0
-        self.undone_operation = None
-
     def _can_replay(self, redo):
-        if redo:
-            return self.undone_operation is not None or self.strokes.available(True)
-        return (self.strokes.available(False) or self.edit.operation in ("remove", "merge")
-                or (self.edit.operation == "split" and not self.strokes.changed_voxels))
+        if self.edit.pending_source is not None:
+            return self.edit.operation == "split" and self.strokes.available(redo)
+        return bool(self.edit.redo_steps) if redo else len(self.edit.steps) > self.edit.undo_floor
 
     def _replay(self, redo):
         self._require_preview()
         if self.strokes.in_stroke or not self._can_replay(redo):
             return
-        edit = self.edit
-        if redo and self.undone_operation is not None:
-            edit.operation, edit.parameters = self.undone_operation
-            self.undone_operation = None
-            if edit.operation == "split":
-                self._set_brush(edit.parameters["new_id"])
-            else:
-                edit.apply_object_preview()
-        elif self.strokes.available(redo):
+        if self.edit.pending_source is not None:
             self.strokes.replay(redo)
         else:
-            self.undone_operation = (edit.operation, edit.parameters)
-            if edit.operation in ("remove", "merge"):
-                edit.apply_object_preview(restore=True)
-            edit.operation, edit.parameters = "paint/erase", {}
-            if self.undone_operation[0] == "split":
-                self._set_brush(self._before_split_brush)
-        if edit.operation in ("remove", "merge") or self.undone_operation is not None:
-            self.layer.refresh()
+            step = (self.edit.redo_steps if redo else self.edit.steps)[-1]
+            native = None
+            if step["operation"] == "paint/erase" and self.strokes.available(redo):
+                native = self.layer.redo if redo else self.layer.undo
+            self.edit.replay(redo, native)
+            if native is None:
+                self.strokes.clear()
+                self.layer.refresh()
+            delta = self.strokes.step_change(step)
+            self.strokes.changed_voxels += delta if redo else -delta
+            if step["operation"] != "paint/erase":
+                self._sync_objects(step)
         self._dimensions()
+        self._history_status()
+
+    def _sync_objects(self, step):
+        # Reconcile structural selections against the current preview. Ordinary
+        # stroke replay keeps the active brush and never scans the whole volume.
+        self.clear_merge()
+        if self.selected_id is not None and not any((plane == self.selected_id).any() for plane in self.edit.preview):
+            self.window.mask_selection.clear_selection(self.layer)
+            self.selected_id = None
+            self.selected_object.setText("None")
+            self._set_brush(None)
+        elif (self.selected_id in step["affected_ids"] and self.viewer.layers.selection.active is self.layer
+              and self.window.viewer_toolbar.buttons["review"].isChecked()):
+            self.window.mask_selection.restore_selection(self.layer, self.selected_id)
+        if (self.brush_id in step["affected_ids"] and self.brush_id != self.selected_id
+              and not any((plane == self.brush_id).any() for plane in self.edit.preview)):
+            self._set_brush(self.selected_id)
+
+    def apply_operation(self):
+        self._require_finished_stroke()
+        selected = self.edit.parameters.get("retained_id", self.edit.parameters.get("parent"))
+        self.edit.apply_operation()
+        self.strokes.release_split()
+        self.strokes.clear()
+        self.strokes.changed_voxels = self._pending_dirty + self.strokes.step_change(self.edit.steps[-1])
+        self._finish_operation(selected)
+
+    def cancel_operation(self):
+        self._require_finished_stroke()
+        selected = self.edit.parameters.get("parent", self.selected_id)
+        self.edit.cancel_operation()
+        self.strokes.release_split()
+        self.strokes.clear()
+        self.strokes.changed_voxels = self._pending_dirty
+        self._finish_operation(selected)
+
+    def _finish_operation(self, selected):
+        self.layer.refresh()
+        self.clear_merge()
+        self.return_preview()
+        self.selected_id = selected
+        self.selected_object.setText("None" if selected is None else str(selected))
+        if selected is None:
+            self.window.mask_selection.clear_selection(self.layer)
+        else:
+            self.window.mask_selection.restore_selection(self.layer, selected)
+        self._set_brush(selected)
         self._history_status()
 
     def undo_preview(self):
@@ -451,7 +500,7 @@ class GeometryPanel(CollapsibleSection):
         return (not self.invalidated and self.layer in self.viewer.layers and self.layer.data is self.edit.preview
                 and self.state.owns_mask_layer(self.layer) and self.state.segmentation_is_current
                 and self.edit.owner == self.state.session_revision()
-                and (not self.edit.filtered or self.edit.filter_current))
+                and self.edit.selection_current)
 
     def _preview_changed(self, *args):
         if not self._owns_preview():
@@ -492,6 +541,11 @@ class GeometryPanel(CollapsibleSection):
         validate_roi_geometry(self.layer, self.state.voxel_spacing_zyx_um, self.edit.base.shape,
                               translate=self.translate)
 
+    def _require_finished_stroke(self):
+        self._require_preview()
+        if self.strokes.in_stroke:
+            raise ValueError("Finish the current brush stroke first.")
+
     def return_preview(self):
         self._require_preview()
         self.layer.visible = True
@@ -504,7 +558,7 @@ class GeometryPanel(CollapsibleSection):
         if not window._project_idle() or review._filter_timer.isActive():
             raise ValueError("Wait for the active operation to finish.")
         selected = self._prior_selection()
-        edit = GeometryEdit(self.state, filtered=self.scope.currentData())
+        edit = GeometryEdit(self.state, filtered=self.scope.currentData(), track_strokes=True)
         raw = window.segmentation.result_layer
         if raw is None:
             raise ValueError("Restore the segmentation layer before editing.")
@@ -518,7 +572,6 @@ class GeometryPanel(CollapsibleSection):
                                        scale=spacing, translate=self.translate,
                                        metadata={**self.state.mask_layer_metadata(), "nucytoseg_edit_preview": True})
         self.strokes = PreviewStrokes(layer, edit)
-        self.undone_operation = None
         self.edit, self.layer = edit, layer
         self.selected_object.setText("None")
         self.invalidated = False
@@ -557,6 +610,7 @@ class GeometryPanel(CollapsibleSection):
         self.refresh()
 
     def discard(self):
+        self.strokes.release_split()
         self.layer.events.brush_size.disconnect(self._sync_size)
         self.layer.events.paint.disconnect(self._painted)
         self.layer.events.selected_label.disconnect(self._brush_changed)
@@ -572,7 +626,7 @@ class GeometryPanel(CollapsibleSection):
         self.layer.locked = LayerLock.NONE
         if self.layer in self.viewer.layers:
             self.viewer.layers.remove(self.layer)
-        self.edit = self.layer = self.strokes = self.undone_operation = None
+        self.edit = self.layer = self.strokes = None
         self.selected_id = self.brush_id = None
         self.selected_object.setText("None")
         self.brush_label.clear()
@@ -596,7 +650,7 @@ class GeometryPanel(CollapsibleSection):
         self._sync_scope()
 
     def commit(self):
-        self._require_preview()
+        self._require_finished_stroke()
         session = self.state.active_session
         if self.state.filtering_result is not None:
             controls = self.window.context_panel.mask_review_page.intensity_control_settings()
@@ -666,31 +720,36 @@ class GeometryPanel(CollapsibleSection):
                 self.recalculate()
 
     def remove(self):
-        self._require_preview()
+        self._require_finished_stroke()
         self.edit.remove(self.selected_id)
-        self._begin_object_history()
+        self.strokes.clear()
+        self.strokes.changed_voxels += self.strokes.step_change(self.edit.steps[-1])
+        self._sync_objects(self.edit.steps[-1])
+        self.return_preview()
         self.layer.refresh()
         self._dimensions()
         self.refresh()
-        self.status.setText("Removal preview. Save or discard.")
+        self.status.setText("Object removed from the working preview. Undo to restore it.")
 
     def split(self):
+        self._require_finished_stroke()
         self.return_preview()
         new = self.edit.split(self.selected_id)
-        self._begin_object_history()
-        self._before_split_brush = self.brush_id
+        self._pending_dirty = self.strokes.changed_voxels
+        self.strokes.clear()
+        self.strokes.protect_split()
         self._set_brush(new)
         self.layer.brush_size = 1
         self.window.viewer_toolbar.set_ndisplay(2)
         self.window.viewer_toolbar.activate_tool("paint")
         self.refresh()
-        self.status.setText(f"Paint part of parent {self.selected_id} as ID {new}. Save to accept the split.")
+        self.status.setText(f"Paint part of parent {self.selected_id} as ID {new}. Erase to restore parent voxels. Apply or cancel the split.")
 
     def add_merge(self):
         self._require_preview()
         label = self.selected_id
-        if label is None or not self.edit.allows_label(label) or not (self.edit.base == label).any():
-            raise ValueError("Select an object from the committed editing source.")
+        if label is None or not self.edit.allows_label(label) or not (self.edit.preview == label).any():
+            raise ValueError("Select an object from the working preview.")
         if self.merge_target.findData(label) < 0:
             self.merge_list.addItem(str(label))
             self.merge_target.addItem(str(label), label)
@@ -712,16 +771,18 @@ class GeometryPanel(CollapsibleSection):
         self.refresh()
 
     def merge(self):
+        self._require_finished_stroke()
         self.return_preview()
         ids = [self.merge_target.itemData(row) for row in range(self.merge_target.count())]
         retained = self.merge_target.currentData()
         self.edit.merge(ids, retained)
-        self._begin_object_history()
+        self._pending_dirty = self.strokes.changed_voxels
+        self.strokes.clear()
         self.window.mask_selection.clear_selection(self.layer)
         self.layer.refresh()
         self._dimensions()
         self.refresh()
-        self.status.setText(f"Merge preview retains ID {retained}. Save or discard.")
+        self.status.setText(f"Merge preview retains ID {retained}. Apply or cancel.")
 
     def show_before(self):
         self.window.segmentation.ensure_comparison("before")

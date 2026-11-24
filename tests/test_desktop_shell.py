@@ -79,7 +79,7 @@ def test_hierarchical_navigation_at_supported_sizes(window, size):
     context = window.context_panel
     workflows = (
         ("preprocessing", ("crop_roi", "z_correction", "normalization")),
-        ("mask_review", ("filtering", "roi_counting", "mask_editing")),
+        ("mask_review", ("filtering", "roi_counting")),
         ("export", ("scientific_results", "multichannel_images")),
     )
     for workflow, keys in workflows:
@@ -109,10 +109,10 @@ def test_hierarchical_navigation_at_supported_sizes(window, size):
     assert navigation.collapsed and navigation.width() == 64
     assert all(not submenu.isVisible() for submenu in navigation._submenus.values())
     navigation._buttons["mask_review"].click()
-    assert navigation.current_subpage == "mask_editing"
+    assert navigation.current_subpage == "roi_counting"
     navigation.collapse_button.click()
     assert navigation._submenus["mask_review"].isVisible()
-    assert navigation._subpage_buttons["mask_review"]["mask_editing"].isChecked()
+    assert navigation._subpage_buttons["mask_review"]["roi_counting"].isChecked()
 
 
 @pytest.mark.parametrize("size", [(1024, 680), (1440, 900)])
@@ -703,3 +703,26 @@ def test_cleanup_and_repeated_window_construction(qapp, tmp_path):
         assert qt_viewer.close_count == 1
         value.deleteLater()
         qapp.processEvents()
+
+
+def test_proofreading_page_and_old_layout_migration(window):
+    from dataclasses import replace
+    navigation, ctx = window.navigation, window.context_panel
+    assert list(navigation._buttons) == ["project", "preprocessing", "segmentation", "mask_review",
+                                         "proofreading", "matching", "quantification", "quality_control", "export"]
+    window.set_workflow("proofreading")
+    assert ctx.stack.currentWidget().widget() is ctx.mask_review_page.proofreading_page
+    assert window.geometry_panel.isVisible()
+    window.geometry_panel.set_expanded(False)
+    window.geometry_panel.merge_section.set_expanded(True)
+    snapshot = replace(window.workspace_snapshot(), workflow="mask_review",
+                       workflow_subpages=(("mask_review", "mask_editing"),))
+    window.workspace_settings.write(snapshot)
+    window.geometry_panel.set_expanded(True)
+    window.geometry_panel.merge_section.set_expanded(False)
+    window.set_workflow("mask_review")
+    window.restore_layout()
+    assert navigation.current_workflow == "proofreading" and not window.geometry_panel.expanded
+    assert window.geometry_panel.merge_section.expanded
+    window.set_workflow("mask_review")
+    assert navigation.current_subpage == "filtering"

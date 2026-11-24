@@ -1,8 +1,8 @@
-# Phase 2D.4.4 unified mask review
+# Phase 2D.4.4.2 proofreading
 
 ## Working with masks
 
-Filter the active session, then open **Mask Review → Mask Editing → Start Editing**. Live filtered masks shows the retained objects. Start Editing opens the existing protected preview. Save Changes validates the transaction and immediately updates the same working layer. Another Start Editing continues with the accepted objects, including split children. Pause, Resume, Stop, the selection tools and the calibrated brush operate on that preview as before.
+Filter the active session, then open **Proofreading → Start Editing**. Live filtered masks shows the retained objects. Start Editing opens the existing protected preview. Save Changes validates the transaction and immediately updates the same working layer. Another Start Editing continues with the accepted objects, including split children. Pause, Resume, Stop, the selection tools and the calibrated brush operate on that preview as before.
 
 The Layers panel reports the working result's scientific status. **Automatically recalculate measurements after saving edits** is a desktop preference, initially off. Use **Recalculate Measurements** after a batch of corrections, or enable the preference to run the existing measurement worker after each save. A failed calculation reports the error and offers a retry. Each nuclear geometry change requires another ROI review before final quantification and export.
 
@@ -12,9 +12,42 @@ The Layers panel reports the working result's scientific status. **Automatically
 
 During an edit, use **Undo** and **Redo** beside Paint and Erase. On macOS, press **⌘Z** or **⌘⇧Z**. On Windows and Linux, press **Ctrl+Z** to undo and **Ctrl+Y** or **Ctrl+Shift+Z** to redo. Text and numeric fields keep their normal keyboard behavior.
 
-Each brush stroke is one step. Starting Split, Merge or Remove begins a new history on a pristine preview. For Split, undo the strokes first, then undo the split setup. A Merge or Remove preview is one step. Pause, switching slice views, and collapsing Geometry Editing preserve these steps. Changing between filtered and all-mask scope starts a fresh stroke history. Starting a new stroke clears redo. Preview history lasts until Save Changes or Discard Changes.
+Each brush stroke is one step. Remove accepts the whole-object removal immediately. For Split and Merge, **Apply Operation** accepts the proposal and **Cancel Operation** restores the preview at the start of that operation. After Apply, the complete structural operation is one Undo step. During a pending Split, Undo and Redo work on its individual strokes. **Escape** leaves Paint or Erase for Review / Select, including during Split. Erase restores child voxels to their parent.
 
-Outside a transaction, Undo in Mask Review invokes **Undo Last Saved Edit** for the active session. This uses the existing saved geometry history and marks scientific results for recalculation. Redo is available during a preview.
+Pause, switching slice views, and collapsing Geometry Editing preserve the transaction. A successful scope change starts a fresh undo range to protect the newly hidden labels. Earlier accepted operations remain in the transaction. A new accepted edit clears the redo branch. Save requires all pending proposals to be applied or canceled. Stop can discard a transaction with no net voxel changes.
+
+Outside a transaction, Undo in Proofreading or Mask Review invokes **Undo Last Saved Edit** for the active session. One saved revision covers the entire batch, including any objects created and later removed within it.
+
+## Phase 2D.4.4.2 implementation and verification
+
+**Navigation.** Project → Preprocessing → Segmentation → Mask Review → Proofreading → Matching → Quantification → Quality Control → Export. Mask Review contains Filtering and ROI & Counting. Proofreading hosts the existing selection, geometry editing, visualization and object-inspection widgets. Previous desktop layouts that opened Mask Editing reopen in Proofreading. Context-menu properties and Start Editing route to the same panel and viewer.
+
+**Split reproduction.** On baseline `73d9bb7`, a 3-pixel brush centered on the corner of parent 1 next to object 2 wrote child voxels over IDs 0, 1 and 2. Save rejected that stroke with “Paint only part of the parent with the proposed new ID.” The baseline also evaluated the structural operation against the transaction-wide delta. Each proposal now captures its own starting preview. Both mask-based and indexed napari writes intersect the proposal with the captured parent before writing data or recording stroke history. Apply checks that the parent and child each retain voxels and that their union equals the original parent. Applying a Split or Merge clears its parameters and merge selection and returns to Review / Select.
+
+**Geometry and provenance.** One mutable preview holds all corrections. Ordered sparse entries record the affected flat voxel indices, old and new labels, operation, parameters, scope and affected IDs. Ordinary strokes use napari's grouped paint events and native undo queues where available. Across operation boundaries the same strokes replay from their sparse entries. Save verifies the original session revision and retained selection, replays the complete sequence on authoritative geometry, checks scope and compares the result with the displayed preview. Only a successful save publishes one revision and invalidates dependent scientific results. All-mask membership is propagated in order. An ambiguous transfer or merge requires recalculation. Advanced Layers & History lists the operations within each saved batch.
+
+**Checkpoint and export.** Native v2 single-operation records keep their existing representation. Opening a checkpoint with mixed history requires a build that understands the transaction record. A mixed record adds the ordered steps to the net transaction delta. A child that is created and then merged away still appears in provenance and remains reserved for ID allocation. Loading verifies intermediate geometry, final geometry, affected IDs and retained membership. Undo Last Saved Edit uses the existing net delta. Scientific export reads current data-model results once recalculation and any required nuclear ROI review are complete.
+
+**Memory and limitations.** Storage for the accepted journal and redo branch scales with the sum of changed voxels across steps. Overlapping strokes can record the same voxel more than once. A pending Split or Merge temporarily holds one additional full preview for validation and cancellation. Apply or Cancel releases it. Save uses a full replay buffer which becomes the committed geometry. Structural validation, save, and checkpoint verification can take longer on large stacks. Split clipping uses the napari 0.10 Labels write path. Recheck the real canvas after changing napari versions. Native v2 checkpoints save committed work. The live preview and its Undo/Redo branch last only for the open transaction. Split remains manual.
+
+**Automated regressions.** On Linux, 170 tests passed across geometry editing, context menus, desktop navigation, mask review, filtering, native checkpoints, quantification and export, and napari embedding. The real Qt/napari canvas ran under Xorg with software OpenGL. The suite exercised provisional export rejection, recalculated raw and filtered TIFFs, checkpoint reload on both sides of recalculation, and whole-transaction saved Undo.
+
+### Files changed in Phase 2D.4.4.2
+
+| Area | Files |
+| --- | --- |
+| Navigation, inspection and layouts | `workflow_navigation.py`, `context_panel.py`, `desktop_window.py`, `mask_review_panel.py`, `mask_context_menu.py`, `workspace_settings.py` |
+| Editing, stroke integration and saved history | `geometry_edit.py`, `geometry_panel.py`, `preview_history.py` |
+| Regression coverage | `test_geometry_edit.py`, `test_desktop_shell.py`, `test_mask_context_menu.py`, `test_mask_review_gui.py`, `test_quantification_gui.py` |
+| Workflow and native validation | `PHASE_2D_4_PROOFREADING.md` |
+
+### Native macOS validation checklist
+
+- [ ] Restore a saved Mask Editing layout and verify the Proofreading page, panel widths, collapse states and session selection. Open object properties from Segmentation and Start Editing from Filtering.
+- [ ] On a retained object beside another object, paint across its edge in XY and an orthogonal slice. Erase part of the child, consume the whole parent, correct the proposal and apply it. Inspect the neighbor, background and hidden labels.
+- [ ] Paint, remove, merge, split and paint a new child in one transaction. Cancel a second proposal. Use ⌘Z and ⌘⇧Z across the applied operations while paused and with the panel collapsed. Check Escape in Paint, Erase, a pending Split and a text field.
+- [ ] Save once with automatic recalculation off. Inspect the single revision and its steps, reopen the checkpoint and undo the saved batch. Repeat in a cytoplasmic session and confirm the nuclear session retains its geometry and settings.
+- [ ] Enable automatic recalculation and save another batch. Verify one measurement run, the retained layer appearance and export gating. Review the nuclear ROI where required, then compare the filtered TIFF, raw TIFF and retained-object table.
 
 ## State ownership and scientific integrity
 
@@ -38,7 +71,7 @@ Scientific export reads the model's current filtering and quantification records
 
 A filtered edit still needs its writable preview and a complete validated commit. A provisional display with excluded labels needs one ZYX working array and plane-sized temporary masks. When every label is retained, the view shares committed geometry. Complete comparison shares the committed array. Opening a historical comparison materializes one ZYX volume from the latest delta. The checkpoint stores IDs for these projections. Voxel history still grows with the number of changed voxels. A measurement-routed corrected channel can retain one float32 ZYX array until its correction or project is invalidated.
 
-## Automated verification
+## Phase 2D.4.4 baseline verification
 
 The complete Linux regression run covered 302 distinct pytest tests and 13 scientific subtests using Python 3.12.14, Qt 6.11.0 with PyQt6, and napari 0.10.0. The rendered 2D/3D canvas test ran under Xorg with software OpenGL.
 
@@ -51,7 +84,7 @@ The complete Linux regression run covered 302 distinct pytest tests and 13 scien
 
 A combined run aborted in the legacy launcher preview while processing Qt events. Combined runs also exposed timing-sensitive first renders in the live-plot tests. The final groups ran the live-plot module and the legacy launcher preview in fresh processes with their existing assertions. Native macOS validation of this phase is pending.
 
-## Native macOS validation checklist
+## Phase 2D.4.4 native macOS validation checklist
 
 Use a duplicate calibrated project with nonzero crop offset, anisotropic spacing, and nuclear and cytoplasmic sessions containing overlapping numeric IDs.
 

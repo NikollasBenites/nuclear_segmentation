@@ -106,7 +106,7 @@ class MaskContextMenu:
         workflow = self.window.navigation.current_workflow
         subpage = self.window.navigation.current_subpage
         edit = self.panel.edit
-        if workflow != "mask_review":
+        if workflow not in ("mask_review", "proofreading"):
             if workflow in ("segmentation", "quantification", "quality_control"):
                 return {"select": "Select Mask", "properties": "Show Mask Properties"}
             return {}
@@ -116,15 +116,15 @@ class MaskContextMenu:
             source = effective_masks(self.state.segmentation_result)
             scope_ok = (not self.panel.scope.currentData()
                         or hit.label in (self.state.proofreading_ids or ()))
-            if (subpage in ("filtering", "mask_editing") and scope_ok and self.state.segmentation_is_current
+            if ((subpage == "filtering" or workflow == "proofreading") and scope_ok and self.state.segmentation_is_current
                     and self.window._project_idle() and not review._filter_timer.isActive()
                     and (source is hit.layer.data or any((plane == hit.label).any() for plane in source))):
                 allowed["start"] = "Start Editing"
             return allowed
         allowed = {"properties": "Show Object Properties"}
-        if subpage == "mask_editing" and not self.panel.paused and edit.operation == "paint/erase":
+        if workflow == "proofreading" and not self.panel.paused and edit.operation == "paint/erase":
             allowed["select"] = "Select Object"
-            if edit.is_pristine() and edit.allows_label(hit.label):
+            if edit.allows_label(hit.label):
                 if self.panel.merge_target.findData(hit.label) < 0:
                     allowed["add_merge"] = "Add to Merge Selection"
                 allowed.update(split="Split Object", remove="Remove Object")
@@ -157,8 +157,7 @@ class MaskContextMenu:
         window = self.window
         if key in {"start", "properties"}:
             window.toggle_context_action.setChecked(True)
-            window.set_workflow("mask_review")
-            window.navigation.set_subpage("mask_editing", emit=True)
+            window.set_workflow("proofreading")
         window.viewer_toolbar.activate_tool("review")
         if window.mask_selection.select_mask(hit.layer, hit.label) != hit.label:
             return

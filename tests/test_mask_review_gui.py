@@ -82,7 +82,7 @@ def test_mask_review_page_activation_and_result_summary(review_window):
     assert panel.mask_count.text() == "Detected masks: 2"
     assert panel.show_all_button.isEnabled()
     assert not panel.show_selected_button.isEnabled()
-    window.navigation.set_subpage("mask_editing", emit=True)
+    window.set_workflow("proofreading")
     assert "selection and visibility" in panel.review_status.text()
     layer = window.segmentation.result_layer
     assert layer is not None
@@ -94,7 +94,7 @@ def test_filter_slider_is_debounced_without_requesting_measurement(review_window
     window, _ = review_window
     panel = window.context_panel.mask_review_page
     window.set_workflow("mask_review")
-    for subpage in ("roi_counting", "mask_editing", "filtering", "roi_counting", "filtering"):
+    for subpage in ("roi_counting", "filtering", "roi_counting", "filtering"):
         window.navigation.set_subpage(subpage, emit=True)
     emitted = []
     recalculated = []

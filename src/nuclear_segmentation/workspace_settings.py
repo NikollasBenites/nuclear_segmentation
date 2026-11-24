@@ -23,6 +23,7 @@ class WorkspaceSnapshot:
     workflow: str
     project_sections: tuple[tuple[str, bool], ...] = ()
     workflow_subpages: tuple[tuple[str, str], ...] = ()
+    proofreading_sections: tuple[tuple[str, bool], ...] = ()
 
 
 class WorkspaceSettings:
@@ -34,6 +35,15 @@ class WorkspaceSettings:
     def _key(self, slot: str, name: str) -> str:
         return f"{SETTINGS_GROUP}/{slot}/{name}"
 
+    def _sections(self, slot, name):
+        try:
+            values = json.loads(str(self.settings.value(self._key(slot, name), "{}")))
+        except (TypeError, ValueError):
+            return ()
+        if not isinstance(values, dict):
+            return ()
+        return tuple((str(key), value) for key, value in values.items() if isinstance(value, bool))
+
     def read(self, slot: str = "current") -> WorkspaceSnapshot | None:
         geometry = self.settings.value(self._key(slot, "geometry"), QByteArray())
         if not isinstance(geometry, QByteArray) or geometry.isEmpty():
@@ -44,21 +54,16 @@ class WorkspaceSettings:
             sizes = tuple(max(0, int(value)) for value in raw_sizes)
         except (TypeError, ValueError):
             sizes = ()
-        raw_sections = self.settings.value(self._key(slot, "project_sections"), "{}")
-        try:
-            parsed_sections = json.loads(str(raw_sections))
-            sections = tuple(
-                (str(key), bool(value))
-                for key, value in parsed_sections.items()
-                if isinstance(value, bool)
-            )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            sections = ()
         raw_subpages = self.settings.value(self._key(slot, "workflow_subpages"), "{}")
         try:
             subpages = json.loads(str(raw_subpages))
         except (TypeError, ValueError):
             subpages = {}
+        workflow = str(self.settings.value(self._key(slot, "workflow"), "project"))
+        if isinstance(subpages, dict) and subpages.get("mask_review") == "mask_editing":
+            subpages["mask_review"] = "filtering"
+            if workflow == "mask_review":
+                workflow = "proofreading"
         return WorkspaceSnapshot(
             geometry=geometry,
             window_state=state if isinstance(state, QByteArray) else QByteArray(),
@@ -72,8 +77,9 @@ class WorkspaceSettings:
             context_visible=self.settings.value(
                 self._key(slot, "context_visible"), True, type=bool
             ),
-            workflow=str(self.settings.value(self._key(slot, "workflow"), "project")),
-            project_sections=sections,
+            workflow=workflow,
+            project_sections=self._sections(slot, "project_sections"),
+            proofreading_sections=self._sections(slot, "proofreading_sections"),
             workflow_subpages=tuple(
                 (key, value) for key, value in subpages.items() if isinstance(value, str)
             ) if isinstance(subpages, dict) else (),
@@ -89,6 +95,7 @@ class WorkspaceSettings:
             "context_visible": snapshot.context_visible,
             "workflow": snapshot.workflow,
             "project_sections": json.dumps(dict(snapshot.project_sections)),
+            "proofreading_sections": json.dumps(dict(snapshot.proofreading_sections)),
             "workflow_subpages": json.dumps(dict(snapshot.workflow_subpages)),
         }
         for name, value in values.items():

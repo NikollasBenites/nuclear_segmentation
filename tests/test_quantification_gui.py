@@ -302,7 +302,7 @@ def test_scientific_package_preserves_schema_results_and_executed_provenance(
     quantification = state.quantification_result
     roi = state.scientific_roi
     window.set_workflow("mask_review")
-    for key in ("roi_counting", "mask_editing", "filtering"):
+    for key in ("roi_counting", "filtering"):
         window.navigation.set_subpage(key, emit=True)
     window.set_workflow("quantification")
     window.set_workflow("export")
@@ -660,11 +660,10 @@ def test_edited_export_preserves_raw_and_uses_committed_marker_geometry(scientif
     state, raw = measure(marker=True)
     edit = GeometryEdit(state)
     edit.remove(13)
-    edit.commit()
-    edit = GeometryEdit(state, filtered=True)
     removed_voxel = tuple(np.argwhere(raw == 37)[0])
     edit.preview[removed_voxel] = 0
     edit.commit()
+    assert [step["operation"] for step in state.segmentation_result["edit_history"][-1]["steps"]] == ["remove", "paint/erase"]
     expected = np.where(raw == 13, 0, raw)
     expected[removed_voxel] = 0
     rejected = tmp_path / "provisional"

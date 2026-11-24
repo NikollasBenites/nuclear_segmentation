@@ -8,6 +8,8 @@ from qtpy.QtGui import QKeySequence
 from qtpy.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit,
                             QPlainTextEdit, QTextEdit, QWidget)
 
+from .geometry_edit import voxel_step
+
 
 class PreviewStrokes:
     """Keep napari's bounded stroke queues on one preview and one editing scope.
@@ -19,6 +21,7 @@ class PreviewStrokes:
         self.layer = layer
         self.edit = edit
         self.changed_voxels = 0
+        self.original_split_writes = None
         self.provisional_ids = set()
         if edit.filter_record is None and edit.retained_ids is not None:
             self.provisional_ids.update(edit.retained_ids)
@@ -40,6 +43,70 @@ class PreviewStrokes:
 
     def available(self, redo):
         return bool(self.layer._redo_history if redo else self.layer._undo_history)
+
+    def brush_step(self, atoms):
+        """Normalize a grouped native stroke, preserving first-before and last-after on overlap."""
+        indices, before, after = [], [], []
+        shape = self.layer.data.shape
+        for atom in atoms:
+            if hasattr(atom, "slice_key"):
+                extent = tuple(len(range(*sl.indices(n))) for sl, n in zip(atom.slice_key, shape, strict=True))
+                local = np.indices(extent).reshape(len(shape), -1) if atom.mask is None else np.nonzero(atom.mask)
+                coords = tuple(sl.indices(n)[0] + v * sl.indices(n)[2]
+                               for sl, n, v in zip(atom.slice_key, shape, local, strict=True))
+                old, new = atom.old_values, atom.new_value
+            else:
+                coords, old, new = atom
+            locations = np.ravel_multi_index(coords, shape).ravel()
+            indices.append(locations)
+            before.append(np.asarray(old).ravel())
+            after.append(np.broadcast_to(new, locations.shape))
+        idx = np.concatenate(indices)
+        unique, first = np.unique(idx, return_index=True)
+        _, last = np.unique(idx[::-1], return_index=True)
+        old, new = np.concatenate(before)[first], np.concatenate(after)[len(idx) - 1 - last]
+        changed = old != new
+        return voxel_step("paint/erase", {}, unique[changed], old[changed], new[changed], self.edit.scope)
+
+    def step_change(self, step):
+        coords = np.unravel_index(step["indexes"], self.layer.data.shape)
+        return self.count_change([(coords, step["before"], step["after"])])
+
+    def protect_split(self):
+        # Clip before napari writes voxels, records history or refreshes its label
+        # texture. Erase maps to the parent here so the texture gets the same ID.
+        layer, edit = self.layer, self.edit
+        paint_region = layer._paint_region_with_mask
+        setitem = layer.data_setitem
+        parent, child = edit.parameters["parent"], edit.parameters["new_id"]
+
+        def paint(slice_key, mask, new_label, dims_to_paint, refresh=True, region_data=None):
+            if new_label not in (child, 0):
+                return
+            other_axes = tuple(i for i in range(layer.ndim) if i not in dims_to_paint)
+            allowed = np.squeeze(edit.pending_source[slice_key], axis=other_axes) == parent
+            paint_region(slice_key, mask & allowed, child if new_label else parent, dims_to_paint, refresh, region_data)
+
+        def write(indices, value, refresh=True):
+            values = np.broadcast_to(value, np.shape(indices[0]))
+            allowed = (edit.pending_source[indices] == parent) & np.isin(values, (0, child))
+            coords = tuple(np.asarray(axis)[allowed] for axis in indices)
+            setitem(coords, np.where(values[allowed] == 0, parent, child), refresh)
+
+        self.original_split_writes = {name: vars(layer)[name] for name in ("_paint_region_with_mask", "data_setitem")
+                                      if name in vars(layer)}
+        layer._paint_region_with_mask = paint
+        layer.data_setitem = write
+
+    def release_split(self):
+        if self.original_split_writes is None:
+            return
+        for name in ("_paint_region_with_mask", "data_setitem"):
+            if name in self.original_split_writes:
+                setattr(self.layer, name, self.original_split_writes[name])
+            else:
+                delattr(self.layer, name)
+        self.original_split_writes = None
 
     def count_change(self, atoms):
         # Compare only the touched voxels. Overlapping strokes, including an
@@ -93,6 +160,7 @@ class ProofreadingShortcuts(QObject):
                 if sys.platform != "darwin":
                     keys.append(QKeySequence("Ctrl+Y"))
             self.bindings[name] = list(dict.fromkeys(keys))
+        self.bindings["escape"] = [QKeySequence("Escape")]
         QApplication.instance().installEventFilter(self)
 
     def tooltip(self, name):
@@ -120,9 +188,16 @@ class ProofreadingShortcuts(QObject):
         if action is None or self._text_input(receiver):
             return False
         panel = self.panel
-        if panel.busy:
+        if action == "escape":
+            if (not panel.busy or panel.paused or panel.strokes.in_stroke or not panel._owns_preview()
+                    or QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None
+                    or self._text_input(QApplication.focusWidget()) or str(panel.layer.mode) not in ("paint", "erase")
+                    or panel.viewer.layers.selection.active is not panel.layer):
+                return False
+            button = panel.buttons["review"]
+        elif panel.busy:
             button = panel.buttons[action + "_preview"]
-        elif action == "undo" and panel.window.navigation.current_workflow == "mask_review":
+        elif action == "undo" and panel.window.navigation.current_workflow in ("mask_review", "proofreading"):
             current = panel.viewer.layers.selection.active
             if isinstance(current, (Labels, Points, Shapes)) and current.editable:
                 return False

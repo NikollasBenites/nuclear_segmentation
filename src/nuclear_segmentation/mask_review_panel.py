@@ -157,10 +157,10 @@ class MaskReviewPanel(QWidget):
         self._filter_timer.setInterval(120)
         self._filter_timer.timeout.connect(self.filters_changed)
         self.marker_rows = []
-        self.pages = {key: QWidget() for key in ("filtering", "roi_counting", "mask_editing")}
-        filtering, counting, editing = (
-            QVBoxLayout(page) for page in self.pages.values()
-        )
+        self.pages = {key: QWidget() for key in ("filtering", "roi_counting")}
+        self.proofreading_page = QWidget()
+        filtering, counting = (QVBoxLayout(page) for page in self.pages.values())
+        editing = QVBoxLayout(self.proofreading_page)
         for page_layout in (filtering, counting, editing):
             page_layout.setContentsMargins(0, 8, 0, 0)
             page_layout.setSpacing(8)
