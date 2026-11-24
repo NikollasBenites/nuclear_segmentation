@@ -353,8 +353,9 @@ class CropWorkspaceController(QObject):
             self._status("No imported dataset is available to restore.")
             return False
         self.cancel_preview()
-        dataset = self.project_state.reset_crop()
-        self.working_dataset_changed.emit(dataset)
+        if self.project_state.crop_provenance is not None:
+            dataset = self.project_state.reset_crop()
+            self.working_dataset_changed.emit(dataset)
         self._remove_layer(self.projection_layer)
         self._remove_layer(self.selection_layer)
         self.projection_layer = None

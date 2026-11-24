@@ -771,10 +771,10 @@ class NormalizationController(QObject):
         if current != self._fingerprint:
             self.invalidate()
             return False
-        if (
-            self._report["mode"] == "roi_fixed"
-            and self.project_state.z_correction_applied
-        ):
+        channel = self._report["channel_index"]
+        if (self._report["mode"] == "roi_fixed"
+                and channel in self.project_state.z_correction_applied
+                and self.project_state.z_correction_options[channel]["segmentation"]):
             self._status(
                 "Applied Z correction changes the model input intensities. Reset "
                 "Z correction before applying ROI-fixed normalization limits."
@@ -804,7 +804,11 @@ class NormalizationController(QObject):
             (self.project_state.normalization_configuration or {}).get("provenance")
         )
         if report and report.get("input_source") == "z_corrected":
-            self.invalidate()
+            index = report["channel_index"]
+            recorded = (report.get("z_correction_provenance") or {}).get("options")
+            if (index not in self.project_state.z_correction_applied
+                    or self.project_state.z_correction_options.get(index) != recorded):
+                self.invalidate()
 
     def reset(self) -> None:
         self.remove_preview()

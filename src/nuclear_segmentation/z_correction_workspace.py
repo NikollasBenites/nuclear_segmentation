@@ -310,6 +310,8 @@ class ZCorrectionController(QObject):
         if (
             self.project_state.normalization_is_current
             and normalization.get("mode") == "roi_fixed"
+            and self.project_state.active_channel_index in indexes
+            and self.panel.options_for(self.project_state.active_channel_index)["segmentation"]
         ):
             self._status(
                 "ROI-fixed normalization limits describe uncorrected intensities. "
@@ -382,7 +384,7 @@ class ZCorrectionController(QObject):
         self.project_state.invalidate_z_corrections()
         for channel in self.project_state.channels:
             if channel.index in self.project_state.z_correction_options:
-                self.panel.set_channel_state(channel.index, "Outdated after crop")
+                self.panel.set_channel_state(channel.index, "Outdated after grid change")
         self.panel.results.set_results("Z-correction results are outdated.")
 
     def reset_selected(self, channel_indexes) -> None:

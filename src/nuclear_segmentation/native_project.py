@@ -2,6 +2,7 @@
 from dataclasses import asdict, fields, replace
 from functools import partial
 import json
+import logging
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -20,7 +21,7 @@ from .manual_review import ManualReview
 from .normalization import mask_digest
 from .normalization_workspace import _options_from_report, cellpose_configuration, normalization_fingerprint
 from .project_state import ChannelDescriptor, ProjectState, SegmentationSession
-from .scientific_input import validate_scientific_input
+from .scientific_input import correction_route, measurement_config, same_input_except_z_corrections, validate_scientific_input
 from .z_correction import validate_options
 
 MANIFEST = "project.json"
@@ -422,6 +423,8 @@ def _validated_state(dataset, payload, version):
                 pending = record["display_state"].pop("pending_geometry_revision", None)
                 record.setdefault("pending_geometry_revision", pending)
             record.setdefault("measurement_error", None)
+            record.setdefault("segmentation_invalidation_reason", None)
+            record.setdefault("measurement_invalidation_reason", None)
             if set(record) == set(SESSION_FIELDS).difference(normalization_fields, {"normalization_settings"}):
                 record = dict(record, normalization_settings=None, **previous_normalization)
             if set(record) != set(SESSION_FIELDS):
@@ -440,7 +443,10 @@ def _validated_state(dataset, payload, version):
                 or (session.pending_geometry_revision is not None and (
                     type(session.pending_geometry_revision) is not int
                     or session.pending_geometry_revision != session.geometry_revision or session.filtering_is_current))
-                or (session.measurement_error is not None and not isinstance(session.measurement_error, str))
+                or any(value is not None and not isinstance(value, str) for value in (
+                    session.measurement_error, session.segmentation_invalidation_reason,
+                    session.measurement_invalidation_reason,
+                ))
                 or any(type(value) is not bool for value in (
                     session.segmentation_is_current, session.filtering_is_current,
                     session.scientific_roi_reviewed, session.quantification_is_current,
@@ -467,17 +473,24 @@ def _validated_state(dataset, payload, version):
 
     # Shared historical preprocessing uses the original nuclear import provenance.
     state.restore_sessions(sessions, "nuclear")
-    shared_inputs_valid = _validate_preprocessing(state, payload)
+    _validate_preprocessing(state, payload)
     for session_id, session in state.sessions.items():
         state.select_session(session_id)
         if session.normalization_settings is not None:
             _validate_normalization_controls(session.normalization_settings, indexes)
         if session.segmentation_settings is not None:
             _validate_segmentation_controls(session.segmentation_settings)
-        if not shared_inputs_valid:
-            session.segmentation_is_current = False
         _validate_normalization(state, payload, check_preview=session_id == active_id)
+        was_current = session.segmentation_is_current, session.filtering_is_current
+        previous = (session.input_revision, session.geometry_revision, session.measurement_revision)
         _validate_results(state)
+        current = session.segmentation_is_current, session.filtering_is_current
+        if was_current != current:
+            logging.getLogger(__name__).info(
+                "Invalidation operation=validate checkpoint session=%s current(mask,filter)=%s->%s "
+                "revisions(input,geometry,measurement)=%s->%s", session_id, was_current, current, previous,
+                (session.input_revision, session.geometry_revision, session.measurement_revision),
+            )
     for session in sessions.values():
         session.display_state.setdefault("channels", {c.index: c.visible for c in channels})
     state.select_session(active_id)
@@ -518,12 +531,12 @@ def _validate_preprocessing(state, payload):
             "working_shape_czyx": list(working_shape),
             "working_offset_yx": list(state.working_offset_yx),
             "voxel_spacing_zyx_um": list(state.voxel_spacing_zyx_um),
-            "channel_name_at_calculation": channel_names.get(index),
             "source_path": str(original.source_path),
             "series_index": original.series_index,
             "series_identifier": str(original.series_identifier),
         }
-        if index not in channel_names or any(report.get(key) != value for key, value in expected.items()):
+        if (index not in channel_names or not state.z_report_matches_channel(report, index, channel_names[index])
+                or any(report.get(key) != value for key, value in expected.items())):
             state.z_correction_reports.pop(index)
             z_previews.pop(index, None)
     legacy_reports = {
@@ -533,12 +546,11 @@ def _validate_preprocessing(state, payload):
         and report["options"] == state.legacy_import["configuration"]["z_corrections"].get(channel_names[index])
     }
     valid_applied = state.z_correction_applied.intersection(set(z_previews) | legacy_reports)
-    applied_compatible = valid_applied == state.z_correction_applied
-    if not applied_compatible:
-        state.z_correction_applied = valid_applied
-        state.normalization_is_current = False
-
-    return applied_compatible
+    # Incomplete applied records cannot certify the channels that consumed them.
+    previous = {i: state.z_correction_options.get(i, {"segmentation": True, "measurement": True})
+                for i in state.z_correction_applied}
+    state.z_correction_applied = valid_applied
+    state._invalidate_changed_routes(previous, "checkpoint Z correction unavailable")
 
 
 def _validate_normalization(state, payload, *, check_preview):
@@ -659,7 +671,7 @@ def _validate_results(state):
         if state.segmentation_is_current:
             try:
                 config = segmentation["scientific_config"]
-                validate_scientific_input(state, config, completed_result=segmentation)
+                validate_scientific_input(state, measurement_config(state, config), completed_result=segmentation)
                 provenance = segmentation.get("input_provenance")
                 state.segmentation_is_current = (
                     shape == working_shape[1:] and compatible(provenance)
@@ -668,6 +680,8 @@ def _validate_results(state):
                 )
             except (KeyError, ValueError):
                 state.segmentation_is_current = False
+            if not state.segmentation_is_current:
+                session.segmentation_invalidation_reason = "checkpoint segmentation input provenance is incompatible"
         if "device" not in segmentation:
             raise ValueError("The checkpoint contains incomplete segmentation metadata.")
         masks.setflags(write=False)
@@ -729,10 +743,21 @@ def _validate_results(state):
             and session.roi_grid_compatible
         )
         filtering["roi_reviewed"] = state.scientific_roi_reviewed
+        measured = session.measured_channels(state.channels)
+        corrections = state.legacy_z_corrections()
+        measured_routes_match = "z_corrections" in provenance and all(
+            correction_route(provenance["z_corrections"].get(channel.name), "measurement")
+            == correction_route(corrections.get(channel.name), "measurement")
+            for channel in state.channels if channel.index in measured
+        )
+        if state.filtering_is_current and state.segmentation_is_current and not measured_routes_match:
+            session.measurement_invalidation_reason = "checkpoint measurement intensity routes changed"
         state.filtering_is_current = bool(
             state.filtering_is_current and state.segmentation_is_current and compatible(provenance)
             and filtering["input_segmentation_provenance"] == segmentation.get("input_provenance")
-            and provenance == segmentation.get("input_provenance")
+            and measured_routes_match
+            and same_input_except_z_corrections(provenance, segmentation["input_provenance"])
+            and all(channel_names[item["index"]] == item["name"] for item in filtering["intensity_definitions"])
             and expected_markers == measured_markers
             and (measured_roi is not None or session.scientific_role == "cytoplasmic")
             and session.roi_grid_compatible

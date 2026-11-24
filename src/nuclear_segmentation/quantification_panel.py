@@ -264,7 +264,10 @@ class QuantificationPanel(QWidget):
         if not state.segmentation_is_current:
             self._clear("Quantification unavailable: a current segmentation is required.")
             return
-        self._clear("Quantification pending: review the measurements and ROI.")
+        if state.active_session.measurement_invalidation_reason:
+            self._clear("Quantification outdated — recalculate measurements.")
+        else:
+            self._clear("Quantification pending: review the measurements and ROI.")
         if state.segmentation_is_current:
             self.summary_values["total"].setText(f"{state.segmentation_result.get('edited_object_count', state.segmentation_result['object_count']):,}")
         if state.filtering_is_current:

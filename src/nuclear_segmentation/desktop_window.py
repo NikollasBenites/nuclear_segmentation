@@ -196,10 +196,12 @@ class DesktopWindow(QMainWindow):
         self.filtering.conflict_operations += (self.image_export,)
         self.image_export.bind_filtering(self.filtering)
         self.filtering.status_changed.connect(self.statusBar().showMessage)
-        self.z_correction.correction_applied.connect(self.normalization.invalidate)
         self.project_state.scientific_channels_changed.connect(self.normalization.invalidate)
         self.project_state.calibration_changed.connect(
             lambda spacing, source: self.normalization.invalidate()
+        )
+        self.project_state.calibration_changed.connect(
+            lambda spacing, source: self.z_correction.invalidate_all()
         )
         self.crop_workspace.working_dataset_changed.connect(
             lambda dataset: self.normalization.invalidate()
@@ -950,6 +952,8 @@ class DesktopWindow(QMainWindow):
                 )
                 if session.intensity_controls is not None:
                     review.restore_intensity_controls(session.intensity_controls)
+                if not state.filtering_is_current:
+                    review.measurement_status.setText(self.filtering.working_status)
                 if not session.roi_grid_compatible:
                     review.accept_roi_button.setEnabled(False)
                     review.roi_status.setText("ROI geometry was incompatible. Recalculate measurements to review a new ROI.")

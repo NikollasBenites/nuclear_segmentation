@@ -23,6 +23,7 @@ from .image_export import export_images
 from .manual_review import ManualReview
 from .normalization import mask_digest
 from .runtime import execute_stage
+from .scientific_input import measurement_config
 from .stages.export import SCIENTIFIC_OUTPUTS, _choose_export_destination, _export_folder_error
 
 
@@ -123,8 +124,10 @@ class ImageExportController(QObject):
             return "An export is running."
         if not self.panel.selected_scientific_outputs():
             return "Select at least one scientific export output."
-        if not state.segmentation_is_current or not state.filtering_is_current:
-            return "Complete a current segmentation and calculate scientific measurements."
+        if not state.segmentation_is_current:
+            return "Complete a current segmentation before scientific export."
+        if not state.filtering_is_current:
+            return "Recalculate measurements and filters before scientific export."
         if state.active_session.scientific_role != "nuclear":
             return "Scientific density export is available for nuclear sessions."
         if not state.scientific_roi_reviewed:
@@ -199,7 +202,7 @@ class ImageExportController(QObject):
         segmentation = state.segmentation_result
         filtering = state.filtering_result
         quantification = state.quantification_result
-        config = validate_config(segmentation["scientific_config"])
+        config = validate_config(measurement_config(state, segmentation["scientific_config"]))
         masks = effective_masks(segmentation)
         roi = state.scientific_roi
         spacing = tuple(state.voxel_spacing_zyx_um)
@@ -229,7 +232,7 @@ class ImageExportController(QObject):
         executed = deepcopy(segmentation.get("parameters", {}))
         normalize = executed.get("normalize", config["CELLPOSE_NORMALIZE"])
         normalization = state.normalization_configuration or {}
-        z_corrections = deepcopy(segmentation.get("z_corrections", config["Z_CORRECTIONS"]))
+        z_corrections = config["Z_CORRECTIONS"]
         z_reports = {}
         for channel in config["CHANNELS"]:
             index, name = channel["index"], channel["name"]

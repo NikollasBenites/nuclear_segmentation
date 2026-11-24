@@ -685,10 +685,7 @@ class MaskReviewPanel(QWidget):
             self.mask_count.setText(
                 f"Detected masks: {int(result.get('edited_object_count', result['object_count'])):,}"
             )
-            self.review_status.setText(
-                "Previous masks remain visible for inspection but are outdated. "
-                "Rerun segmentation before further scientific review."
-            )
+            self.review_status.setText(self.project_state.active_session.outdated_segmentation_status)
         self._refresh_actions()
         session = self.project_state.active_session
         if self.project_state.geometry_pending:

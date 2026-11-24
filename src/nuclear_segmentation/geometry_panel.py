@@ -279,7 +279,9 @@ class GeometryPanel(CollapsibleSection):
         self.buttons["show_retained"].setEnabled(not self.busy and self.state.proofreading_ids is not None)
         self.scientific_status.setText(self.window.filtering.working_status)
         self.scientific_status.setVisible(bool(result))
-        self.buttons["recalculate"].setVisible(self.state.geometry_pending)
+        self.buttons["recalculate"].setVisible(current and (
+            self.state.geometry_pending or bool(self.state.active_session.measurement_invalidation_reason)
+        ))
         self.buttons["recalculate"].setEnabled(not self.busy and not self.window.filtering.busy)
         if self.busy:
             active = self.viewer.layers.selection.active is self.layer and self.layer.visible

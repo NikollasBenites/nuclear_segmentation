@@ -508,9 +508,7 @@ class SegmentationPanel(QWidget):
             )
             self._show_completed_result()
         else:
-            self.execution_summary.setText(
-                "Previous segmentation remains available but is outdated for the current settings."
-            )
+            self.execution_summary.setText(self.project_state.active_session.outdated_segmentation_status)
             self._show_configuration()
         self.refresh()
 

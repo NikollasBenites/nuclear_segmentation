@@ -264,6 +264,10 @@ def test_stale_segmentation_and_pending_settings_remain_stale(project, tmp_path,
     panel = window.context_panel.preprocessing_page
     assert window.z_correction.calculate({0: panel.z_correction_panel.options_for(0)}, 0, True)
     _wait(app, lambda: not window.z_correction.busy)
+    assert window.project_state.segmentation_is_current
+    assert window.z_correction.apply([0])
+    assert window.z_correction.calculate({0: panel.z_correction_panel.options_for(0)}, 0, True)
+    _wait(app, lambda: not window.z_correction.busy)
     assert not window.project_state.segmentation_is_current
     assert not window.project_state.z_correction_applied
     panel.z_correction_panel.fields["percentile"].setValue(92)
@@ -601,7 +605,7 @@ def test_original_v2_sessions_restore_shared_normalization(project, tmp_path, mo
     save(window, app, folder)
     snapshot = _read_snapshot(folder)
     for record in snapshot["sessions"].values():
-        del record["display_state"]
+        del record["display_state"], record["segmentation_invalidation_reason"], record["measurement_invalidation_reason"]
         if phase == "2D.2":
             del record["normalization_settings"], record["normalization_configuration"], record["normalization_is_current"]
     older = tmp_path / phase

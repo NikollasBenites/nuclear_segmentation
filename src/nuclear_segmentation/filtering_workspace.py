@@ -15,7 +15,8 @@ from .geometry_edit import effective_masks, retained_geometry
 from .manual_review import ManualReview
 from .normalization import mask_digest
 from .runtime import validate_roi_geometry
-from .scientific_input import capture_scientific_input, prepare_captured_scientific_input
+from .scientific_input import (capture_scientific_input, measurement_config,
+                               prepare_captured_scientific_input, same_input_except_z_corrections)
 
 
 def calculate_filtering_prerequisites(project_state, config):
@@ -209,6 +210,8 @@ class FilteringController(QObject):
         if self._job is not None and self._job.owner == state.session_revision() and self._worker is not None:
             if self._worker.measurement_revision == state.active_session.measurement_revision:
                 return "Recalculating measurements and filters…"
+        if state.segmentation_result and not state.segmentation_is_current:
+            return state.active_session.outdated_segmentation_status
         if error := state.active_session.measurement_error:
             return f"Recalculation failed — {error}. Retry Recalculate Measurements."
         if state.filtering_is_current:
@@ -221,6 +224,8 @@ class FilteringController(QObject):
             if ids is None:
                 return "Manual edits saved — recalculation required to establish retained objects"
             return f"Manual edits saved — recalculation required · {len(ids):,} retained in preview"
+        if reason := state.active_session.measurement_invalidation_reason:
+            return f"Measurements outdated — {reason}. Recalculate Measurements."
         if state.filtering_result is not None:
             return "Recalculation required"
         return "Measurements have not been calculated."
@@ -228,9 +233,7 @@ class FilteringController(QObject):
     def _measurement_config(self):
         result = self.state.segmentation_result or {}
         executed = result.get("scientific_config")
-        config = deepcopy(executed) if executed is not None else self.config_provider()
-        config["PERINUCLEAR_MARKERS"] = self.state.legacy_perinuclear_markers()
-        return config
+        return measurement_config(self.state, executed if executed is not None else self.config_provider())
     @staticmethod
     def _roi_provenance(result):
         provenance = deepcopy(result.get("measurement_provenance", {}))
@@ -241,8 +244,8 @@ class FilteringController(QObject):
             self.state.scientific_roi is not None
             and tuple(self.state.scientific_roi.shape)
             == tuple(result["raw_mask_shape"])
-            and self.state.scientific_roi_provenance
-            == self._roi_provenance(result)
+            and self.state.scientific_roi_provenance is not None
+            and same_input_except_z_corrections(self.state.scientific_roi_provenance, self._roi_provenance(result))
         )
     @Slot(object, int, object)
     def _measurement_succeeded(self, job, measurement_revision, result):
@@ -264,6 +267,7 @@ class FilteringController(QObject):
                 scientific_roi=np.array(self.state.scientific_roi, copy=True),
                 roi_reviewed=bool(self.state.scientific_roi_reviewed),
             )
+            self.state.scientific_roi_provenance = self._roi_provenance(result)
         elif result["scientific_roi"] is not None:
             self.state.set_scientific_roi(
                 result["scientific_roi"], self._roi_provenance(result),
@@ -274,8 +278,20 @@ class FilteringController(QObject):
         pending = self.state.geometry_pending
         controls = {}
         incompatible = []
-        if pending and not reviewing_settings and self._pending_filter_settings is not None:
-            definitions = self.state.segmentation_result["edit_history"][-1].get("filter_definitions", {})
+        previous = self.state.filtering_result
+        inputs_changed = bool(previous and session.measurement_invalidation_reason)
+        if inputs_changed:
+            session.intensity_controls = self.panel.intensity_control_settings()
+        if (pending or inputs_changed) and not reviewing_settings and self._pending_filter_settings is not None:
+            if pending:
+                definitions = self.state.segmentation_result["edit_history"][-1].get("filter_definitions", {})
+            else:
+                definitions = {
+                    "intensity": {item["index"]: item["column"] for item in previous["intensity_definitions"]},
+                    "perinuclear": {item["name"]: (item["column"], item["channel_index"], item["ring_inner_um"],
+                                                   item["ring_outer_um"], item["configured_pixel_threshold"])
+                                    for item in previous["perinuclear_definitions"]},
+                }
             columns = {item["index"]: item["column"] for item in result["intensity_definitions"]}
             for index, values in (session.intensity_controls or {}).items():
                 if index in columns and definitions.get("intensity", {}).get(index) == columns[index]:
@@ -309,7 +325,7 @@ class FilteringController(QObject):
         self.state.set_filtering_result(result, current=not incompatible)
         self._create_layers(result)
         self.panel.configure_filtering(result, current=not incompatible)
-        if pending:
+        if pending or inputs_changed:
             self.panel.restore_intensity_controls(controls)
             session.filter_controls = deepcopy(result["settings"])
             session.intensity_controls = self.panel.intensity_control_settings()
@@ -361,6 +377,9 @@ class FilteringController(QObject):
         ids = self.state.provisional_ids
         if ids is None:
             return False
+        if self.state.filtering_result is not None and not self.state.geometry_pending:
+            self._update_working_layer(self.state.filtering_result["filtered_masks"])
+            return True
         if not self.state.owns_mask_layer(self.filtered_layer) or self.filtered_layer not in self.viewer.layers:
             result = self.state.segmentation_result
             masks = effective_masks(result)
@@ -533,6 +552,7 @@ class FilteringController(QObject):
                     else "MNTB ROI — provisional review"
                 )
             self.panel.configure_filtering(result, False)
+            self.panel.measurement_status.setText(self.working_status)
     def update_marker_configuration(self, records):
         try:
             measurement_changed = self.state.set_perinuclear_markers(records)

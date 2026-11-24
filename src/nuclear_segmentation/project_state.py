@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import logging
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -9,6 +10,9 @@ from uuid import UUID, uuid4
 
 import numpy as np
 from qtpy.QtCore import QObject, Signal
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -94,6 +98,26 @@ class SegmentationSession:
     scientific_roi_provenance: dict[str, Any] | None = None
     quantification_result: dict[str, Any] | None = None
     quantification_is_current: bool = False
+
+    segmentation_invalidation_reason: str | None = None
+    measurement_invalidation_reason: str | None = None
+
+    @property
+    def outdated_segmentation_status(self):
+        reason = self.segmentation_invalidation_reason or "saved inputs require validation"
+        action = "Rerun segmentation."
+        if (self.segmentation_result or {}).get("edit_history"):
+            action = "Save a project copy to keep the edit history before rerunning segmentation."
+        return f"Segmentation outdated — {reason}. {action}"
+
+    def measured_channels(self, channels):
+        config = (self.segmentation_result or {}).get("scientific_config") or {}
+        records = config.get("CHANNELS")
+        measured = ({c.index for c in channels} if records is None else
+                    {c["index"] for c in records if c.get("measure", True)})
+        if self.scientific_role == "nuclear":
+            measured.update(m["channel_index"] for m in self.perinuclear_markers if m["enabled"])
+        return measured
 
     @property
     def session_id(self) -> str:
@@ -301,6 +325,11 @@ class ProjectState(QObject):
 
     @property
     def provisional_ids(self):
+        if (self.segmentation_is_current and not self.filtering_is_current
+                and self.active_session.measurement_invalidation_reason and self.filtering_result
+                and self.filtering_result.get("geometry_revision") == self.active_session.geometry_revision
+                and not self.filtering_result.get("incompatible_settings")):
+            return self.filtering_result["retained_ids"]
         if self.geometry_pending and not self.filtering_is_current:
             history = self.segmentation_result.get("edit_history", ())
             if history:
@@ -442,22 +471,24 @@ class ProjectState(QObject):
         self.working_offset_yx = (y0, x0)
         self.crop_provenance = provenance
         self.roi_mask_yx = np.array(roi_mask, copy=True)
-        self.invalidate_segmentation()
+        self.invalidate_segmentation(reason="working crop changed")
         self.invalidate_normalization()
-        self.invalidate_z_corrections()
+        self.invalidate_z_corrections(grid_changed=True)
         return self.working_dataset
 
     def reset_crop(self) -> ImportedDataset:
         if self.original_dataset is None:
             raise ValueError("No original dataset is available.")
+        if self.crop_provenance is None:
+            return self.original_dataset
         self.working_dataset = self.original_dataset
         self.dataset = self.original_dataset
         self.crop_provenance = None
         self.roi_mask_yx = None
         self.working_offset_yx = (0, 0)
-        self.invalidate_segmentation()
+        self.invalidate_segmentation(reason="working crop changed")
         self.invalidate_normalization()
-        self.invalidate_z_corrections()
+        self.invalidate_z_corrections(grid_changed=True)
         return self.original_dataset
 
     def set_normalization_preview(self, report: dict[str, Any]) -> None:
@@ -466,9 +497,11 @@ class ProjectState(QObject):
         self.normalization_changed.emit(self.normalization_preview, False)
 
     def apply_normalization(self, configuration: dict[str, Any]) -> None:
+        changed = self.normalization_configuration != configuration
         self.normalization_configuration = dict(configuration)
         self.normalization_is_current = True
-        self.invalidate_segmentation(active_only=True)
+        if changed:
+            self.invalidate_segmentation(active_only=True, reason="applied normalization changed")
         self.normalization_changed.emit(self.normalization_configuration, True)
 
     def invalidate_normalization(self, *, active_only=False) -> None:
@@ -482,13 +515,15 @@ class ProjectState(QObject):
         self.normalization_changed.emit(self.normalization_configuration, False)
 
     def reset_normalization(self, *, emit: bool = True) -> None:
+        previous = self.normalization_configuration
         self.normalization_configuration = {
             "mode": "cellpose_default",
             "cellpose_normalize": True,
         }
         self.normalization_preview = None
         self.normalization_is_current = False
-        self.invalidate_segmentation(active_only=True)
+        if previous != self.normalization_configuration:
+            self.invalidate_segmentation(active_only=True, reason="normalization reset")
         if emit:
             self.normalization_changed.emit(self.normalization_configuration, False)
 
@@ -523,6 +558,7 @@ class ProjectState(QObject):
         self, channel_index: int, options: dict[str, Any], report: dict[str, Any], *, pixels=None
     ) -> None:
         index = int(channel_index)
+        previous = self._applied_routes()
         self._measurement_volumes.pop(index, None)
         if pixels is not None and options.get("measurement"):
             pixels.setflags(write=False)
@@ -530,7 +566,7 @@ class ProjectState(QObject):
         self.z_correction_options[index] = dict(options)
         self.z_correction_reports[index] = dict(report)
         self.z_correction_applied.discard(index)
-        self.invalidate_segmentation()
+        self._invalidate_changed_routes(previous, "calculate Z preview")
         self.z_correction_changed.emit(index)
 
     def corrected_measurement_volumes(self):
@@ -558,45 +594,81 @@ class ProjectState(QObject):
         indexes = {int(index) for index in channel_indexes}
         if not indexes or not indexes.issubset(self.z_correction_reports):
             raise ValueError("Calculate current Z-correction previews before applying.")
+        previous = self._applied_routes()
         self.z_correction_applied.update(indexes)
-        self.invalidate_segmentation()
+        self._invalidate_changed_routes(previous, "apply Z correction")
         self.z_correction_changed.emit(tuple(sorted(indexes)))
 
     def reset_z_corrections(self, channel_indexes, *, emit: bool = True) -> None:
+        previous = self._applied_routes()
         for index in tuple(int(value) for value in channel_indexes):
             self._measurement_volumes.pop(index, None)
             self.z_correction_options.pop(index, None)
             self.z_correction_reports.pop(index, None)
             self.z_correction_applied.discard(index)
-        self.invalidate_segmentation()
+        self._invalidate_changed_routes(previous, "reset selected Z corrections")
         if emit:
             self.z_correction_changed.emit(None)
 
     def reset_all_z_corrections(self, *, emit: bool = True) -> None:
+        previous = self._applied_routes()
         self.z_correction_options = {}
         self._measurement_volumes.clear()
         self.z_correction_reports = {}
         self.z_correction_applied = set()
-        self.invalidate_segmentation()
+        self._invalidate_changed_routes(previous, "reset all Z corrections")
         if emit:
             self.z_correction_changed.emit(None)
 
-    def invalidate_z_corrections(self) -> None:
+    def invalidate_z_corrections(self, *, grid_changed=False) -> None:
         if not self.z_correction_reports and not self.z_correction_applied:
             return
+        previous = self._applied_routes()
         self._measurement_volumes.clear()
         self.z_correction_reports = {}
         self.z_correction_applied = set()
-        self.invalidate_segmentation()
+        if not grid_changed:
+            self._invalidate_changed_routes(previous, "invalidate Z corrections")
         self.z_correction_changed.emit(None)
 
     def invalidate_z_correction(self, channel_index: int) -> None:
         index = int(channel_index)
+        previous = self._applied_routes()
         self._measurement_volumes.pop(index, None)
         self.z_correction_reports.pop(index, None)
         self.z_correction_applied.discard(index)
-        self.invalidate_segmentation()
+        self._invalidate_changed_routes(previous, "invalidate channel Z correction")
         self.z_correction_changed.emit(index)
+
+    @staticmethod
+    def z_report_matches_channel(report, index, name):
+        return (report.get("channel_index", index) == index
+                and report.get("current_channel_name", report.get("channel_name_at_calculation")) == name)
+
+    def _applied_routes(self):
+        return {i: self.z_correction_options[i] for i in self.z_correction_applied}
+
+    def _invalidate_changed_routes(self, previous, operation):
+        current = self._applied_routes()
+        # Each mutator adds or removes applied channels. Replacing preview pixels
+        # first removes the old applied route, even when the options match.
+        changed = previous.keys() ^ current.keys()
+        if not changed:
+            return
+        routes = {**previous, **current}
+        for session in self.sessions.values():
+            primary = session.configured_channel_index
+            if primary is None:
+                primary = self.segmentation_channel_index
+            if primary in changed and routes[primary].get("segmentation", True):
+                session.normalization_is_current = False
+                self._invalidate_session(session, f"{operation} on channel {primary + 1}", masks=True)
+            else:
+                affected = sorted(i + 1 for i in changed & session.measured_channels(self.channels)
+                                  if routes[i].get("measurement", False))
+                if affected:
+                    names = ", ".join(map(str, affected))
+                    self._invalidate_session(session, f"{operation} on measurement channel {names}", masks=False)
 
     def legacy_z_corrections(self) -> dict[str, dict[str, Any]]:
         """Resolve stable channel indexes to the legacy name-keyed contract."""
@@ -646,10 +718,14 @@ class ProjectState(QObject):
             np.isfinite(value) and value > 0 for value in values
         ):
             raise ValueError("Calibration must contain positive finite Z/Y/X values.")
+        changed = self.voxel_spacing_zyx_um != values
         self.voxel_spacing_zyx_um = values
         self.calibration_source = str(source)
-        self.invalidate_segmentation()
-        self.calibration_changed.emit(values, self.calibration_source)
+        if changed:
+            self.invalidate_segmentation(reason="voxel calibration changed")
+            self.invalidate_z_corrections(grid_changed=True)
+            self.invalidate_normalization()
+            self.calibration_changed.emit(values, self.calibration_source)
 
     def update_channel(self, index: int, **changes) -> None:
         position = next(
@@ -658,6 +734,7 @@ class ProjectState(QObject):
         )
         if position is None:
             raise ValueError(f"Unknown channel index: {index}")
+        old_default = self.segmentation_channel_index
         current = self.channels[position]
         if "name" in changes:
             from .core import safe_key
@@ -699,9 +776,21 @@ class ProjectState(QObject):
         updated = replace(current, **changes)
         self.channels[position] = updated
         if (current.name, current.role) != (updated.name, updated.role):
-            self.invalidate_segmentation()
-            self.invalidate_normalization()
-            self.scientific_channels_changed.emit()
+            renamed = current.name != updated.name
+            report = self.z_correction_reports.get(index)
+            if renamed and report and self.z_report_matches_channel(report, index, current.name):
+                # Preserve the acquisition/calculation name alongside the verified alias.
+                self.z_correction_reports[index] = dict(report, current_channel_name=updated.name)
+            for session in self.sessions.values():
+                follows_default = session.configured_channel_index is None
+                primary = self.segmentation_channel_index if follows_default else session.configured_channel_index
+                if (follows_default and old_default != self.segmentation_channel_index) or (renamed and primary == index):
+                    session.normalization_is_current = False
+                    self._invalidate_session(session, "segmentation source channel changed", masks=True)
+                    if session is self.active_session:
+                        self.scientific_channels_changed.emit()
+                elif renamed and index in session.measured_channels(self.channels):
+                    self._invalidate_session(session, f"measurement channel {index + 1} renamed", masks=False)
         self.channels_changed.emit(tuple(self.channels))
 
     def set_segmentation_result(self, result: dict[str, Any]) -> None:
@@ -716,29 +805,41 @@ class ProjectState(QObject):
         self.clear_filtering_result()
         self.clear_scientific_roi()
         self.segmentation_result = stored
+        self.active_session.segmentation_invalidation_reason = None
         self.segmentation_is_current = True
         self.segmentation_result_changed.emit(stored, True)
 
-    def invalidate_segmentation(self, *, active_only=False) -> None:
-        """Shared input changes affect all sessions. Normalization belongs to its session."""
-        active_was_current = self.segmentation_is_current
-        sessions = (self.active_session,) if active_only else self._sessions.values()
+    def invalidate_segmentation(self, *, active_only=False, reason="segmentation input changed") -> None:
+        sessions = (self.active_session,) if active_only else self.sessions.values()
         for session in sessions:
+            self._invalidate_session(session, reason, masks=True)
+
+    def _invalidate_session(self, session, reason, *, masks):
+        old_input, old_measurement = session.input_revision, session.measurement_revision
+        if masks:
             session.input_revision += 1
-            if not session.segmentation_is_current:
-                continue
             session.segmentation_is_current = False
-            session.measurement_revision += 1
-            session.filtering_is_current = False
-            session.quantification_is_current = False
+            if session.segmentation_result is not None:
+                session.segmentation_invalidation_reason = reason
             session.scientific_roi = None
             session.scientific_roi_reviewed = False
             session.scientific_roi_provenance = None
-        if active_was_current:
-            self.filtering_result_changed.emit(self.filtering_result, False)
-            self.scientific_roi_changed.emit(None, False)
-            self.segmentation_result_changed.emit(self.segmentation_result, False)
-            self.quantification_result_changed.emit(self.quantification_result, False)
+        elif session.segmentation_result is not None:
+            session.measurement_invalidation_reason = reason
+        session.measurement_revision += 1
+        session.measurement_error = None
+        session.filtering_is_current = False
+        session.quantification_is_current = False
+        logger.info("Invalidation operation=%s session=%s scope=%s input=%d->%d "
+                    "geometry=%d->%d measurement=%d->%d", reason, session.session_id,
+                    "segmentation" if masks else "measurements", old_input, session.input_revision,
+                    session.geometry_revision, session.geometry_revision, old_measurement, session.measurement_revision)
+        if session is self.active_session and session.segmentation_result is not None:
+            self.filtering_result_changed.emit(session.filtering_result, False)
+            if masks:
+                self.scientific_roi_changed.emit(None, False)
+                self.segmentation_result_changed.emit(session.segmentation_result, False)
+            self.quantification_result_changed.emit(session.quantification_result, False)
 
     def clear_segmentation_result(self, *, emit: bool = True) -> None:
         self.active_session.pending_geometry_revision = None
@@ -759,6 +860,7 @@ class ProjectState(QObject):
         self.active_session.measurement_revision += 1
         display = self.active_session.display_state
         if current:
+            self.active_session.measurement_invalidation_reason = None
             first_working_layer = self.filtering_result is None and self.provisional_ids is None
             mode = display.get("mode")
             if mode in ("before", "edited") or (first_working_layer and mode in (None, "raw")):
@@ -780,6 +882,7 @@ class ProjectState(QObject):
     def clear_filtering_result(self, *, emit: bool = True) -> None:
         self.active_session.measurement_revision += 1
         self.clear_quantification_result(emit=emit)
+        self.active_session.measurement_invalidation_reason = None
         self.filtering_result = None
         self.filtering_is_current = False
         if emit:

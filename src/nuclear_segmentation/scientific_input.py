@@ -43,6 +43,40 @@ class ScientificInputSnapshot:
         return deepcopy(self._provenance)
 
 
+def correction_route(options, route):
+    """Parameters that change this channel's pixels for one consumer."""
+    if options is None:
+        return None
+    options = validate_options(options)
+    if options[route]:
+        return {k: v for k, v in options.items() if k not in ("measurement", "segmentation")}
+    return None
+
+
+def same_input_except_z_corrections(first, second):
+    """Compare the complete remaining provenance, including any grid or ownership fields."""
+    return ({k: v for k, v in first.items() if k != "z_corrections"}
+            == {k: v for k, v in second.items() if k != "z_corrections"})
+
+
+def measurement_config(state, executed):
+    """Keep the executed inference contract and bind current measurement inputs by index."""
+    config = validate_config(executed)
+    names = {c.index: c.name for c in state.channels}
+    primary = config["SEGMENTATION_CHANNEL"]
+    source = next((c["index"] for c in config["CHANNELS"] if c["name"] == primary), None)
+    current = state.legacy_z_corrections()
+    if (source != state.active_channel_index or names.get(source) != primary
+            or correction_route(config["Z_CORRECTIONS"].get(primary), "segmentation")
+            != correction_route(current.get(primary), "segmentation")):
+        raise ValueError("Segmentation input changed. Rerun segmentation before measuring.")
+    for channel in config["CHANNELS"]:
+        channel["name"] = names[channel["index"]]
+    config["Z_CORRECTIONS"] = current
+    config["PERINUCLEAR_MARKERS"] = state.legacy_perinuclear_markers()
+    return config
+
+
 def validate_scientific_input(project_state, config: dict[str, Any], *, completed_result=None) -> dict[str, Any]:
     """Validate desktop state without loading Cellpose or transforming pixels."""
     validated = validate_config(config)
@@ -105,12 +139,12 @@ def validate_scientific_input(project_state, config: dict[str, Any], *, complete
         expected_report = {
             "source_path": str(original.source_path),
             "series_index": int(original.series_index),
-            "channel_name_at_calculation": channel.name,
             "working_shape_czyx": list(dataset.standardized_shape),
             "voxel_spacing_zyx_um": list(spacing),
             "working_offset_yx": list(project_state.working_offset_yx),
         }
-        if any(report.get(key) != value for key, value in expected_report.items()):
+        if (not project_state.z_report_matches_channel(report, index, channel.name)
+                or any(report.get(key) != value for key, value in expected_report.items())):
             raise ValueError("Applied Z-correction provenance is missing or outdated.")
         if validate_options(report.get("options", {})) != validate_options(
             project_state.z_correction_options[index]
