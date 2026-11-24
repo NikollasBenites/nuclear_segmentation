@@ -8,6 +8,14 @@ The Layers panel reports the working result's scientific status. **Automatically
 
 **Advanced Layers & History** provides the complete committed geometry, the retained view immediately before the latest saved edit when available, a revision history and undo. Returning to the working view releases hidden comparisons. With no retained selection, the editor explains the all-mask scope. Saving in this scope can display the complete correction as a labeled diagnostic until a retained view is available.
 
+### Quick Undo and Redo
+
+During an edit, use **Undo** and **Redo** beside Paint and Erase. On macOS, press **⌘Z** or **⌘⇧Z**. On Windows and Linux, press **Ctrl+Z** to undo and **Ctrl+Y** or **Ctrl+Shift+Z** to redo. Text and numeric fields keep their normal keyboard behavior.
+
+Each brush stroke is one step. Starting Split, Merge or Remove begins a new history on a pristine preview. For Split, undo the strokes first, then undo the split setup. A Merge or Remove preview is one step. Pause, switching slice views, and collapsing Geometry Editing preserve these steps. Changing between filtered and all-mask scope starts a fresh stroke history. Starting a new stroke clears redo. Preview history lasts until Save Changes or Discard Changes.
+
+Outside a transaction, Undo in Mask Review invokes **Undo Last Saved Edit** for the active session. This uses the existing saved geometry history and marks scientific results for recalculation. Redo is available during a preview.
+
 ## State ownership and scientific integrity
 
 | Record | Owner and lifetime |

@@ -8,6 +8,8 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QLabel, QLineEdit
 
 from .collapsible_section import CollapsibleSection
 from .geometry_edit import GeometryEdit, effective_masks, undo_stack
+from .preview_history import PreviewStrokes, ProofreadingShortcuts
+from .ui_icons import icon
 from .runtime import validate_roi_geometry
 
 
@@ -94,6 +96,12 @@ class GeometryPanel(CollapsibleSection):
             control.clicked.connect(lambda checked=False, key=tool: window.viewer_toolbar.activate_tool(key))
             self.buttons[tool] = control
         fields.addRow(self.buttons["paint"], self.buttons["erase"])
+        self.shortcuts = ProofreadingShortcuts(self)
+        for action in ("undo", "redo"):
+            control = button(action + "_preview", action.title())
+            control.setIcon(icon(action))
+            control.setToolTip(self.shortcuts.tooltip(action))
+        fields.addRow(self.buttons["undo_preview"], self.buttons["redo_preview"])
         fields.addRow(self.buttons["review"])
         self.tool_hint = QLabel()
         self.tool_hint.setWordWrap(True)
@@ -137,6 +145,7 @@ class GeometryPanel(CollapsibleSection):
         self._sync_scope()
 
     def dispose(self):
+        self.shortcuts.dispose()
         self.viewer.dims.events.ndisplay.disconnect(self._dimensions)
         self.viewer.dims.events.order.disconnect(self._dimensions)
         self.window.viewer_toolbar.tool_changed.disconnect(self.refresh)
@@ -165,13 +174,16 @@ class GeometryPanel(CollapsibleSection):
         if self.busy:
             try:
                 self._require_preview()
+                if self.strokes.in_stroke:
+                    raise ValueError("Finish the current stroke before changing scope.")
                 self.edit.set_filtered(self.scope.currentData())
             except ValueError as error:
                 with QSignalBlocker(self.scope):
                     self.scope.setCurrentIndex(0 if self.edit.filtered else 1)
                 self.status.setText(str(error))
                 return
-            self.layer.editable = False  # Clear napari stroke history for the previous presentation.
+            self.strokes.clear()
+            self.undone_operation = None
             self._dimensions()
             self.layer.refresh()
             if self.selected_id is not None and not self.edit.allows_label(self.selected_id):
@@ -226,6 +238,8 @@ class GeometryPanel(CollapsibleSection):
         result = self.state.segmentation_result or {}
         current = self.state.segmentation_is_current
         available = self.busy and self._owns_preview()
+        self.buttons["undo_preview"].setEnabled(bool(available and self._can_replay(False)))
+        self.buttons["redo_preview"].setEnabled(bool(available and self._can_replay(True)))
         choosing = available and not self.paused and self.edit.operation == "paint/erase"
         selected = (choosing and self.selected_id is not None and self.layer.visible
                     and self.viewer.layers.selection.active is self.layer)
@@ -348,8 +362,69 @@ class GeometryPanel(CollapsibleSection):
         self.refresh()
 
     def _painted(self, event):
-        status = "Split preview" if self.edit.operation == "split" else "Uncommitted changes"
+        if not self._owns_preview():
+            return
+        self.undone_operation = None
+        self.strokes.changed_voxels += self.strokes.count_change(event.value)
+        self._history_status()
+        self.refresh()
+
+    def _history_status(self):
+        if self.edit.operation in ("remove", "merge"):
+            status = f"{self.edit.operation.title()} preview · Uncommitted changes"
+        elif self.strokes.changed_voxels:
+            status = "Uncommitted changes"
+        else:
+            status = "No pending changes"
+        if self.edit.operation == "split":
+            status = "Split preview · " + status
+        if self.paused:
+            status = "Paused · " + status
         self.status.setText(f"{self._scope_text()} · {status}")
+
+    def _begin_object_history(self):
+        # GeometryEdit has validated that the new operation starts from a pristine preview.
+        self.strokes.clear()
+        self.strokes.changed_voxels = 0
+        self.undone_operation = None
+
+    def _can_replay(self, redo):
+        if redo:
+            return self.undone_operation is not None or self.strokes.available(True)
+        return (self.strokes.available(False) or self.edit.operation in ("remove", "merge")
+                or (self.edit.operation == "split" and not self.strokes.changed_voxels))
+
+    def _replay(self, redo):
+        self._require_preview()
+        if self.strokes.in_stroke or not self._can_replay(redo):
+            return
+        edit = self.edit
+        if redo and self.undone_operation is not None:
+            edit.operation, edit.parameters = self.undone_operation
+            self.undone_operation = None
+            if edit.operation == "split":
+                self._set_brush(edit.parameters["new_id"])
+            else:
+                edit.apply_object_preview()
+        elif self.strokes.available(redo):
+            self.strokes.replay(redo)
+        else:
+            self.undone_operation = (edit.operation, edit.parameters)
+            if edit.operation in ("remove", "merge"):
+                edit.apply_object_preview(restore=True)
+            edit.operation, edit.parameters = "paint/erase", {}
+            if self.undone_operation[0] == "split":
+                self._set_brush(self._before_split_brush)
+        if edit.operation in ("remove", "merge") or self.undone_operation is not None:
+            self.layer.refresh()
+        self._dimensions()
+        self._history_status()
+
+    def undo_preview(self):
+        self._replay(False)
+
+    def redo_preview(self):
+        self._replay(True)
 
     def _brush_changed(self, event):
         # Napari's pick tool and keyboard shortcuts can change the brush independently.
@@ -363,9 +438,12 @@ class GeometryPanel(CollapsibleSection):
 
     def _dimensions(self, event=None):
         if self.busy:
-            self.layer.editable = (not self.paused and self.layer.visible and self.viewer.dims.ndisplay == 2 and self.brush_id is not None
-                                   and self.edit.operation in ("split", "paint/erase")
-                                   and self._owns_preview())
+            owned = self._owns_preview()
+            if owned:
+                self.strokes.set_editable(not self.paused and self.layer.visible and self.viewer.dims.ndisplay == 2
+                                         and self.brush_id is not None and self.edit.operation in ("split", "paint/erase"))
+            else:
+                self.layer.editable = False
             self._sync_size()
             self.refresh()
 
@@ -439,6 +517,8 @@ class GeometryPanel(CollapsibleSection):
         layer = self.viewer.add_labels(edit.preview, name=f"{self.state.active_session.display_name} · Uncommitted edits",
                                        scale=spacing, translate=self.translate,
                                        metadata={**self.state.mask_layer_metadata(), "nucytoseg_edit_preview": True})
+        self.strokes = PreviewStrokes(layer, edit)
+        self.undone_operation = None
         self.edit, self.layer = edit, layer
         self.selected_object.setText("None")
         self.invalidated = False
@@ -492,7 +572,7 @@ class GeometryPanel(CollapsibleSection):
         self.layer.locked = LayerLock.NONE
         if self.layer in self.viewer.layers:
             self.viewer.layers.remove(self.layer)
-        self.edit = self.layer = None
+        self.edit = self.layer = self.strokes = self.undone_operation = None
         self.selected_id = self.brush_id = None
         self.selected_object.setText("None")
         self.brush_label.clear()
@@ -552,14 +632,12 @@ class GeometryPanel(CollapsibleSection):
                 self.window.mask_selection.restore_selection(self.layer, self.selected_id)
             self.edit.paused = False
             self._set_brush(self.brush_id)
-            status = "Editing active" if self.edit.is_pristine() else "Uncommitted changes"
         else:
             self._paused_size = self.layer.brush_size
             self.edit.paused = True
             self.window.viewer_toolbar.activate_tool("pan_zoom")
-            status = "Paused"
         self._dimensions()
-        self.status.setText(f"{self._scope_text()} · {status}")
+        self._history_status()
 
     def stop(self):
         if not self.edit.has_changes():
@@ -590,6 +668,7 @@ class GeometryPanel(CollapsibleSection):
     def remove(self):
         self._require_preview()
         self.edit.remove(self.selected_id)
+        self._begin_object_history()
         self.layer.refresh()
         self._dimensions()
         self.refresh()
@@ -598,6 +677,8 @@ class GeometryPanel(CollapsibleSection):
     def split(self):
         self.return_preview()
         new = self.edit.split(self.selected_id)
+        self._begin_object_history()
+        self._before_split_brush = self.brush_id
         self._set_brush(new)
         self.layer.brush_size = 1
         self.window.viewer_toolbar.set_ndisplay(2)
@@ -635,6 +716,7 @@ class GeometryPanel(CollapsibleSection):
         ids = [self.merge_target.itemData(row) for row in range(self.merge_target.count())]
         retained = self.merge_target.currentData()
         self.edit.merge(ids, retained)
+        self._begin_object_history()
         self.window.mask_selection.clear_selection(self.layer)
         self.layer.refresh()
         self._dimensions()

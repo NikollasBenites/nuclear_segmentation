@@ -160,8 +160,8 @@ class GeometryEdit:
     def remove(self, label):
         self._pristine()
         self._object(label)
-        self.preview[self.base == label] = 0
         self.operation, self.parameters = "remove", {"id": label}
+        self.apply_object_preview()
 
     def merge(self, ids, target):
         self._pristine()
@@ -172,10 +172,23 @@ class GeometryEdit:
         for label in ids:
             self._object(label)
             counts[str(label)] = int(np.count_nonzero(self.base == label))
-        self.preview[np.isin(self.base, ids)] = target
         self.operation = "merge"
         self.parameters = dict(ids=ids, retained_id=target, input_counts=counts,
                                result_count=sum(counts.values()))
+        self.apply_object_preview()
+
+    def apply_object_preview(self, *, restore=False):
+        """Replay a validated removal or merge against the transaction's original labels."""
+        if self.operation == "remove":
+            ids, target = [self.parameters["id"]], 0
+        elif self.operation == "merge":
+            target = self.parameters["retained_id"]
+            ids = [label for label in self.parameters["ids"] if label != target]
+        else:
+            raise ValueError("Select a removal or merge preview.")
+        for base, preview in zip(self.base, self.preview, strict=True):
+            changed = base == ids[0] if len(ids) == 1 else np.isin(base, ids)
+            preview[changed] = base[changed] if restore else target
 
     def split(self, parent):
         self._pristine()

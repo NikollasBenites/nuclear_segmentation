@@ -72,6 +72,16 @@ class _IconEngine(QIconEngine):
 
     def _draw(self, painter: QPainter) -> None:
         name = self.name
+        if name in {"undo", "redo"}:
+            if name == "redo":
+                painter.translate(24, 0)
+                painter.scale(-1, 1)
+            _polyline(painter, 9, 4, 4, 9, 9, 14)
+            path = QPainterPath(QPointF(4, 9))
+            path.lineTo(13, 9)
+            path.cubicTo(18, 9, 20, 12, 20, 17)
+            painter.drawPath(path)
+            return
         if name in {"eye", "eye_off"}:
             path = QPainterPath()
             path.moveTo(2.5, 12)

@@ -184,6 +184,19 @@ def test_rendered_geometry_preview(qapp, tmp_path):
         _click_mask(panel.layer, (0, 1, 1))
         panel.split()
         panel.layer.paint((0, 1, 1), panel.brush_id)
+        panel.layer.paint((0, 1, 2), panel.brush_id)
+        from qtpy.QtTest import QTest
+        from qtpy.QtGui import QKeySequence
+        canvas = window.embedding.qt_viewer.canvas.native
+        canvas.setFocus()
+        panel.set_expanded(False)
+        QTest.keySequence(canvas, QKeySequence("Ctrl+Z"))
+        assert panel.layer.data[0, 1, 1] == panel.brush_id
+        assert panel.layer.data[0, 1, 2] == raw[0, 1, 2]
+        panel.toggle_pause()
+        QTest.keySequence(canvas, QKeySequence("Ctrl+Shift+Z"))
+        assert panel.layer.data[0, 1, 2] == panel.brush_id and not panel.layer.editable
+        panel.toggle_pause()
         window.viewer_toolbar.set_ndisplay(3)
         qapp.processEvents()
         assert not panel.layer.editable
@@ -393,6 +406,9 @@ def test_invalid_preview_can_only_be_discarded(review_window, change):
     panel.start()
     layer = panel.layer
     _click_mask(layer, (0, 1, 1))
+    layer.brush_size = 1
+    layer.paint((0, 0, 0), 1)
+    assert panel.buttons["undo_preview"].isEnabled()
     if change == "remove":
         panel.viewer.layers.remove(layer)
     elif change == "replace":
@@ -403,6 +419,10 @@ def test_invalid_preview_can_only_be_discarded(review_window, change):
     with pytest.raises(ValueError):
         panel.commit()
     assert not layer.editable and not panel.buttons["commit"].isEnabled()
+    for action in ("undo_preview", "redo_preview"):
+        assert not panel.buttons[action].isEnabled()
+        with pytest.raises(ValueError, match="changed"):
+            getattr(panel, action)()
     panel.discard()
     assert window.mask_selection._on_mouse_press not in layer.mouse_drag_callbacks
     assert raw[0, 1, 1] == 1
@@ -997,3 +1017,205 @@ def test_remeasurement_can_retain_previously_excluded_object(retained_second_mas
     _wait(qapp, lambda: not window.filtering.busy)
     assert state.filtering_is_current and set(state.filtering_result["retained_ids"]) == {1, 2}
     np.testing.assert_array_equal(working.data, effective_masks(state.segmentation_result))
+
+
+def test_quick_stroke_history_and_pending_status(review_window, monkeypatch):
+    window, raw = review_window
+    panel, state = window.geometry_panel, window.project_state
+    panel.start()
+    layer = panel.layer
+    _click_mask(layer, (0, 1, 1))
+    layer.brush_size = 1
+    undo, redo = (panel.buttons[name + "_preview"] for name in ("undo", "redo"))
+    assert not undo.isEnabled() and not redo.isEnabled()
+    assert not undo.icon().isNull() and undo.toolTip() and redo.toolTip()
+    revision = state.session_revision()
+
+    def no_scan():
+        pytest.fail("A brush stroke or replay scanned the volume")
+
+    monkeypatch.setattr(panel.edit, "has_changes", no_scan)
+    with layer.block_history():
+        layer.paint((0, 0, 0), 1)
+        layer.paint((0, 0, 1), 1)
+    layer.paint((0, 1, 1), 0)
+    assert undo.isEnabled() and not redo.isEnabled()
+    panel.buttons["erase"].click()
+    window.viewer_toolbar.set_ndisplay(3)
+    assert not layer.editable and undo.isEnabled()
+    window.viewer_toolbar.set_ndisplay(2)
+    panel.viewer.dims.order = (1, 0, 2)
+    undo.click()
+    assert layer.data[0, 1, 1] == 1 and layer.data[0, 0, 0] == 1
+    undo.click()
+    np.testing.assert_array_equal(layer.data, raw)
+    assert not undo.isEnabled() and redo.isEnabled()
+    assert "No pending changes" in panel.status.text()
+    redo.click()
+    assert list(layer.data[0, 0, :2]) == [1, 1]
+    redo.click()
+    assert layer.data[0, 1, 1] == 0 and not redo.isEnabled()
+    # Replay cannot interrupt napari while the next gesture is still being grouped.
+    with layer.block_history():
+        panel.undo_preview()
+        assert layer.data[0, 1, 1] == 0
+    panel.viewer.dims.order = (0, 1, 2)
+    layer.paint((0, 1, 1), 1)
+    layer.paint((0, 0, 0), 0)
+    layer.paint((0, 0, 1), 0)
+    assert undo.isEnabled() and "No pending changes" in panel.status.text()
+    undo.click()
+    assert "Uncommitted changes" in panel.status.text()
+    layer.paint((0, 2, 2), 0)
+    assert not redo.isEnabled()
+    assert state.session_revision() == revision and not state.segmentation_result.get("edit_history")
+    assert panel.selected_id == panel.brush_id == layer.selected_label == 1
+    assert layer.brush_size == 1 and panel.layer is layer
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), raw)
+    panel.discard()
+
+
+@pytest.mark.parametrize("operation", ["split", "remove", "merge"])
+def test_quick_operation_history_while_paused(review_window, operation):
+    window, raw = review_window
+    panel = window.geometry_panel
+    panel.start()
+    layer = panel.layer
+    _click_mask(layer, (0, 1, 1))
+    if operation == "merge":
+        panel.add_merge()
+        _click_mask(layer, (0, 5, 6))
+        panel.add_merge()
+        panel.merge_target.setCurrentIndex(panel.merge_target.findData(2))
+    getattr(panel, operation)()
+    parameters = panel.edit.parameters.copy()
+    selected = panel.selected_id
+    if operation == "split":
+        layer.paint((0, 1, 1), panel.brush_id)
+    expected = layer.data.copy()
+    size = layer.brush_size
+    panel.toggle_pause()
+    if operation == "split":
+        panel.undo_preview()
+        assert panel.edit.operation == "split" and panel.brush_id == parameters["new_id"]
+    panel.undo_preview()
+    np.testing.assert_array_equal(layer.data, raw)
+    assert panel.paused and not layer.editable and panel.edit.operation == "paint/erase"
+    assert "Paused" in panel.status.text() and "No pending changes" in panel.status.text()
+    assert not panel.buttons["undo_preview"].isEnabled()
+    panel.redo_preview()
+    if operation == "split":
+        panel.redo_preview()
+    assert panel.edit.operation == operation and panel.edit.parameters == parameters
+    np.testing.assert_array_equal(layer.data, expected)
+    assert panel.paused and not layer.editable and layer.brush_size == size
+    assert panel.selected_id == selected and not panel.buttons["paint"].isEnabled()
+    assert not panel.buttons["redo_preview"].isEnabled()
+    panel.toggle_pause()
+    panel.commit()
+    np.testing.assert_array_equal(effective_masks(window.project_state.segmentation_result), expected)
+    assert window.project_state.segmentation_result["edit_history"][-1]["operation"] == operation
+
+
+def test_quick_history_scope_hidden_labels_and_new_preview(retained_second_mask):
+    window, raw, working = retained_second_mask
+    panel = window.geometry_panel
+    panel.start()
+    layer = panel.layer
+    _click_mask(layer, (0, 5, 6))
+    layer.brush_size = 1
+    layer.paint((0, 1, 1), 2)
+    with pytest.raises(ValueError, match="excluded object"):
+        panel.commit()
+    panel.undo_preview()
+    assert layer.data[0, 1, 1] == 0
+    panel.redo_preview()
+    with pytest.raises(ValueError, match="excluded object"):
+        panel.commit()
+    panel.undo_preview()
+    panel.scope.setCurrentIndex(1)
+    assert layer.data[0, 1, 1] == 1
+    assert not panel.buttons["redo_preview"].isEnabled()
+    panel.scope.setCurrentIndex(0)
+    layer.paint((0, 0, 0), 2)
+    panel.commit()
+    assert window.filtering.filtered_layer is working and working.data[0, 1, 1] == 0
+    panel.start()
+    assert panel.layer is not layer and panel.edit.filtered
+    for name in ("undo_preview", "redo_preview"):
+        assert not panel.buttons[name].isEnabled()
+    _click_mask(panel.layer, (0, 5, 6))
+    panel.layer.brush_size = 1
+    panel.layer.paint((0, 1, 1), 2)
+    panel.undo_preview()
+    assert "No pending changes" in panel.status.text() and panel.layer.data[0, 1, 1] == 0
+    assert effective_masks(window.project_state.segmentation_result)[0, 1, 1] == raw[0, 1, 1] == 1
+    panel.discard()
+
+
+def test_quick_shortcuts_text_focus_and_saved_history(review_window, qapp):
+    import sys
+    from qtpy.QtGui import QKeySequence
+    from qtpy.QtTest import QTest
+
+    window, raw = review_window
+    state, panel = window.project_state, window.geometry_panel
+    window.show()
+    window.activateWindow()
+    window.set_workflow("mask_review")
+    window.navigation.set_subpage("mask_editing", emit=True)
+    panel.start()
+    _click_mask(panel.layer, (0, 1, 1))
+    layer = panel.layer
+    layer.brush_size = 1
+    layer.paint((0, 0, 0), 1)
+    for field in (panel.brush_label, panel.brush_size.lineEdit()):
+        field.setFocus()
+        qapp.processEvents()
+        field.selectAll()
+        QTest.keyClicks(field, "2")
+        QTest.keySequence(field, QKeySequence("Ctrl+Z"))
+        assert layer.data[0, 0, 0] == 1 and panel.buttons["undo_preview"].isEnabled()
+        if field is panel.brush_label:
+            assert field.text() == "1"
+    target = window.embedding.qt_viewer
+    target.setFocus()
+    panel.set_expanded(False)
+    QTest.keySequence(target, QKeySequence("Ctrl+Z"))
+    assert layer.data[0, 0, 0] == 0
+    redo = "Ctrl+Shift+Z" if sys.platform == "darwin" else "Ctrl+Y"
+    QTest.keySequence(target, QKeySequence(redo))
+    assert layer.data[0, 0, 0] == 1
+    panel.commit()
+    revision = state.active_session.geometry_revision
+    panel.start()
+    QTest.keySequence(target, QKeySequence("Ctrl+Z"))
+    assert state.active_session.geometry_revision == revision and panel.busy
+    panel.discard()
+    window.set_workflow("segmentation")
+    QTest.keySequence(target, QKeySequence("Ctrl+Z"))
+    assert state.active_session.geometry_revision == revision
+    window.set_workflow("mask_review")
+    QTest.keySequence(target, QKeySequence("Ctrl+Z"))
+    assert state.active_session.geometry_revision == revision + 1
+    assert state.segmentation_result["edit_history"][-1]["operation"] == "undo"
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), raw)
+    QTest.keySequence(target, QKeySequence(redo))
+    assert state.active_session.geometry_revision == revision + 1
+
+
+def test_new_stroke_after_undoing_removal_starts_a_new_branch(review_window):
+    window, raw = review_window
+    panel = window.geometry_panel
+    panel.start()
+    _click_mask(panel.layer, (0, 1, 1))
+    panel.remove()
+    panel.undo_preview()
+    panel.layer.brush_size = 1
+    panel.layer.paint((0, 0, 0), 1)
+    assert not panel.buttons["redo_preview"].isEnabled()
+    panel.undo_preview()
+    panel.redo_preview()
+    assert panel.edit.operation == "paint/erase" and panel.layer.data[0, 0, 0] == 1
+    np.testing.assert_array_equal(panel.layer.data[raw == 1], raw[raw == 1])
+    panel.discard()

@@ -1,0 +1,146 @@
+"""Stroke history and window-scoped shortcuts for the active proofreading preview."""
+import sys
+
+import numpy as np
+from napari.layers import Labels, Points, Shapes
+from qtpy.QtCore import QEvent, QObject
+from qtpy.QtGui import QKeySequence
+from qtpy.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit,
+                            QPlainTextEdit, QTextEdit, QWidget)
+
+
+class PreviewStrokes:
+    """Keep napari's bounded stroke queues on one preview and one editing scope.
+
+    Labels exposes public replay methods and paint events. Queue availability,
+    grouped stroke atoms and the read-only reset are internal to napari 0.10.
+    """
+    def __init__(self, layer, edit):
+        self.layer = layer
+        self.edit = edit
+        self.changed_voxels = 0
+        self.provisional_ids = set()
+        if edit.filter_record is None and edit.retained_ids is not None:
+            self.provisional_ids.update(edit.retained_ids)
+
+    def clear(self):
+        self.layer._undo_history.clear()
+        self.layer._redo_history.clear()
+
+    def set_editable(self, editable):
+        if self.layer.editable and not editable:
+            # Labels replaces both queues when entering read-only mode. Keep the
+            # original queues (no copies) for pause, navigation and 3D viewing.
+            self.layer._commit_staged_history()
+            undo, redo = self.layer._undo_history, self.layer._redo_history
+            self.layer.editable = False
+            self.layer._undo_history, self.layer._redo_history = undo, redo
+        else:
+            self.layer.editable = editable
+
+    def available(self, redo):
+        return bool(self.layer._redo_history if redo else self.layer._undo_history)
+
+    def count_change(self, atoms):
+        # Compare only the touched voxels. Overlapping strokes, including an
+        # erase that cancels an earlier paint, contribute their exact net change.
+        edit = self.edit
+        source = edit.filter_record["filtered_masks"] if edit.filtered and edit.filter_record is not None else edit.base
+        delta = 0
+        for atom in atoms:
+            if hasattr(atom, "slice_key"):
+                reference = source[atom.slice_key]
+                if atom.mask is not None:
+                    reference = reference[atom.mask]
+                old, new = atom.old_values, atom.new_value
+            else:
+                indices, old, new = atom
+                reference = source[indices]
+            if edit.filtered and edit.filter_record is None:
+                # Membership cost depends on the stroke footprint even for sessions
+                # with many retained IDs. Raw labels under the hidden scope read as 0.
+                hidden = [label for label in np.unique(reference) if label and label not in self.provisional_ids]
+                if hidden:
+                    reference = np.where(np.isin(reference, hidden), 0, reference)
+            delta += np.count_nonzero(reference != new) - np.count_nonzero(reference != old)
+        return delta
+
+    def replay(self, redo):
+        queue = self.layer._redo_history if redo else self.layer._undo_history
+        delta = self.count_change(queue[-1])
+        if redo:
+            self.layer.redo()
+            self.changed_voxels += delta
+        else:
+            self.layer.undo()
+            self.changed_voxels -= delta
+
+    @property
+    def in_stroke(self):
+        return self.layer._block_history
+
+
+class ProofreadingShortcuts(QObject):
+    def __init__(self, panel):
+        super().__init__(panel)
+        self.panel = panel
+        self.bindings = {}
+        for name, standard in (("undo", QKeySequence.StandardKey.Undo), ("redo", QKeySequence.StandardKey.Redo)):
+            keys = QKeySequence.keyBindings(standard)
+            if name == "redo":
+                # Qt maps portable Ctrl to Command on macOS.
+                keys.append(QKeySequence("Ctrl+Shift+Z"))
+                if sys.platform != "darwin":
+                    keys.append(QKeySequence("Ctrl+Y"))
+            self.bindings[name] = list(dict.fromkeys(keys))
+        QApplication.instance().installEventFilter(self)
+
+    def tooltip(self, name):
+        keys = (key.toString(QKeySequence.SequenceFormat.NativeText) for key in self.bindings[name])
+        return f"{name.title()} preview edit ({', '.join(keys)})"
+
+    @staticmethod
+    def _text_input(widget):
+        while widget is not None:
+            if isinstance(widget, (QLineEdit, QAbstractSpinBox, QPlainTextEdit, QTextEdit)):
+                return True
+            if isinstance(widget, QComboBox) and widget.isEditable():
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    def eventFilter(self, receiver, event):
+        kind = event.type()
+        if kind not in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress):
+            return False
+        if not isinstance(receiver, QWidget) or QWidget.window(receiver) is not self.panel.window:
+            return False
+        sequence = QKeySequence(event.keyCombination())
+        action = next((name for name, keys in self.bindings.items() if sequence in keys), None)
+        if action is None or self._text_input(receiver):
+            return False
+        panel = self.panel
+        if panel.busy:
+            button = panel.buttons[action + "_preview"]
+        elif action == "undo" and panel.window.navigation.current_workflow == "mask_review":
+            current = panel.viewer.layers.selection.active
+            if isinstance(current, (Labels, Points, Shapes)) and current.editable:
+                return False
+            button = panel.buttons["undo"]
+            if not button.isEnabled():
+                return False
+        else:
+            return False
+        # Claim the override before Qt actions, then consume the press before
+        # QtViewer forwards it to napari's Labels CtrlCmd+Z/Shift+Z bindings.
+        event.accept()
+        # A text editor may ignore a shortcut (e.g. an empty undo stack) and
+        # propagate it to its parent. Keep that press away from canvas bindings.
+        if self._text_input(QApplication.focusWidget()):
+            return True
+        if kind == QEvent.Type.KeyPress and not event.isAutoRepeat() and button.isEnabled():
+            button.click()
+        return True
+
+    def dispose(self):
+        QApplication.instance().removeEventFilter(self)
