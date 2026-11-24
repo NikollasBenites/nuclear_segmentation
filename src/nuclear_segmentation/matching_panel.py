@@ -13,6 +13,8 @@ from .ui_icons import icon
 
 
 class MatchingPanel(QWidget):
+    _default_opacity = 60
+
     def __init__(self):
         super().__init__()
         root = QVBoxLayout(self)
@@ -39,18 +41,24 @@ class MatchingPanel(QWidget):
         visualization.addWidget(self.show_inputs)
         for role in MATCHING_ROLES:
             visible = self.visibility[role] = QCheckBox(f"Show {role} masks")
-            visible.setChecked(True)
             visualization.addWidget(visible)
             label = QLabel(f"{role.title()} opacity")
             opacity = self.opacity[role] = QSpinBox()
             opacity.setRange(0, 100)
             opacity.setSuffix("%")
-            opacity.setValue(60)
             opacity.setAccessibleName(label.text())
             label.setBuddy(opacity)
             visualization.addWidget(label)
             visualization.addWidget(opacity)
         root.addStretch(1)
+        self.reset_appearance()
+
+    def reset_appearance(self):
+        for role in MATCHING_ROLES:
+            visible, opacity = self.visibility[role], self.opacity[role]
+            with QSignalBlocker(visible), QSignalBlocker(opacity):
+                visible.setChecked(True)
+                opacity.setValue(self._default_opacity)
 
     @staticmethod
     def _section(root, key, title):
@@ -86,6 +94,7 @@ class MatchingDisplay(QObject):
         self._displayed = None
         self._previous_layer = None
         self._active = False
+        self._requested = False
         self._showing = False
         self._state_signals = (
             state.sessions_changed, state.channels_changed, state.matching_selection_changed,
@@ -111,15 +120,8 @@ class MatchingDisplay(QObject):
             self._stop_showing()
 
     def show(self):
-        if not self._active or self._pair.capture() is None:
-            return
-        if not self._showing:
-            if self.session_display.suspended:
-                return
-            self._previous_layer = self.viewer.layers.selection.active
-            self.session_display.suspend(keep_hidden=True)
-            self._showing = True
-        self.refresh()
+        if self._active:
+            self.refresh(request_visualization=True)
 
     def _stop_showing(self):
         self._remove_layers()
@@ -138,7 +140,7 @@ class MatchingDisplay(QObject):
         segmentation = ("current" if session.segmentation_is_current else
                         "outdated" if session.segmentation_result else "missing")
         filtering = ("current" if session.filtering_is_current else
-                     "recalculation required" if session.filtering_result or session.pending_geometry_revision is not None
+                     "outdated" if session.filtering_result or session.pending_geometry_revision is not None
                      else "missing")
         count = (session.filtering_result or {}).get("retained_count")
         summary = f"Segmentation {segmentation} · Filtering {filtering}"
@@ -146,7 +148,7 @@ class MatchingDisplay(QObject):
             summary += f" · {count:,} retained" if session.filtering_is_current else f" · {count:,} previously retained"
         return summary
 
-    def _refresh_selector(self, role):
+    def _refresh_selector(self, role, check):
         selector = self.panel.selectors[role]
         with QSignalBlocker(selector):
             selector.clear()
@@ -170,17 +172,22 @@ class MatchingDisplay(QObject):
             selector.setEnabled(selector.count() > 1)
             selector.setToolTip(selector.currentText())
         session = self.state.sessions.get(self._pair.session_id(role))
-        self.panel.summaries[role].setText(self._session_summary(session) if session else "")
+        summary = self._session_summary(session) if session else ""
+        if check.input is not None and not check.input.retained_ids:
+            summary = f"0 retained · Validated\nNo retained {role} objects. Review filter settings."
+        self.panel.summaries[role].setText(summary)
 
-    def refresh(self, *args):
+    def refresh(self, *args, request_visualization=False):
         if self._pair is not self.state.matching_pair:
             self._stop_showing()
             self._pair = self.state.matching_pair
+            self._requested = False
+            self.panel.reset_appearance()
         if not self._active:
             return
-        for role in MATCHING_ROLES:
-            self._refresh_selector(role)
         pair, checks = self._pair.inspect()
+        for role in MATCHING_ROLES:
+            self._refresh_selector(role, checks[role])
         if not self.state.dataset_ready:
             message = "Load an image to select matching inputs."
         elif pair is None:
@@ -189,22 +196,32 @@ class MatchingDisplay(QObject):
             )
         else:
             message = "Compatible grid and validated retained masks."
-            for role in MATCHING_ROLES:
-                if not checks[role].input.retained_ids:
-                    message += f"\n{role.title()} retained population is empty."
-        if pair is None or not self._showing:
-            self._remove_layers()
-        elif self._displayed != pair or len(self.layers) != len(MATCHING_ROLES):
-            self._remove_layers()
-            self._add_layers(pair)
+        if pair is None:
+            self._stop_showing()
         else:
-            for role, layer in self.layers.items():
-                layer.name = self._layer_name(role)
+            if request_visualization:
+                self._requested = True
+            if self._requested:
+                self._show_pair(pair)
         self.panel.compatibility.setText(message)
         self.panel.show_inputs.setEnabled(pair is not None and len(self.layers) != len(MATCHING_ROLES))
         for role in MATCHING_ROLES:
             self.panel.visibility[role].setEnabled(role in self.layers)
             self.panel.opacity[role].setEnabled(role in self.layers)
+
+    def _show_pair(self, pair):
+        if not self._showing:
+            if self.session_display.suspended:
+                return
+            self._previous_layer = self.viewer.layers.selection.active
+            self.session_display.suspend(keep_hidden=True)
+            self._showing = True
+        if self._displayed != pair or len(self.layers) != len(MATCHING_ROLES):
+            self._remove_layers()
+            self._add_layers(pair)
+        else:
+            for role, layer in self.layers.items():
+                layer.name = self._layer_name(role)
 
     def _layer_name(self, role):
         session = self.state.sessions[self._pair.session_id(role)]

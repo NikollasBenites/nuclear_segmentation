@@ -15,8 +15,8 @@ from nuclear_segmentation.scientific_input import scientific_input_provenance
 from test_cellpose_execution import _fake_result, _state
 from test_desktop_normalization import FakeQtViewer, _dataset
 from test_mask_review_gui import qapp
-from test_native_project import open_saved, project, save
-from test_session_validity import revisions, run_and_measure
+from test_native_project import _wait, open_saved, project, save
+from test_session_validity import measure, revisions, run_and_measure
 
 
 def publish(state, session, *, retained=(7,), x=1, window=None):
@@ -269,6 +269,13 @@ def test_role_selectors_stay_independent_across_rename_and_pair_replacement(wind
     assert window.matching_display.layers["nuclear"] is old_layer
     assert "Renamed nuclei" in old_layer.name
     assert state.matching_pair.is_current(snapshot)
+    selector_n = panel.selectors["nuclear"]
+    selector_n.setCurrentIndex(selector_n.findData(state.nuclear_session.session_id))
+    assert "Segmentation missing" in panel.summaries["nuclear"].text()
+    assert "Run segmentation" in panel.compatibility.text()
+    assert not window.matching_display.layers
+    selector_n.setCurrentIndex(selector_n.findData(nuclear.session_id))
+    assert len(window.matching_display.layers) == 2
     selector = panel.selectors["cytoplasmic"]
     selector.setCurrentIndex(selector.findData(alternate.session_id))
     viewer = window.embedding.viewer
@@ -286,9 +293,17 @@ def test_layers_lifecycle_read_only_and_independent_appearance(window_pair):
     preferences = deepcopy(nuclear.display_state)
     before = {s.session_id: revisions(s) for s in state.sessions.values()}
     images = {layer for layer in viewer.layers if layer.metadata.get("nucytoseg_imported")}
+    panel = choose_in_panel(window, nuclear, cyto)
+    token = state.matching_pair.capture()
+    panel.show_inputs.click()
+    panel.visibility["nuclear"].setChecked(False)
+    panel.opacity["nuclear"].setValue(20)
+    panel.opacity["cytoplasmic"].setValue(85)
     for _ in range(3):
-        panel = choose_in_panel(window, nuclear, cyto)
-        panel.show_inputs.click()
+        window.set_workflow("matching")
+        assert not panel.show_inputs.isEnabled()
+        assert panel.selectors["nuclear"].currentData() == nuclear.session_id
+        assert panel.selectors["cytoplasmic"].currentData() == cyto.session_id
         layer_n, layer_c = (window.matching_display.layers[role] for role in ("nuclear", "cytoplasmic"))
         assert sum(bool(layer.metadata.get(MATCHING_LAYER)) for layer in viewer.layers) == 2
         assert images <= set(viewer.layers)
@@ -307,23 +322,23 @@ def test_layers_lifecycle_read_only_and_independent_appearance(window_pair):
             assert window.mask_context_menu.layer is None
             assert window.mask_selection.selected_layer is None
         assert not np.array_equal(layer_n.colormap.map(7), layer_c.colormap.map(7))
-        panel.visibility["nuclear"].setChecked(False)
-        panel.visibility["cytoplasmic"].setChecked(True)
-        panel.opacity["nuclear"].setValue(20)
-        panel.opacity["cytoplasmic"].setValue(85)
         assert not layer_n.visible and layer_c.visible
         assert layer_n.opacity == .20 and layer_c.opacity == .85
         layer_n.visible = True
         assert panel.visibility["nuclear"].isChecked()
+        panel.visibility["nuclear"].setChecked(False)
         window.set_workflow("proofreading")
         assert ordinary.visible and viewer.layers.selection.active is ordinary
         assert not window.matching_display.layers
         assert layer_n not in viewer.layers and layer_c not in viewer.layers
-        layer_n.visible = False
-        assert panel.visibility["nuclear"].isChecked()
+        layer_n.visible = True
+        layer_c.opacity = .15
+        assert not panel.visibility["nuclear"].isChecked()
+        assert panel.opacity["cytoplasmic"].value() == 85
         assert nuclear.display_state == preferences
     assert state.active_session_id == nuclear.session_id
     assert {s.session_id: revisions(s) for s in state.sessions.values()} == before
+    assert state.matching_pair.is_current(token)
 
 
 def test_inactive_session_invalidation_and_project_lifecycle(window_pair):
@@ -346,6 +361,10 @@ def test_inactive_session_invalidation_and_project_lifecycle(window_pair):
     assert not cyto.segmentation_is_current and state.active_session is unrelated
     assert not window.matching_display.layers
     assert "Segmentation outdated" in panel.compatibility.text()
+    assert "Segmentation outdated" in panel.summaries["cytoplasmic"].text()
+    window.set_workflow("proofreading")
+    window.set_workflow("matching")
+    assert not window.matching_display.layers and not panel.show_inputs.isEnabled()
     publish(state, cyto, window=window)
     assert "Nuclear · Measurements are outdated" in panel.compatibility.text()
     publish(state, nuclear, window=window)
@@ -366,6 +385,8 @@ def test_inactive_session_invalidation_and_project_lifecycle(window_pair):
         if layer.metadata.get(MATCHING_LAYER) or layer.metadata.get("nucytoseg_imported"):
             assert tuple(layer.scale) == (3.5, .7, .4)
             assert tuple(layer.translate) == (0., .7, .8)
+    panel.visibility["nuclear"].setChecked(False)
+    panel.opacity["cytoplasmic"].setValue(25)
     assert window._apply_imported_dataset(replace(dataset, time_index=1))
     assert not window.matching_display.layers
     assert not window.mask_display.suspended
@@ -375,10 +396,21 @@ def test_inactive_session_invalidation_and_project_lifecycle(window_pair):
     assert not any(layer.metadata.get(MATCHING_LAYER) for layer in viewer.layers)
     nuclear, cyto = measured_pair(window)
     panel = choose_in_panel(window, nuclear, cyto)
+    assert panel.show_inputs.isEnabled() and not window.matching_display.layers
     panel.show_inputs.click()
+    assert all(layer.visible and layer.opacity == .60 for layer in window.matching_display.layers.values())
+    panel.visibility["cytoplasmic"].setChecked(False)
+    panel.opacity["nuclear"].setValue(25)
+    window.set_workflow("proofreading")
     assert window.close_project(confirm=False)
     assert not window.matching_display.layers and not viewer.layers
     assert window.matching_display._previous_layer is None
+    assert window._apply_imported_dataset(dataset)
+    nuclear, cyto = measured_pair(window)
+    panel = choose_in_panel(window, nuclear, cyto)
+    assert panel.show_inputs.isEnabled() and not window.matching_display.layers
+    panel.show_inputs.click()
+    assert all(layer.visible and layer.opacity == .60 for layer in window.matching_display.layers.values())
 
 
 def test_measured_pair_can_be_reselected_after_checkpoint(project, tmp_path):
@@ -412,6 +444,122 @@ def test_measured_pair_can_be_reselected_after_checkpoint(project, tmp_path):
     assert after is not None and after.nuclear.retained_ids == before.nuclear.retained_ids
     assert after.cytoplasmic.retained_ids == before.cytoplasmic.retained_ids
     assert not state.matching_pair.is_current(before)
+
+
+@pytest.fixture
+def gui_filtered_pair(project):
+    window, app, _, _, _ = project
+    state = window.project_state
+    nuclear = state.active_session
+    cyto = state.create_session("Somata", scientific_role="cytoplasmic", channel_index=1)
+    window.segmentation.runner = lambda scientific, progress: _fake_result(scientific)
+    window.set_workflow("mask_review")
+    review = window.context_panel.mask_review_page
+    for session in (cyto, nuclear):
+        state.select_session(session.session_id)
+        run_and_measure(window, app)
+        review.minimum_volume.editor.setValue(0)
+        review.minimum_sphericity.editor.setValue(0)
+        review.z_guard_mode.setCurrentText("none")
+        review.intensity_master.setChecked(False)
+        _wait(app, lambda: not review._filter_timer.isActive())
+        assert session.filtering_result["retained_ids"] == (1,)
+    return window, app, nuclear, cyto
+
+
+def test_automatic_restoration_after_session_switch_and_remeasurement(gui_filtered_pair):
+    window, app, nuclear, cyto = gui_filtered_pair
+    state, viewer = window.project_state, window.embedding.viewer
+    panel = choose_in_panel(window, nuclear, cyto)
+    panel.show_inputs.click()
+    panel.opacity["cytoplasmic"].setValue(40)
+    token = state.matching_pair.capture()
+
+    window.set_workflow("proofreading")
+    state.select_session(cyto.session_id)
+    window.mask_display.show("raw")
+    ordinary_cyto = window.segmentation.result_layer
+    cyto_preferences = deepcopy(cyto.display_state)
+    window.set_workflow("matching")
+    assert state.active_session is cyto and state.matching_pair.is_current(token)
+    assert len(window.matching_display.layers) == 2 and not ordinary_cyto.visible
+    window.set_workflow("proofreading")
+    assert ordinary_cyto.visible and viewer.layers.selection.active is ordinary_cyto
+    assert cyto.display_state == cyto_preferences
+
+    state.select_session(nuclear.session_id)
+    edit = GeometryEdit(state, filtered=True)
+    edit.preview[0, 1, 2] = 0
+    edit.commit()
+    assert state.provisional_ids == [1] and not nuclear.filtering_is_current
+    window.set_workflow("matching")
+    assert not window.matching_display.layers and not panel.show_inputs.isEnabled()
+    assert not window.mask_display.suspended
+    assert "Recalculate measurements in Mask Review" in panel.compatibility.text()
+    assert "Filtering outdated" in panel.summaries["nuclear"].text()
+    assert "No retained nuclear objects" not in panel.summaries["nuclear"].text()
+    window.set_workflow("mask_review")
+    measure(window, app)
+    assert not window.matching_display.layers
+    assert state.filtering_result["retained_ids"] == (1,)
+    recovered = state.matching_pair.capture()
+    assert recovered.population_identity != token.population_identity
+    window.set_workflow("matching")
+    assert len(window.matching_display.layers) == 2
+    assert not panel.show_inputs.isEnabled()
+    assert window.matching_display.layers["nuclear"].data[0, 1, 2] == 0
+    assert window.matching_display.layers["cytoplasmic"].opacity == .40
+    assert state.matching_pair.is_current(recovered)
+
+
+def test_empty_feedback_from_gui_filters_in_narrow_context(gui_filtered_pair):
+    window, app, nuclear, cyto = gui_filtered_pair
+    state = window.project_state
+    window.context_container.setFixedWidth(320)
+    window.layers_section.set_expanded(False)
+    window.resize(1150, 660)
+    window.show()
+    panel = choose_in_panel(window, nuclear, cyto)
+    panel.show_inputs.click()
+    geometry_owners = tuple(state.session_revision(session.session_id) for session in (nuclear, cyto))
+
+    for session, empty, expected in (
+        (nuclear, True, (True, False)),
+        (cyto, True, (True, True)),
+        (nuclear, False, (False, True)),
+        (cyto, False, (False, False)),
+    ):
+        window.set_workflow("mask_review")
+        state.select_session(session.session_id)
+        review = window.context_panel.mask_review_page
+        volume = review.minimum_volume.editor
+        if empty:
+            assert volume.maximum() > session.filtering_result["properties"]["volume_um3"].max()
+        volume.setValue(volume.maximum() if empty else 0)
+        _wait(app, lambda: session.filtering_result["retained_count"] == int(not empty))
+        token = state.matching_pair.capture()
+        window.set_workflow("matching")
+        scroll = window.context_panel.stack.currentWidget()
+        app.processEvents()
+        assert len(window.matching_display.layers) == 2
+        assert "Compatible grid" in panel.compatibility.text()
+        for (role, summary), role_empty in zip(panel.summaries.items(), expected, strict=True):
+            label = window.matching_display.layers[role]
+            assert label.visible and not label.editable
+            assert bool(label.data.any()) == (not role_empty)
+            assert f"{int(not role_empty)} retained" in summary.text()
+            warning = f"No retained {role} objects. Review filter settings."
+            assert (warning in summary.text()) == role_empty
+            if role_empty:
+                assert "0 retained · Validated" in summary.text()
+            assert scroll.verticalScrollBar().maximum() > 0
+            scroll.ensureWidgetVisible(summary, 0, 8)
+            _wait(app, lambda: summary.visibleRegion().boundingRect() == summary.rect())
+            assert summary.isVisible() and summary.wordWrap()
+            assert summary.height() >= summary.heightForWidth(summary.width())
+        assert state.matching_pair.is_current(token)
+        assert all(session.segmentation_is_current and session.filtering_is_current for session in (nuclear, cyto))
+        assert tuple(state.session_revision(session.session_id) for session in (nuclear, cyto)) == geometry_owners
 
 
 def test_matching_on_native_qt_canvas_2d_and_3d(qapp, tmp_path):
@@ -448,8 +596,14 @@ def test_matching_on_native_qt_canvas_2d_and_3d(qapp, tmp_path):
                 QTest.mouseClick(canvas.native, Qt.MouseButton.RightButton, pos=canvas.native.rect().center())
                 assert window.mask_context_menu.menu is None
                 assert window.mask_selection.selected_mask_id is None
-        window.set_workflow("mask_review")
+        window.set_workflow("proofreading")
         assert not any(layer in viewer.layers for layer in layers)
+        window.set_workflow("matching")
+        restored = tuple(window.matching_display.layers.values())
+        assert len(restored) == 2 and not panel.show_inputs.isEnabled()
+        assert all(layer.visible and not layer.editable for layer in restored)
+        QTest.qWait(100)
+        assert not canvas.screenshot().isNull()
     finally:
         window.close()
         qapp.processEvents()
