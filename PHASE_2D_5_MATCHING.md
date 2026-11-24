@@ -141,4 +141,85 @@ A separate deterministic comparison loaded the original algorithm from commit `1
 5. Apply a measurement-only change, recalculate, and confirm compatible recovery. Commit a geometry edit or change retained IDs, recalculate the source measurements, and confirm matching requires a new run. Compare with a rename or alteration to an unrelated session.
 6. Start a long run and change the pair or threshold. Check that the obsolete completion has no effect. Repeat with project close or replacement, then select a new valid pair and run again.
 
-Native macOS validation for this phase is pending. Manual association decisions and history, guided splitting, matched density, final exports and native result persistence belong to later phases. Automatic links have no effect on quantification, ROI review or stereological eligibility.
+The developer completed all nine native macOS checks for Phase 2D.5.2 at `816e534623b98761c6c64b414cc354acdb0a2cdd`. Automatic matching, classification colors, threshold reclassification, multiple associations, empty populations, measurement recovery, geometry and filtering invalidation, session independence and stale worker protection all passed. Manual association decisions and history, guided splitting, matched density, final exports and native result persistence belong to later phases. Automatic links have no effect on quantification, ROI review or stereological eligibility.
+
+## Phase 2D.5.3 · Multiple Association Explorer and Automatic QC
+
+### Approved sequence
+
+| Phase | Responsibility |
+| --- | --- |
+| 2D.5.3 | Inspect accepted automatic links and positive-overlap candidates in Matching. Evaluate classifications in Quality Control. |
+| 2D.5.4 | Initiate nuclear-guided watershed in Proofreading. |
+| 2D.5.5 | Review and decide manual associations in Proofreading. |
+| 2D.5.6 | Persist associations and perform final QC. |
+| 2D.6 | Quantify and export matched results. |
+
+### Inspect an association
+
+Run Automatic Matching and expand **Multiple Associations**. Each row represents one retained cytoplasmic label with at least one accepted MATCH. The default filter requires two or more accepted nuclei. Clear **Only multiple associations** to include singly linked objects. Sort a column or use Previous and Next to move through the visible order. The selected cytoplasmic ID and candidate survive sorting and filtering while the object remains in the list.
+
+For the selected object, the lower table includes **every** positive nuclear intersection, including ambiguous nuclei and nuclei automatically linked elsewhere. **Accepted here** requires the nucleus's accepted cytoplasmic ID to equal the selected ID. Intersection volume is intersection voxels × calibrated voxel volume. The fraction divides by the complete retained nucleus's voxel count, including voxels outside all cytoplasmic masks. The upper table's candidate count counts distinct nuclear IDs. Both tables retain integer IDs through lookup and sorting.
+
+Choose an object or candidate row and use **Focus Selected Object**. Focus chooses an occupied voxel near the center of an occupied section, applies the layer's data-to-world transform, sets the optical plane in 2D and centers the camera in the current dimensionality. **Isolate Associated Masks** displays the cytoplasmic object in orange and accepted nuclei in green. The checkbox adds other candidates in magenta. Focusing one of those other candidates during isolation also enables the checkbox so the focused geometry is visible. **Show All Masks** restores the previous colormaps, visibility and opacity, including a previously hidden role.
+
+The explorer uses the two embedded, read-only matching layers. Ordinary mask selection and the active segmentation session retain their own ownership. Leaving Matching removes isolation and restores ordinary session appearance. Re-entry reuses the selected identities only for the same current result. A newly published result starts its own list. Outdated sources or settings withdraw the old selection, isolation and classifications. Project replacement also resets the filter and candidate-display preference.
+
+### Proofreading handoff for Phase 2D.5.4
+
+The explorer constructs an immutable `AssociationSelection` from a published result. It carries a weak reference to that result, the pair population identity, both session revisions (including project, session and geometry IDs), the cytoplasmic ID, accepted nuclear IDs, other candidate IDs and the focused role and label. At a future explicit watershed request, Proofreading can capture the selection and call `selection.is_current(state.matching_pair)` before opening its preview. It should resolve the two source geometries from the captured owners and revalidate them before committing any future edit. The candidate table supplies measured intersections. Seed eligibility, splitting, manual association decisions and transactions belong to their respective future phases.
+
+### Matching graphs
+
+**Show Matching Graphs** opens the Matching category in the existing Quality Control window. The category shares the segmentation graphs' Matplotlib canvas, navigation toolbar, theme and deferred redraw timer. All six views describe automatic classifications before manual review.
+
+| View | Population, units and interpretation |
+| --- | --- |
+| Classification proportions | Counts and fractions of **all retained nuclei**, including NO_MATCH. Zero retained nuclei give an empty-state message. |
+| Nuclear volume distributions | Nuclear volume in µm³, with common bin edges and within-class weights of 1 / class size. Each nonempty class sums to one over its bins. |
+| Nuclear volume ECDF | Cumulative fraction of each nonempty class at or below a volume in µm³. Tied volumes contribute their combined count to the step. |
+| Accepted nuclei per cytoplasmic object | Counts of **all retained cytoplasmic objects** at each observed link count, including zero. Objects with two or more accepted nuclei have a distinct color. |
+| Best and second-best overlap | Two histograms of fractions of the complete nucleus on common 0–1 bins. Each retained nucleus contributes once to each histogram. Vertical lines show the executed thresholds. |
+| Classification decision space | Best fraction on X, second-best on Y, colored by automatic class. The shaded triangle satisfies second ≤ best and best + second ≤ 1. Coincident nuclei share a marker whose area grows with log count, including NO_MATCH at the origin. The vertical and horizontal lines use the executed settings. |
+
+Each view reports nuclear and cytoplasmic sample sizes. Empty groups contribute no histogram or ECDF. An empty cytoplasmic population gives an empty link-count plot while the nuclear plots retain every NO_MATCH nucleus. Automatic classifications alone do not establish biological cell identity.
+
+### Validity, memory and limitations
+
+The published result remains owned by the project pair. A Qt signal reports job, executed-result, settings and failure transitions. The graph widget also observes source validity independently of the visible workflow. Outdated and failed states immediately hide the scientific canvas and offer recovery actions. Compatible measurement recalculation can recover the original result. A threshold rerun publishes a new classification from the existing sparse statistics. Display changes, renames and unrelated session operations preserve the scientific result.
+
+The explorer builds a reverse index from the published counts and sparse positive intersections, using O(N+C+P) additional space for N nuclei, C cytoplasmic objects and P positive pairs. Table models format visible cells on demand. Selecting another cytoplasmic object prepares only its candidate rows. Sorting the object table costs O(L log L) for L visible linked objects. Classification groups, overlap coordinates and other plot inputs are computed on demand for the current result. Hidden graphs defer rendering.
+
+Focus normally searches within the measured bounding box, using at most one section of candidate coordinates at a time. If a measurement lacks usable bounds, the first focus locates that label plane by plane. The display caches visited positions for the current geometry and clears them on layer or result replacement. Isolation changes sparse label colormaps on existing arrays. Napari still allocates its usual render buffers. Large populations can make index construction, table sorting, plotting or a first uncached focus noticeable. Inspection is scoped to the open project. Native matching persistence, final exports and matched density remain deferred.
+
+### Files for Phase 2D.5.3
+
+- `matching_explorer.py` implements the sparse index, table models, navigation and selection context. `matching_inspection.py` handles calibrated focus and reversible isolation. `mask_selection.py` provides the shared plane-bounded label lookup.
+- `matching_panel.py` integrates inspection into the existing pair and layer lifecycle. `project_state.py` and `matching_pair.py` expose result transitions.
+- `matching_plots.py`, `live_plots.py` and `desktop_window.py` implement plot projections and the Matching category in the existing QC window.
+- `tests/test_matching_explorer.py` covers scientific values, UI lifecycle, scientific validity and a real embedded Qt/napari canvas. This document and `PHASE_3_UX_ROADMAP.md` record the phase requirements and validation.
+
+### Linux regression results
+
+Under PyQt6, napari 0.10.0 and an Xorg OpenGL canvas, **394 distinct tests and 13 subtests passed** across separate pytest processes.
+
+| Group | Tests passed |
+| --- | ---: |
+| New explorer, scientific plots, graph lifecycle and real canvas | 9 |
+| Existing integrated, pair and automatic matching | 52 |
+| Wider regression suite, including proofreading, geometry, protected brushes and legacy matching | 328 plus 13 subtests |
+| Existing live plots | 4 |
+| Legacy launcher preview worker | 1 |
+
+The canvas test checks rendered differences with and without overlapping candidates in 2D and 3D, calibrated focus on a cropped image, read-only shared label arrays and restoration of prior appearance. The graph tests check plotted values, empty groups, executed thresholds, worker publication outside Matching and immediate stale-data withdrawal. The new suite also checks scientific IDs above 2⁶³.
+
+### Focused native macOS validation for Phase 2D.5.3
+
+1. Open a cropped, calibrated pair containing a multiply linked object, a singly linked object and a nucleus with a positive overlap accepted elsewhere. Run matching. Compare both tables with the per-nucleus automatic result, including exact IDs, accepted counts, voxel counts, calibrated volumes and whole-nucleus fractions.
+2. Select a candidate, toggle the multiple-only filter, sort in both directions and navigate Previous and Next. Verify the selected identity while its row stays in the list, the candidate table after navigation and the disabled controls at the ends.
+3. Set distinct role visibility and opacity. Focus the object and a candidate over the fluorescence image. Check crop offset, optical plane and calibrated center in 2D. Repeat in 3D. Isolate accepted nuclei, include the other candidates and restore the prior appearance. Try selecting the matching layer for painting and confirm the masks and active session are preserved.
+4. Leave Matching during isolation. Inspect ordinary session layers in Proofreading and return. Change a threshold or invalidate a source measurement and check that old highlighting withdraws immediately. Recalculate a compatible source, then change its retained population and repeat. Replace the project and check for residual selection or layers.
+5. Open **Show Matching Graphs**. Inspect the six plots, including common volume bins, ECDF ties, zero-link objects, the NO_MATCH origin and executed thresholds. Start a threshold rerun, switch to Quality Control and confirm automatic refresh. Rename a selected session and modify an unrelated session. Check that current graphs persist.
+6. Invalidate source measurements with Matching hidden. Check the QC recovery message and restoration after compatible recalculation. Close the graph window, rerun, reopen and check the new settings. Test zero nuclei, zero cytoplasmic objects, both empty, a single class and a valid pair without multiple associations.
+
+Native macOS validation of Phase 2D.5.3 is pending.

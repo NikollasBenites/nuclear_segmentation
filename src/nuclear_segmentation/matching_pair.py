@@ -219,6 +219,7 @@ class MatchingPairContext:
         if self.pending_settings != settings:
             self.pending_settings = settings
             self.job = self.error = None
+            self._state.matching_result_changed.emit()
 
     def reconcile(self):
         """Observe population changes even when the Matching workspace is hidden."""
@@ -266,6 +267,7 @@ class MatchingPairContext:
         self.job = MatchingJob(snapshot, self.pending_settings, cache)
         self.attempted = True
         self.error = None
+        self._state.matching_result_changed.emit()
         return self.job
 
     def _finish_job(self, job):
@@ -283,11 +285,13 @@ class MatchingPairContext:
             return False
         self._result = result
         self.executed_settings = result.settings
+        self._state.matching_result_changed.emit()
         return True
 
     def fail(self, job, message):
         if self._finish_job(job):
             self.error = message
+            self._state.matching_result_changed.emit()
 
     def _check(self, role, grid):
         state = self._state

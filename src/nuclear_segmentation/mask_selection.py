@@ -10,6 +10,26 @@ from .matching_pair import MATCHING_LAYER
 INTERNAL_HIGHLIGHT_KEY = "nucytoseg_selection_highlight"
 
 
+def selected_bounds(data, selected: int):
+    """Half-open bounds of a label, using at most one plane of coordinates."""
+    if data.ndim == 2:
+        coordinates = np.argwhere(data == selected)
+        if coordinates.size == 0:
+            return None
+        return coordinates.min(axis=0), coordinates.max(axis=0) + 1
+    minimum = np.full(data.ndim, np.iinfo(np.int64).max, dtype=int)
+    maximum = np.full(data.ndim, -1, dtype=int)
+    for index in range(data.shape[0]):
+        coordinates = np.argwhere(data[index] == selected)
+        if coordinates.size == 0:
+            continue
+        local_min = np.concatenate(([index], coordinates.min(axis=0)))
+        local_max = np.concatenate(([index + 1], coordinates.max(axis=0) + 1))
+        minimum = np.minimum(minimum, local_min)
+        maximum = np.maximum(maximum, local_max)
+    return None if maximum[0] < 0 else (minimum, maximum)
+
+
 class MaskSelectionController(QObject):
     """Own object selection separately from active-layer and editing state."""
 
@@ -199,29 +219,10 @@ class MaskSelectionController(QObject):
         self.status_changed.emit(f"Selected Mask ID: {selected}")
         return selected
 
-    @staticmethod
-    def _selected_bounds(data, selected: int):
-        if data.ndim == 2:
-            coordinates = np.argwhere(data == selected)
-            if coordinates.size == 0:
-                return None
-            return coordinates.min(axis=0), coordinates.max(axis=0) + 1
-        minimum = np.full(data.ndim, np.iinfo(np.int64).max, dtype=int)
-        maximum = np.full(data.ndim, -1, dtype=int)
-        for index in range(data.shape[0]):
-            coordinates = np.argwhere(data[index] == selected)
-            if coordinates.size == 0:
-                continue
-            local_min = np.concatenate(([index], coordinates.min(axis=0)))
-            local_max = np.concatenate(([index + 1], coordinates.max(axis=0) + 1))
-            minimum = np.minimum(minimum, local_min)
-            maximum = np.maximum(maximum, local_max)
-        return None if maximum[0] < 0 else (minimum, maximum)
-
     def _update_highlight(self, layer, selected: int) -> None:
         self._remove_highlight()
         data = layer.data[0] if layer.multiscale else layer.data
-        bounds = self._selected_bounds(data, selected)
+        bounds = selected_bounds(data, selected)
         if bounds is None:
             return
         minimum, maximum = bounds

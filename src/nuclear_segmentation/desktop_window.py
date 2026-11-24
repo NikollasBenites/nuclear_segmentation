@@ -119,6 +119,7 @@ class DesktopWindow(QMainWindow):
         self.graph_window.resize(780, 620)
         QVBoxLayout(self.graph_window).addWidget(self.context_panel.quality_control_page)
         self.context_panel.show_graphs_button.clicked.connect(self.graph_window.show)
+        self.context_panel.matching_page.graphs.clicked.connect(self._show_matching_graphs)
         self.context_container = self._build_context_container()
         self.mask_selection = MaskSelectionController(self.embedding.viewer, self)
         self.crop_workspace = CropWorkspaceController(
@@ -301,6 +302,11 @@ class DesktopWindow(QMainWindow):
         self._apply_theme()
         if restore_workspace:
             self.restore_layout()
+
+    def _show_matching_graphs(self):
+        self.context_panel.quality_control_page.category.setCurrentText("Matching")
+        self.graph_window.show()
+        self.graph_window.raise_()
 
     def _build_context_container(self) -> QWidget:
         container = QWidget()

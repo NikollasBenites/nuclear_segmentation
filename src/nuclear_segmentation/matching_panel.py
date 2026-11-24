@@ -9,6 +9,8 @@ from qtpy.QtWidgets import (
 )
 
 from .automatic_matching import COLORS, MatchingSettings
+from .matching_explorer import AssociationExplorer
+from .matching_inspection import MatchingInspection
 from .matching_execution import MatchingExecution
 from .collapsible_section import CollapsibleSection
 from .matching_pair import MATCHING_LAYER, MATCHING_ROLES
@@ -116,6 +118,11 @@ class MatchingPanel(QWidget):
         self.table.setModel(self.table_model)
         self.table.verticalHeader().hide()
         results.addWidget(self.table)
+        self.graphs = QPushButton("Show Matching Graphs")
+        results.addWidget(self.graphs)
+        associations = self._section(root, "associations", "Multiple Associations")
+        self.explorer = AssociationExplorer()
+        associations.addWidget(self.explorer)
         self.defaults.clicked.connect(self.reset_thresholds)
         root.addStretch(1)
         self.reset_appearance()
@@ -182,6 +189,7 @@ class MatchingDisplay(QObject):
         self._requested = False
         self._showing = False
         self._colored_result = None
+        self.inspection = MatchingInspection(self)
         self.execution = MatchingExecution(state, self)
         self.execution.changed.connect(self.refresh)
         self.execution.progress_changed.connect(self._progress)
@@ -192,7 +200,7 @@ class MatchingDisplay(QObject):
         self._state_signals = (
             state.sessions_changed, state.channels_changed, state.matching_selection_changed,
             state.segmentation_result_changed, state.filtering_result_changed,
-            state.inactive_session_validity_changed,
+            state.inactive_session_validity_changed, state.calibration_changed, state.matching_result_changed,
         )
         for signal in self._state_signals:
             signal.connect(self.refresh)
@@ -237,9 +245,9 @@ class MatchingDisplay(QObject):
         except ValueError:
             settings = None
         self._pair.set_settings(settings)
-        self.refresh()
 
     def _toggle_colors(self, enabled):
+        self.inspection.restore()
         self.refresh(request_visualization=enabled)
 
     def _select(self, role):
@@ -289,6 +297,9 @@ class MatchingDisplay(QObject):
     def refresh(self, *args, request_visualization=False):
         if self._pair is not self.state.matching_pair:
             self._stop_showing()
+            self.panel.explorer.set_result(None, "Run automatic matching to inspect associations.")
+            self.panel.explorer.multiple.setChecked(True)
+            self.panel.explorer.include.setChecked(False)
             self._pair = self.state.matching_pair
             self._requested = False
             self.panel.reset_appearance()
@@ -296,6 +307,9 @@ class MatchingDisplay(QObject):
             self.panel.summary.clear()
             self.panel.result_status.clear()
         if not self._active:
+            index = self.panel.explorer.index
+            if index is not None and self._pair.current_result is not index.result:
+                self.panel.explorer.set_result(None, "Matching results unavailable.")
             return
         pair, checks = self._pair.inspect()
         for role in MATCHING_ROLES:
@@ -316,7 +330,11 @@ class MatchingDisplay(QObject):
             if self._requested:
                 self._show_pair(pair)
         result = self._pair._result_for(pair)
+        explorer = self.panel.explorer
+        if explorer.index is not None and explorer.index.result is not result:
+            self.inspection.reset()
         self._show_results(pair, result)
+        explorer.set_result(result, self.panel.result_status.text())
         self._apply_colors(result if self.panel.class_colors.isChecked() else None)
         self.panel.compatibility.setText(message)
         self.panel.show_inputs.setEnabled(pair is not None and len(self.layers) != len(MATCHING_ROLES))
@@ -365,7 +383,7 @@ class MatchingDisplay(QObject):
 
     def _apply_colors(self, result):
         layer = self.layers.get("nuclear")
-        if layer is None or self._colored_result is result:
+        if layer is None or self.inspection.appearance or self._colored_result is result:
             return
         if result is None:
             layer.colormap = CyclicLabelColormap(colors=[(0, 0, 0, 0), self._colors["nuclear"]])
@@ -435,6 +453,7 @@ class MatchingDisplay(QObject):
         layer = event.value
         role = layer.metadata.get(MATCHING_LAYER)
         if self.layers.get(role) is layer:
+            self.inspection.restore()
             layer.events.visible.disconnect(self._appearance_changed)
             layer.events.opacity.disconnect(self._appearance_changed)
             del self.layers[role]
@@ -446,6 +465,7 @@ class MatchingDisplay(QObject):
             self._previous_layer = None
 
     def _remove_layers(self):
+        self.inspection.reset()
         self._colored_result = None
         self._displayed = None
         for layer in tuple(self.layers.values()):
@@ -453,6 +473,7 @@ class MatchingDisplay(QObject):
 
     def dispose(self):
         self.set_active(False)
+        self.panel.explorer.set_result(None, "Matching results unavailable.")
         for signal in self._state_signals:
             signal.disconnect(self.refresh)
         self.viewer.layers.events.removed.disconnect(self._removed)

@@ -6,6 +6,8 @@ from qtpy.QtWidgets import QWidget, QVBoxLayout, QComboBox, QLabel
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
+from .matching_plots import DECISION_SPACE, MatchingPlotData, PLOTS
+
 
 class LivePlots(QWidget):
     def __init__(self, ns):
@@ -247,11 +249,114 @@ class ProjectLivePlots(LivePlots):
         self.project_state = project_state
         self._measurement_identity = None
         self._profile_identity = None
+        self._matching_data = None
+        self._matching_status = None
         super().__init__({})
+        self.category = QComboBox()
+        self.category.setAccessibleName("Quality Control category")
+        self.category.addItems(["Segmentation", "Matching"])
+        self.layout().insertWidget(0, self.category)
+        self.matching_kind = QComboBox()
+        self.matching_kind.setAccessibleName("Automatic matching graph")
+        self.matching_kind.addItems(PLOTS)
+        self.layout().insertWidget(1, self.matching_kind)
+        self.matching_kind.hide()
+        self.category.currentTextChanged.connect(self._change_category)
+        self.matching_kind.currentIndexChanged.connect(self.schedule)
+        self._matching_signals = (
+            project_state.matching_result_changed, project_state.matching_selection_changed,
+            project_state.channels_changed, project_state.sessions_changed,
+            project_state.inactive_session_validity_changed, project_state.calibration_changed,
+        )
+        for signal in self._matching_signals:
+            signal.connect(self._sync_matching)
         project_state.segmentation_result_changed.connect(self.sync)
         project_state.filtering_result_changed.connect(self.sync)
         project_state.scientific_roi_changed.connect(self.sync)
         self.sync()
+
+    def _change_category(self, name):
+        matching = name == "Matching"
+        self.kind.setVisible(not matching)
+        self.matching_kind.setVisible(matching)
+        self.column.hide()
+        self.z_timer.stop()
+        self.timer.stop()
+        self.canvas.hide()
+        self.toolbar.hide()
+        if matching:
+            self.ns.clear()
+            self.ns["dark_theme"] = True
+            self._measurement_identity = None
+            self._set_profile_source(None, None)
+            self.last_retained_ids = []
+            self._sync_matching(force=True)
+        else:
+            self.figure.suptitle("")
+            self.sync()
+            self.populate_columns()
+
+    def _sync_matching(self, *args, force=False):
+        if self.disposed:
+            return
+        pair = self.project_state.matching_pair
+        if self.category.currentText() != "Matching":
+            if self._matching_data and pair.current_result is not self._matching_data.result:
+                self._matching_data = None
+            return
+        result = pair.current_result if pair.attempted else None
+        if result is not None:
+            message = (f"Automatic classifications before manual association review · "
+                       f"{len(result.nuclei):,} retained nuclei · {len(result.associations):,} retained cytoplasmic objects.")
+        elif pair.error:
+            message = f"Automatic matching failed. {pair.error} Run automatic matching to retry."
+        elif pair.job is not None:
+            message = "Running automatic matching…"
+        elif pair.attempted:
+            message = "Automatic matching outdated. Recalculate source measurements if needed and rerun matching."
+        else:
+            message = "Matching has not been executed. Select measured inputs and run automatic matching."
+        previous = self._matching_data.result if self._matching_data else None
+        if not force and previous is result and self._matching_status == message:
+            return
+        if previous is not result:
+            self._matching_data = MatchingPlotData(result) if result is not None else None
+        self._matching_status = message
+        self.canvas.hide()
+        self.toolbar.hide()
+        self.schedule()
+        self.status.setText(message)
+
+    def redraw(self):
+        if self.disposed:
+            return
+        if self.category.currentText() != "Matching":
+            self.canvas.show()
+            self.toolbar.show()
+            super().redraw()
+            return
+        self.timer.stop()
+        self.dirty = False
+        self.render_count += 1
+        self.axes.clear()
+        self.toolbar.update()
+        self.status.setText(self._matching_status)
+        if self._matching_data is None:
+            return
+        self._apply_canvas_theme()
+        kind = self.matching_kind.currentText()
+        self._matching_data.draw(self.axes, kind)
+        counts = self._matching_data.result
+        self.figure.suptitle(
+            f"Automatic classifications before manual association review\n"
+            f"{len(counts.nuclei):,} retained nuclei · {len(counts.associations):,} retained cytoplasmic objects",
+            color=self.axes.title.get_color(), fontsize=11)
+        if kind == DECISION_SPACE and counts.nuclei:
+            self.status.setText(self._matching_status + " Marker area increases with the log of the count at each coordinate.")
+        self._apply_canvas_theme()
+        self.canvas.show()
+        self.toolbar.show()
+        self.canvas.draw_idle()
 
     def _segmentation_volume(self, result):
         volume = result.get('model_input_volume')
@@ -272,6 +377,9 @@ class ProjectLivePlots(LivePlots):
 
     def sync(self, *args):
         if self.disposed:
+            return
+        self._sync_matching()
+        if self.category.currentText() == "Matching":
             return
         state = self.project_state
         segmentation = state.segmentation_result
@@ -350,6 +458,9 @@ class ProjectLivePlots(LivePlots):
 
     def dispose(self):
         if not self.disposed:
+            self._matching_data = None
+            for signal in self._matching_signals:
+                signal.disconnect(self._sync_matching)
             state = self.project_state
             state.segmentation_result_changed.disconnect(self.sync)
             state.filtering_result_changed.disconnect(self.sync)
