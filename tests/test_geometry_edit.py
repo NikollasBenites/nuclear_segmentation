@@ -1142,14 +1142,13 @@ def test_quick_history_scope_hidden_labels_and_new_preview(retained_second_mask)
     layer = panel.layer
     _click_mask(layer, (0, 5, 6))
     layer.brush_size = 1
-    layer.paint((0, 1, 1), 2)
-    with pytest.raises(ValueError, match="excluded object"):
-        panel.commit()
+    layer.paint((0, 0, 0), 2)
     panel.undo_preview()
-    assert layer.data[0, 1, 1] == 0
+    layer.paint((0, 1, 1), 2)
+    assert layer.data[0, 1, 1] == 0 and not panel.buttons["undo_preview"].isEnabled()
+    assert panel.buttons["redo_preview"].isEnabled()
     panel.redo_preview()
-    with pytest.raises(ValueError, match="excluded object"):
-        panel.commit()
+    assert layer.data[0, 0, 0] == 2 and layer.data[0, 1, 1] == 0
     panel.undo_preview()
     panel.scope.setCurrentIndex(1)
     assert layer.data[0, 1, 1] == 1
@@ -1165,8 +1164,7 @@ def test_quick_history_scope_hidden_labels_and_new_preview(retained_second_mask)
     _click_mask(panel.layer, (0, 5, 6))
     panel.layer.brush_size = 1
     panel.layer.paint((0, 1, 1), 2)
-    panel.undo_preview()
-    assert "No pending changes" in panel.status.text() and panel.layer.data[0, 1, 1] == 0
+    assert not panel.buttons["undo_preview"].isEnabled() and panel.layer.data[0, 1, 1] == 0
     assert effective_masks(window.project_state.segmentation_result)[0, 1, 1] == raw[0, 1, 1] == 1
     panel.discard()
 

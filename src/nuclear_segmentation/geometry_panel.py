@@ -183,6 +183,7 @@ class GeometryPanel(CollapsibleSection):
                     self.scope.setCurrentIndex(0 if self.edit.filtered else 1)
                 self.status.setText(str(error))
                 return
+            self.strokes.sync_write_protection()
             self.strokes.clear()
             self._dimensions()
             self.layer.refresh()
@@ -444,7 +445,7 @@ class GeometryPanel(CollapsibleSection):
         self._require_finished_stroke()
         selected = self.edit.parameters.get("retained_id", self.edit.parameters.get("parent"))
         self.edit.apply_operation()
-        self.strokes.release_split()
+        self.strokes.sync_write_protection()
         self.strokes.clear()
         self.strokes.changed_voxels = self._pending_dirty + self.strokes.step_change(self.edit.steps[-1])
         self._finish_operation(selected)
@@ -453,7 +454,7 @@ class GeometryPanel(CollapsibleSection):
         self._require_finished_stroke()
         selected = self.edit.parameters.get("parent", self.selected_id)
         self.edit.cancel_operation()
-        self.strokes.release_split()
+        self.strokes.sync_write_protection()
         self.strokes.clear()
         self.strokes.changed_voxels = self._pending_dirty
         self._finish_operation(selected)
@@ -573,7 +574,9 @@ class GeometryPanel(CollapsibleSection):
         layer = self.viewer.add_labels(edit.preview, name=f"{self.state.active_session.display_name} · Uncommitted edits",
                                        scale=spacing, translate=self.translate,
                                        metadata={**self.state.mask_layer_metadata(), "nucytoseg_edit_preview": True})
-        self.strokes = PreviewStrokes(layer, edit)
+        self.strokes = PreviewStrokes(
+            layer, edit, self._owns_preview, lambda message: window.statusBar().showMessage(message, 3500)
+        )
         self.edit, self.layer = edit, layer
         self.selected_object.setText("None")
         self.invalidated = False
@@ -612,7 +615,7 @@ class GeometryPanel(CollapsibleSection):
         self.refresh()
 
     def discard(self):
-        self.strokes.release_split()
+        self.strokes.release_write_protection()
         self.layer.events.brush_size.disconnect(self._sync_size)
         self.layer.events.paint.disconnect(self._painted)
         self.layer.events.selected_label.disconnect(self._brush_changed)
@@ -739,7 +742,7 @@ class GeometryPanel(CollapsibleSection):
         new = self.edit.split(self.selected_id)
         self._pending_dirty = self.strokes.changed_voxels
         self.strokes.clear()
-        self.strokes.protect_split()
+        self.strokes.sync_write_protection()
         self._set_brush(new)
         self.layer.brush_size = 1
         self.window.viewer_toolbar.set_ndisplay(2)

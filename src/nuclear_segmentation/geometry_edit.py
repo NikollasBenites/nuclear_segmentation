@@ -166,6 +166,8 @@ class GeometryEdit:
         self.pending_source = None
         self.tracks_strokes = track_strokes
         self._excluded_ids = None
+        if filtered:
+            self._prepare_filtered_scope()
         source = self.filter_record["filtered_masks"] if filtered and self.filter_record is not None else self.base
         self.preview = np.array(source, dtype=np.promote_types(self.base.dtype, np.uint32),
                                 order="C", copy=True)
@@ -196,14 +198,43 @@ class GeometryEdit:
     def is_pristine(self):
         return self.operation == "paint/erase" and not self.has_changes()
 
+    def _prepare_filtered_scope(self):
+        """Resolve protected IDs once against the immutable transaction source."""
+        if self._excluded_ids is not None:
+            return
+        retained = set(self.retained_ids)
+        kept = self.filter_record["filtered_masks"] if self.filter_record is not None else None
+        error = "Retained selection disagrees with committed geometry. Recalculate measurements."
+        if kept is not None and kept.shape != self.base.shape:
+            raise ValueError(error)
+        ids = set()
+        for z, plane in enumerate(self.base):
+            labels = set(map(int, np.unique(plane)))
+            ids.update(labels)
+            if kept is not None:
+                hidden = labels.difference(retained, {0})
+                expected = np.where(np.isin(plane, tuple(hidden)), 0, plane) if hidden else plane
+                if not np.array_equal(kept[z], expected):
+                    raise ValueError(error)
+        if 0 in retained or not retained.issubset(ids):
+            raise ValueError(error)
+        self._excluded_ids = frozenset(ids.difference(retained, {0}))
+
     @property
     def excluded_ids(self):
-        if self._excluded_ids is None:
-            ids = set()
-            for plane in self.base:
-                ids.update(map(int, np.unique(plane)))
-            self._excluded_ids = tuple(ids.difference(self.retained_ids, {0}))
-        return self._excluded_ids
+        self._prepare_filtered_scope()
+        return tuple(self._excluded_ids)
+
+    def excluded_values(self, values):
+        # Restrict the membership array to labels in this brush footprint.
+        excluded = [v for v in np.unique(values) if v in self._excluded_ids]
+        return np.isin(values, excluded)
+
+    def protected_voxels(self, key):
+        source = self.base[key]
+        if self.filter_record is not None:
+            return source != self.filter_record["filtered_masks"][key]
+        return self.excluded_values(source)
 
     def _visible_planes(self):
         if self.filter_record is not None:
@@ -213,17 +244,18 @@ class GeometryEdit:
                 yield np.where(np.isin(plane, self.retained_ids), plane, 0)
 
     def allows_label(self, label):
-        return not self.filtered or label not in self.excluded_ids
+        return not self.filtered or label not in self._excluded_ids
 
     def _validate_scope(self):
         if not self.filter_current:
             raise ValueError("Filtering changed. Discard the preview and start again.")
         visible = self._visible_planes()
+        excluded = self.excluded_ids
         for base, kept, preview in zip(self.base, visible, self.preview, strict=True):
             hidden = base != kept
             expected = kept if self.filtered else base
             changed = preview != expected
-            if np.any(changed & hidden) or np.isin(preview[changed], self.excluded_ids).any():
+            if np.any(changed & hidden) or np.isin(preview[changed], excluded).any():
                 if self.filtered:
                     raise ValueError("Edit touches an excluded object or uses its ID. Undo the stroke or discard and use Edit All Masks.")
                 raise ValueError("This edit changes an excluded object. Save or discard before switching to filtered masks.")

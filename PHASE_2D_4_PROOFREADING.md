@@ -1,4 +1,4 @@
-# Phase 2D.4.4.2 proofreading
+# NuCytoSeg proofreading
 
 ## Working with masks
 
@@ -17,6 +17,26 @@ Each brush stroke is one step. Remove accepts the whole-object removal immediate
 Pause, switching slice views, and collapsing Geometry Editing preserve the transaction. A successful scope change starts a fresh undo range to protect the newly hidden labels. Earlier accepted operations remain in the transaction. A new accepted edit clears the redo branch. Save requires all pending proposals to be applied or canceled. Stop can discard a transaction with no net voxel changes.
 
 Outside a transaction, Undo in Proofreading or Mask Review invokes **Undo Last Saved Edit** for the active session. One saved revision covers the entire batch, including any objects created and later removed within it.
+
+## Phase 2D.4.5.1 — Protected brush editing
+
+In **Edit Filtered Masks**, Paint can expand into true background and can paint other retained objects according to napari's usual brush settings. When Paint or Erase crosses an excluded object's position, the status bar shows “Protected excluded-object voxels were skipped.” The rest of the stroke remains editable. Undo and Redo replay the permitted changes. A stroke entirely on protected voxels leaves both history stacks alone. Use **Edit All Masks** for an intentional correction to an excluded object.
+
+On baseline `d88b917`, a size-3 brush on the edge of retained ID 49 wrote five new preview voxels in the synthetic cytoplasmic case. Three overlay true background and two overlay excluded ID 73. The retained IDs and filtered array agreed with the complete geometry, and the selected brush ID was valid. The hidden voxels appeared as zero in the preview, so ordinary napari Paint could record and display the write before Save Changes rejected it. This reproduces the reported error without access to the original acquisition.
+
+`geometry_edit.py` checks the captured retained selection against the authoritative geometry on first entering filtered scope. This check traverses the volume by plane and caches excluded IDs. `preview_history.py` uses the existing Split interception points for masked and indexed writes. Each brush stamp inspects its bounding box or supplied coordinates before calling napari. Validated filtering supplies a read-only retained projection. Provisional proofreading uses the cached IDs and committed labels. Split continues to use its pending parent boundary. `geometry_panel.py` manages the hooks through scope changes, Apply, Cancel and preview teardown, and delivers the nonblocking feedback. Save Changes still validates the complete transaction.
+
+**Automated verification.** All 338 distinct tests and 13 scientific subtests passed on Linux with PyQt6 and napari 0.10.0. The focused group passed 56 proofreading tests, including eight protected-brush cases. The other groups passed 277 regression tests plus 13 subtests, four live-plot tests, and one legacy launcher test. The Qt canvas test ran under Xorg with software OpenGL. Native macOS validation of this change is pending.
+
+### Native macOS validation for Phase 2D.4.5.1
+
+- [ ] Open a copy of the MAP2 project. Locate a retained object, adjacent excluded geometry and nearby true background. Record their positions in complete geometry. With **Edit Filtered Masks** selected, paint across all three. Check that the preview grows into background, the hidden region stays clear, and the status bar reports the skipped voxels.
+- [ ] Undo the stroke, paint entirely inside the hidden region, then redo. Verify the original redo step still works. Enter the excluded label as the brush ID and verify the editor identifies the ID as excluded.
+- [ ] Repeat with Erase in XY and an orthogonal slice. Pause and resume. Begin a Split at the same boundary, cancel it, repeat and apply it, then paint with the child. Press Escape and inspect the preview before saving.
+- [ ] Save with automatic recalculation off. Compare the excluded object's complete geometry with the recorded reference. Continue proofreading in the provisional retained selection, then save with automatic recalculation on. Check the Live Filtered Masks layer and the completed measurements.
+- [ ] Repeat a boundary stroke in Nuclear. Switch to **Edit All Masks** and verify that an intentional edit to the formerly hidden object is available there. Discard that comparison edit and start a fresh filtered preview.
+
+The Phase 2D.4.5.1 checklist supersedes the earlier hidden-overlap expectations below. Regression coverage is in `tests/test_protected_brush.py` and `tests/test_geometry_edit.py`. The rendered test sends a physical Qt mouse click to the napari canvas and checks preview labels, displayed texture values, sparse history and committed geometry.
 
 ## Phase 2D.4.4.2 implementation and verification
 

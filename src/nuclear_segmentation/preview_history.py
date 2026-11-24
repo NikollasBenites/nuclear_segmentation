@@ -11,20 +11,24 @@ from qtpy.QtWidgets import (QAbstractSpinBox, QApplication, QComboBox, QLineEdit
 from .geometry_edit import voxel_step
 
 
+_SKIPPED_VOXELS = "Protected excluded-object voxels were skipped."
+_EXCLUDED_BRUSH = "This brush ID is excluded. Use Edit All Masks to edit it."
+
+
 class PreviewStrokes:
     """Keep napari's bounded stroke queues on one preview and one editing scope.
 
     Labels exposes public replay methods and paint events. Queue availability,
     grouped stroke atoms and the read-only reset are internal to napari 0.10.
     """
-    def __init__(self, layer, edit):
+    def __init__(self, layer, edit, owns_preview, notify):
         self.layer = layer
         self.edit = edit
         self.changed_voxels = 0
-        self.original_split_writes = None
-        self.provisional_ids = set()
-        if edit.filter_record is None and edit.retained_ids is not None:
-            self.provisional_ids.update(edit.retained_ids)
+        self.original_writes = None
+        self.owns_preview = owns_preview
+        self.notify = notify
+        self.sync_write_protection()
 
     def clear(self):
         self.layer._undo_history.clear()
@@ -72,41 +76,85 @@ class PreviewStrokes:
         coords = np.unravel_index(step["indexes"], self.layer.data.shape)
         return self.count_change([(coords, step["before"], step["after"])])
 
-    def protect_split(self):
-        # Clip before napari writes voxels, records history or refreshes its label
-        # texture. Erase maps to the parent here so the texture gets the same ID.
+    def sync_write_protection(self):
+        # Intercept the same two napari write paths before either history or
+        # the displayed slice texture can see a protected voxel.
         layer, edit = self.layer, self.edit
+        if not edit.filtered and edit.operation != "split":
+            self.release_write_protection()
+            return
+        if self.original_writes is not None:
+            return
         paint_region = layer._paint_region_with_mask
         setitem = layer.data_setitem
-        parent, child = edit.parameters["parent"], edit.parameters["new_id"]
 
         def paint(slice_key, mask, new_label, dims_to_paint, refresh=True, region_data=None):
-            if new_label not in (child, 0):
+            if edit.paused or not self.owns_preview():
                 return
-            other_axes = tuple(i for i in range(layer.ndim) if i not in dims_to_paint)
-            allowed = np.squeeze(edit.pending_source[slice_key], axis=other_axes) == parent
-            paint_region(slice_key, mask & allowed, child if new_label else parent, dims_to_paint, refresh, region_data)
+            extra_axes = tuple(i for i in range(layer.ndim) if i not in dims_to_paint)
+            if edit.operation == "split":
+                parent, child = edit.parameters["parent"], edit.parameters["new_id"]
+                if new_label not in (child, 0):
+                    return
+                allowed = np.squeeze(edit.pending_source[slice_key], axis=extra_axes) == parent
+                new_label = child if new_label else parent
+            elif edit.operation == "paint/erase":
+                if not edit.allows_label(new_label):
+                    self.notify(_EXCLUDED_BRUSH)
+                    return
+                hidden = np.squeeze(edit.protected_voxels(slice_key), axis=extra_axes)
+                if np.any(mask & hidden):
+                    self.notify(_SKIPPED_VOXELS)
+                allowed = ~hidden
+            else:
+                return
+            clipped = mask & allowed
+            if clipped.any():
+                paint_region(slice_key, clipped, new_label, dims_to_paint, refresh, region_data)
 
         def write(indices, value, refresh=True):
-            values = np.broadcast_to(value, np.shape(indices[0]))
-            allowed = (edit.pending_source[indices] == parent) & np.isin(values, (0, child))
-            coords = tuple(np.asarray(axis)[allowed] for axis in indices)
-            setitem(coords, np.where(values[allowed] == 0, parent, child), refresh)
+            if edit.paused or not self.owns_preview():
+                return
+            coords = tuple(np.broadcast_arrays(*indices))
+            values = np.asarray(value)
+            if values.ndim:
+                values = np.broadcast_to(values, coords[0].shape)
+            if edit.operation == "split":
+                parent, child = edit.parameters["parent"], edit.parameters["new_id"]
+                allowed = (edit.pending_source[coords] == parent) & np.isin(values, (0, child))
+                values = np.where(values == 0, parent, child)
+            elif edit.operation == "paint/erase":
+                hidden = edit.protected_voxels(coords)
+                invalid = edit.excluded_values(values)
+                if invalid.any():
+                    self.notify(_EXCLUDED_BRUSH)
+                elif hidden.any():
+                    self.notify(_SKIPPED_VOXELS)
+                allowed = ~(invalid | hidden)
+            else:
+                return
+            if not allowed.any():
+                return
+            if not allowed.all():
+                coords = tuple(axis[allowed] for axis in coords)
+                if values.ndim:
+                    values = values[allowed]
+            setitem(coords, values if values.ndim else values.item(), refresh)
 
-        self.original_split_writes = {name: vars(layer)[name] for name in ("_paint_region_with_mask", "data_setitem")
-                                      if name in vars(layer)}
+        self.original_writes = {name: vars(layer)[name] for name in ("_paint_region_with_mask", "data_setitem")
+                                if name in vars(layer)}
         layer._paint_region_with_mask = paint
         layer.data_setitem = write
 
-    def release_split(self):
-        if self.original_split_writes is None:
+    def release_write_protection(self):
+        if self.original_writes is None:
             return
         for name in ("_paint_region_with_mask", "data_setitem"):
-            if name in self.original_split_writes:
-                setattr(self.layer, name, self.original_split_writes[name])
+            if name in self.original_writes:
+                setattr(self.layer, name, self.original_writes[name])
             else:
                 delattr(self.layer, name)
-        self.original_split_writes = None
+        self.original_writes = None
 
     def count_change(self, atoms):
         # Compare only the touched voxels. Overlapping strokes, including an
@@ -126,9 +174,7 @@ class PreviewStrokes:
             if edit.filtered and edit.filter_record is None:
                 # Membership cost depends on the stroke footprint even for sessions
                 # with many retained IDs. Raw labels under the hidden scope read as 0.
-                hidden = [label for label in np.unique(reference) if label and label not in self.provisional_ids]
-                if hidden:
-                    reference = np.where(np.isin(reference, hidden), 0, reference)
+                reference = np.where(edit.excluded_values(reference), 0, reference)
             delta += np.count_nonzero(reference != new) - np.count_nonzero(reference != old)
         return delta
 
