@@ -219,11 +219,24 @@ class ProjectState(QObject):
         self.z_correction_reports: dict[int, dict[str, Any]] = {}
         self.z_correction_applied: set[int] = set()
         self.restoring_project = False
+        for signal in (self.sessions_changed, self.channels_changed, self.segmentation_result_changed,
+                       self.filtering_result_changed, self.inactive_session_validity_changed,
+                       self.calibration_changed):
+            signal.connect(self._matching_inputs_changed)
+
+    def _matching_inputs_changed(self, *args):
+        self.matching_pair.reconcile()
+
+    def _replace_matching_pair(self):
+        previous = getattr(self, "matching_pair", None)
+        if previous is not None:
+            previous.discard_results()
+        self.matching_pair = MatchingPairContext(self)
 
     def _reset_sessions(self) -> None:
         self._sessions = {"nuclear": SegmentationSession()}
         self._active_session_id = "nuclear"
-        self.matching_pair = MatchingPairContext(self)
+        self._replace_matching_pair()
 
     @property
     def sessions(self) -> Mapping[str, SegmentationSession]:
@@ -246,7 +259,7 @@ class ProjectState(QObject):
     ) -> None:
         self._sessions = dict(sessions)
         self._active_session_id = active_session_id
-        self.matching_pair = MatchingPairContext(self)
+        self._replace_matching_pair()
         self.sessions_changed.emit()
 
     @staticmethod

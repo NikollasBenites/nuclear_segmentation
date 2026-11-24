@@ -7,6 +7,7 @@ from weakref import ref
 
 import numpy as np
 
+from .automatic_matching import MatchingSettings, OverlapStatistics
 from .geometry_edit import effective_masks
 from .scientific_input import same_input_except_z_corrections
 
@@ -71,7 +72,7 @@ class MatchingInput:
 
     @property
     def population_identity(self):
-        return self.owner, self.retained_ids
+        return self.owner, self.source_channel_index, self.retained_ids
 
 
 @dataclass(frozen=True)
@@ -81,8 +82,19 @@ class MatchingPairSnapshot:
     cytoplasmic: MatchingInput
 
     @property
+    def measurement_revisions(self):
+        return self.nuclear.measurement_revision, self.cytoplasmic.measurement_revision
+
+    @property
     def population_identity(self):
         return self.grid, self.nuclear.population_identity, self.cytoplasmic.population_identity
+
+
+@dataclass(frozen=True, eq=False)
+class MatchingJob:
+    snapshot: MatchingPairSnapshot
+    settings: MatchingSettings
+    cache: OverlapStatistics | None
 
 
 @dataclass(frozen=True)
@@ -120,6 +132,17 @@ class MatchingPairContext:
         self._project_id = state.session_revision().project_id
         self._ids = dict.fromkeys(MATCHING_ROLES)
         self._verified = {}
+        self.pending_settings = MatchingSettings()
+        self.job = None
+        self._result = None
+        self.executed_settings = None
+        self.attempted = False
+        self.error = None
+
+    def discard_results(self):
+        self.job = None
+        self._result = None
+        self.error = None
 
     def session_id(self, role):
         return self._ids[role]
@@ -138,6 +161,7 @@ class MatchingPairContext:
             if session is None or session.scientific_role != role:
                 raise ValueError(f"Select a {role} session from the current project.")
         if self._ids[role] != session_id:
+            self.discard_results()
             self._ids[role] = session_id
             self._verified.pop(role, None)
             self._state.matching_selection_changed.emit()
@@ -190,6 +214,80 @@ class MatchingPairContext:
 
     def is_current(self, snapshot: MatchingPairSnapshot) -> bool:
         return snapshot is not None and self.capture() == snapshot
+
+    def set_settings(self, settings: MatchingSettings | None):
+        if self.pending_settings != settings:
+            self.pending_settings = settings
+            self.job = self.error = None
+
+    def reconcile(self):
+        """Observe population changes even when the Matching workspace is hidden."""
+        if self.job is None and self._result is None:
+            return
+        snapshot, checks = self.inspect()
+        if self.job is not None and self.job.snapshot != snapshot:
+            self.job = None
+        if self._result is None:
+            return
+        grid, *inputs = self._result.statistics.population_identity
+        if not self._owns_project() or grid != self.grid():
+            self._result = None
+            return
+        for role, identity in zip(MATCHING_ROLES, inputs, strict=True):
+            owner, _, _ = identity
+            check = checks[role].input
+            if (owner.session_id != self.session_id(role) or owner.session_id not in self._state.sessions
+                    or owner != self._state.session_revision(owner.session_id)
+                    or (check is not None and check.population_identity != identity)):
+                self._result = None
+                return
+
+    @property
+    def current_result(self):
+        return self._result_for(self.capture())
+
+    def _result_for(self, snapshot):
+        result = self._result
+        if (snapshot is not None and result is not None and self.job is None and self.error is None
+                and result.settings == self.pending_settings
+                and result.statistics.population_identity == snapshot.population_identity):
+            return result
+        return None
+
+    def begin(self):
+        if self.pending_settings is None:
+            raise ValueError("Enter valid overlap fractions before running matching.")
+        snapshot = self.capture()
+        if snapshot is None or self.job is not None:
+            raise ValueError("Select two compatible, measured populations before running matching.")
+        cache = self._result.statistics if self._result is not None else None
+        if cache is not None and cache.population_identity != snapshot.population_identity:
+            cache = self._result = None
+        self.job = MatchingJob(snapshot, self.pending_settings, cache)
+        self.attempted = True
+        self.error = None
+        return self.job
+
+    def _finish_job(self, job):
+        if self.job is not job:
+            return False
+        self.job = None
+        return self.pending_settings == job.settings and self.is_current(job.snapshot)
+
+    def publish(self, job, result):
+        if not self._finish_job(job):
+            return False
+        if (result.statistics.population_identity != job.snapshot.population_identity
+                or result.settings != job.settings
+                or result.measurement_revisions != job.snapshot.measurement_revisions):
+            return False
+        self._result = result
+        self.executed_settings = result.settings
+        return True
+
+    def fail(self, job, message):
+        if self._finish_job(job):
+            self.error = message
 
     def _check(self, role, grid):
         state = self._state

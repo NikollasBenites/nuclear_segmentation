@@ -1,15 +1,58 @@
 """Matching controls and read-only layers in the existing desktop viewer."""
 from __future__ import annotations
 
-from napari.utils.colormaps import CyclicLabelColormap
-from qtpy.QtCore import QObject, QSignalBlocker, Qt
+from napari.utils.colormaps import CyclicLabelColormap, DirectLabelColormap
+from qtpy.QtCore import QAbstractTableModel, QModelIndex, QObject, QSignalBlocker, Qt
 from qtpy.QtWidgets import (
-    QCheckBox, QComboBox, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
+    QTableView, QVBoxLayout, QWidget,
 )
 
+from .automatic_matching import COLORS, MatchingSettings
+from .matching_execution import MatchingExecution
 from .collapsible_section import CollapsibleSection
 from .matching_pair import MATCHING_LAYER, MATCHING_ROLES
 from .ui_icons import icon
+
+
+class MatchingTable(QAbstractTableModel):
+    columns = (("Nucleus ID", "nuclear_id"), ("Automatic class", "auto_class"),
+               ("Auto-linked cyto ID", "accepted_cytoplasmic_id"),
+               ("Best cyto ID", "best_cytoplasmic_id"), ("Second cyto ID", "second_cytoplasmic_id"),
+               ("Best fraction", "best_nuclear_fraction"), ("Second fraction", "second_nuclear_fraction"),
+               ("Total fraction", "total_nuclear_fraction"), ("Candidates", "cytoplasmic_candidate_count"),
+               ("Overlap (voxels)", "overlap_voxels"), ("Overlap (µm³)", "overlap_volume_um3"),
+               ("Nucleus (µm³)", "nuclear_volume_um3"), ("Best cyto (µm³)", "best_cytoplasmic_volume_um3"),
+               ("IoU", "iou"), ("Dice", "dice"))
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.result = None
+
+    def show_result(self, result):
+        if self.result is not result:
+            self.beginResetModel()
+            self.result = result
+            self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self.result.nuclei) if self.result and not parent.isValid() else 0
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(self.columns) if not parent.isValid() else 0
+
+    def headerData(self, section, orientation, role):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+            return self.columns[section][0]
+        return super().headerData(section, orientation, role)
+
+    def data(self, index, role):
+        if role == Qt.ItemDataRole.DisplayRole and index.isValid():
+            row = self.result.nuclei[index.row()]
+            value = getattr(row, self.columns[index.column()][1])
+            if isinstance(value, float):
+                return f"{value:.6g}"
+            return "—" if value is None else str(value)
 
 
 class MatchingPanel(QWidget):
@@ -50,10 +93,52 @@ class MatchingPanel(QWidget):
             label.setBuddy(opacity)
             visualization.addWidget(label)
             visualization.addWidget(opacity)
+        self.class_colors = QCheckBox("Color nuclei by automatic classification")
+        visualization.addWidget(self.class_colors)
+        legend = self._note(visualization)
+        legend.setText("Automatic classes · Green MATCH · Yellow AMBIGUOUS · Red NO_MATCH")
+        automatic = self._section(root, "automatic", "Automatic Matching")
+        self.minimum = self._fraction(automatic, "Minimum best overlap fraction")
+        self.maximum = self._fraction(automatic, "Maximum second-best overlap fraction")
+        self.defaults = QPushButton("Restore Defaults")
+        automatic.addWidget(self.defaults)
+        self.run = QPushButton("Run Automatic Matching")
+        automatic.addWidget(self.run)
+        self.progress = QProgressBar()
+        self.progress.setAccessibleName("Automatic matching progress")
+        automatic.addWidget(self.progress)
+        results = self._section(root, "results", "Matching Results")
+        self.result_status = self._note(results)
+        self.summary = self._note(results)
+        self.table = QTableView()
+        self.table.setAccessibleName("Automatic classifications by nuclear ID")
+        self.table_model = MatchingTable(self.table)
+        self.table.setModel(self.table_model)
+        self.table.verticalHeader().hide()
+        results.addWidget(self.table)
+        self.defaults.clicked.connect(self.reset_thresholds)
         root.addStretch(1)
         self.reset_appearance()
 
+    @staticmethod
+    def _fraction(layout, title):
+        control = QLineEdit()
+        control.setAccessibleName(title)
+        label = QLabel(title)
+        label.setBuddy(control)
+        layout.addWidget(label)
+        layout.addWidget(control)
+        return control
+
+    def reset_thresholds(self):
+        settings = MatchingSettings()
+        self.minimum.setText(str(settings.match_min))
+        self.maximum.setText(str(settings.second_max))
+
     def reset_appearance(self):
+        with QSignalBlocker(self.minimum), QSignalBlocker(self.maximum), QSignalBlocker(self.class_colors):
+            self.reset_thresholds()
+            self.class_colors.setChecked(False)
         for role in MATCHING_ROLES:
             visible, opacity = self.visibility[role], self.opacity[role]
             with QSignalBlocker(visible), QSignalBlocker(opacity):
@@ -96,6 +181,14 @@ class MatchingDisplay(QObject):
         self._active = False
         self._requested = False
         self._showing = False
+        self._colored_result = None
+        self.execution = MatchingExecution(state, self)
+        self.execution.changed.connect(self.refresh)
+        self.execution.progress_changed.connect(self._progress)
+        panel.minimum.textChanged.connect(self._settings_changed)
+        panel.maximum.textChanged.connect(self._settings_changed)
+        panel.run.clicked.connect(self.execution.start)
+        panel.class_colors.toggled.connect(self._toggle_colors)
         self._state_signals = (
             state.sessions_changed, state.channels_changed, state.matching_selection_changed,
             state.segmentation_result_changed, state.filtering_result_changed,
@@ -118,6 +211,7 @@ class MatchingDisplay(QObject):
             self.refresh()
         else:
             self._stop_showing()
+            self.panel.table_model.show_result(None)
 
     def show(self):
         if self._active:
@@ -132,6 +226,21 @@ class MatchingDisplay(QObject):
             if previous in self.viewer.layers and previous.visible:
                 self.viewer.layers.selection.active = previous
         self._previous_layer = None
+
+    def _progress(self, percent):
+        self.panel.progress.setValue(percent)
+        self.panel.progress.setFormat("Classifying overlaps…" if percent == 100 else "Counting voxels · %p%")
+
+    def _settings_changed(self):
+        try:
+            settings = MatchingSettings(float(self.panel.minimum.text()), float(self.panel.maximum.text()))
+        except ValueError:
+            settings = None
+        self._pair.set_settings(settings)
+        self.refresh()
+
+    def _toggle_colors(self, enabled):
+        self.refresh(request_visualization=enabled)
 
     def _select(self, role):
         self._pair.select(role, self.panel.selectors[role].currentData())
@@ -183,6 +292,9 @@ class MatchingDisplay(QObject):
             self._pair = self.state.matching_pair
             self._requested = False
             self.panel.reset_appearance()
+            self.panel.table_model.show_result(None)
+            self.panel.summary.clear()
+            self.panel.result_status.clear()
         if not self._active:
             return
         pair, checks = self._pair.inspect()
@@ -203,11 +315,65 @@ class MatchingDisplay(QObject):
                 self._requested = True
             if self._requested:
                 self._show_pair(pair)
+        result = self._pair._result_for(pair)
+        self._show_results(pair, result)
+        self._apply_colors(result if self.panel.class_colors.isChecked() else None)
         self.panel.compatibility.setText(message)
         self.panel.show_inputs.setEnabled(pair is not None and len(self.layers) != len(MATCHING_ROLES))
         for role in MATCHING_ROLES:
             self.panel.visibility[role].setEnabled(role in self.layers)
             self.panel.opacity[role].setEnabled(role in self.layers)
+
+    def _show_results(self, pair, result):
+        panel, context = self.panel, self._pair
+        panel.run.setEnabled(pair is not None and context.pending_settings is not None and not self.execution.busy)
+        panel.progress.setVisible(context.job is not None)
+        self._progress(self.execution.percent)
+        panel.class_colors.setEnabled(result is not None)
+        panel.table_model.show_result(result)
+        lines = []
+        if context.executed_settings is not None:
+            settings = context.executed_settings
+            lines.append(f"Last completed settings · Best ≥ {settings.match_min}, second ≤ {settings.second_max}")
+        if context.job is not None:
+            status = "Running automatic matching…"
+        elif context.pending_settings is None:
+            status = "Enter finite fractions. Best must be greater than 0 and at most 1. Second must be between 0 and 1."
+        elif context.error is not None:
+            status = f"Calculation failed. {context.error} Run automatic matching to retry."
+        elif result is not None:
+            total = len(result.nuclei)
+            status = "Current automatic result." if total else "Current empty result · Zero nuclei to classify."
+            lines.append(f"Total retained nuclei · {total:,}")
+            for name, count in result.class_counts.items():
+                fraction = f"{count / total:.1%}" if total else "—"
+                lines.append(f"{name} · {count:,} ({fraction})")
+            lines.append(f"Multiple associations · {result.multiple_objects:,} cytoplasmic objects, "
+                         f"{result.nuclei_in_multiple:,} nuclei")
+            if not pair.cytoplasmic.retained_ids:
+                lines.append("The retained cytoplasmic population is empty.")
+            if not pair.cytoplasmic.retained_ids or result.class_counts["NO_MATCH"]:
+                lines.append("A missing retained cytoplasmic candidate does not establish absence of marker expression.")
+        elif context.attempted:
+            status = "Outdated · Check the selected inputs and run with the displayed settings."
+        else:
+            status = "Ready to run automatic matching." if pair else "Select compatible inputs to run automatic matching."
+        if self.execution.busy and context.job is None and result is None:
+            status += " Waiting for the previous worker to finish."
+        panel.result_status.setText(status)
+        panel.summary.setText("\n".join(lines))
+
+    def _apply_colors(self, result):
+        layer = self.layers.get("nuclear")
+        if layer is None or self._colored_result is result:
+            return
+        if result is None:
+            layer.colormap = CyclicLabelColormap(colors=[(0, 0, 0, 0), self._colors["nuclear"]])
+        else:
+            colors = {r.nuclear_id: COLORS[r.auto_class] for r in result.nuclei}
+            colors.update({None: (0, 0, 0, 0), 0: (0, 0, 0, 0)})
+            layer.colormap = DirectLabelColormap(color_dict=colors)
+        self._colored_result = result
 
     def _show_pair(self, pair):
         if not self._showing:
@@ -280,6 +446,7 @@ class MatchingDisplay(QObject):
             self._previous_layer = None
 
     def _remove_layers(self):
+        self._colored_result = None
         self._displayed = None
         for layer in tuple(self.layers.values()):
             self.viewer.layers.remove(layer)

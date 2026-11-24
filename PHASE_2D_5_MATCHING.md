@@ -67,3 +67,78 @@ Future automatic matching should treat an empty nuclear population as zero nucle
 ### Phase 2D.5.1.1 automated verification
 
 Linux verification passed 363 tests and 13 subtests across four groups. The 25 Matching tests covered repeated restoration, session switches, stale and provisional inputs, recalculation, project lifecycle and the real Qt/napari OpenGL canvas. The narrow-panel test drove both populations through empty and nonempty states using the debounced Mask Review volume controls. The broader suite passed 333 tests. Four live plot tests and the legacy launcher preview passed in separate processes. The focused native macOS checklist remains pending.
+
+## Phase 2D.5.2 — Integrated automatic matching
+
+The four native macOS follow-up checks for Phase 2D.5.1.1 passed at `11f72aa`. In Phase 2D.5.2, select the measured pair in Matching, enter the overlap fractions, and click **Run Automatic Matching**. The calculation uses the two captured retained-label arrays in memory. The result belongs to the open project's selected pair and is available through `ProjectState.matching_pair.current_result`.
+
+### Algorithm and units
+
+The integrated and standalone paths share the plane-wise intersection counter and the `voxel_overlap_v1` classifier. The standalone `overlap_pairs`, `thresholds` and `classify` APIs retain their DAPI/MAP2 records and settings. The integrated scan counts each whole retained object's voxels directly, including portions outside every intersection. The product of calibrated Z, Y and X spacings gives the volume of one voxel in µm³.
+
+For a nucleus with N voxels, rank each positive intersection by decreasing voxel count and break ties by increasing cytoplasmic ID. If the best intersection has I voxels and its cytoplasmic object has C voxels, the best fraction is I/N, IoU is I/(N+C−I) and Dice is 2I/(N+C). The second fraction uses the same N, with zero for an absent runner-up. The total fraction sums all intersection counts divided by N.
+
+- **NO_MATCH** means zero intersection voxels. Both candidate IDs are null, and the overlap fractions, IoU and Dice are zero.
+- **MATCH** requires a positive intersection, a best fraction ≥ the minimum (default 0.50), and a second fraction ≤ the maximum (default 0.20).
+- **AMBIGUOUS** means a positive intersection failed either threshold. A tie can qualify as MATCH at settings that admit both fractions.
+
+Both thresholds must be finite. The best minimum lies in (0, 1] and the second maximum in [0, 1]. Classification uses the original grid without registration, resampling, dilation or centroid/distance association.
+
+### In-memory result and future checkpoint contract
+
+| Record | Contents |
+| --- | --- |
+| Pair identity | Acquisition and crop grid, spacing, independent project/session/input/geometry owners, role-ordered primary channel indexes and sorted retained IDs. |
+| Execution | Measurement revision of each captured source, algorithm version, whole-nucleus denominator, thresholds, ranking rule and proximity-use flag. |
+| `OverlapStatistics` | Per-ID nuclear and cytoplasmic voxel counts, voxel volume in µm³, and every positive (nuclear ID, cytoplasmic ID) intersection in voxels. |
+| `NuclearOverlap` | One row per retained nucleus. Nuclear ID, automatic class, nullable best and second cytoplasmic IDs, nuclear and best cytoplasmic volumes in µm³, best intersection in voxels and µm³, best/second/total nuclear fractions, candidate count, IoU and Dice. Missing best-candidate volume is null. |
+| Automatic links | `accepted_cytoplasmic_id` gives the best ID for a MATCH and null otherwise. Per cytoplasmic object, including those with zero accepted nuclei, the result exposes the accepted nucleus count and a multiple-association flag. |
+| Summary | Counts per class, count of cytoplasmic objects accepting two or more nuclei, and sum of their accepted nucleus counts. Individual classifications stay as calculated. |
+
+A future checkpoint writer can serialize the sparse intersections as integer triples and expand the per-ID mappings into keyed records. Preserve exact integer IDs, nulls, units, executed settings, both source revisions and the complete pair provenance. Arrays, Qt objects and worker references are absent from the result. Reopening a future checkpoint will require rebinding and validating both persisted source identities against the restored project. The current native checkpoint contains the source sessions. Reopening it requires selecting the pair and running matching again.
+
+### Empty populations and inspection
+
+A validated empty nuclear population produces a current empty result with the full table schema, zero class counts and undefined class percentages displayed as a dash. This also covers dual-empty inputs. With retained nuclei and an empty cytoplasmic population, every row is NO_MATCH. Absence of a retained cytoplasmic candidate does not establish absence of biological marker expression.
+
+**Matching Results** shows the last completed settings, class counts and fractions, and both multiple-association totals. The read-only table distinguishes an accepted automatic link from a best candidate. All rows represent automatic classifications. Manual validation is deferred. **Color nuclei by automatic classification** shows green for MATCH, yellow for AMBIGUOUS and red for NO_MATCH. It changes the colormap of the existing read-only nuclear overlay and preserves its data, IDs, visibility and opacity. Turning it off restores the nuclear input color. Leaving Matching restores the ordinary session display. Returning to Matching restores the requested overlays and rechecks eligibility for classification colors.
+
+### Worker, validity and memory
+
+The GUI thread validates and captures a `MatchingPairSnapshot`, immutable settings and any compatible statistics. A Qt worker scans one Z plane at a time, reporting progress, then classifies from counts. On completion the GUI thread checks the exact job, current pair snapshot (including both measurement revisions), settings and result metadata. Changing a selector or threshold retires the job even if the user immediately restores the old value. Source changes are observed while Matching is hidden. An obsolete completion or error cannot publish into a replacement project. Closing or replacing a project releases its result and cache. A worker already in flight can finish with its captured inputs. The window stays open during worker cleanup and can be closed once the worker finishes.
+
+The project holds one completed set of statistics, shared with its result. Threshold-only reruns reuse it. Changing the grid, geometry revision, selected pair or a validated retained population evicts it. Measurement-only invalidation temporarily hides the result and colors. Recalculation can restore a **previously completed** result only for the same full population identity and executed settings. An earlier in-flight job still requires its original measurement revisions. Renaming a session, modifying unrelated sessions, changing appearance and ordinary workflow navigation preserve compatible results.
+
+For N nuclei, C cytoplasmic objects and P positive pairs, stored statistics and results take O(N+C+P) space. Scan temporaries scale with one XY plane. As in Phase 2D.5.1, the first validation of a newly published label array also checks its planes against committed geometry on the GUI thread. Repeated captures of those same read-only arrays reuse that validation. Runtime includes the per-plane unique counts and sorting candidates within each nucleus. Threshold-only work iterates objects and sparse pairs without reading label voxels. The Qt table requests individual cells on demand. The overlay adds an ID-to-color map, and napari manages its own render buffers. Workers share read-only references to existing filtered volumes until cleanup. Peak memory during reclassification can include both the old and new row sets. High overlap complexity can still make P large.
+
+### Files changed
+
+- `src/nuclear_segmentation/automatic_matching.py` contains shared counting and classification, legacy adapters, settings and numeric records.
+- `src/nuclear_segmentation/matching_pair.py` owns the captured job, result, validity checks and cache. `project_state.py` reconciles session changes and resets pair ownership.
+- `src/nuclear_segmentation/matching_execution.py` runs the scan and classification on a QThread. `desktop_window.py` guards application shutdown while the worker is active.
+- `src/nuclear_segmentation/matching_panel.py` provides controls, status, progress, the results table and overlay coloring.
+- `tests/test_integrated_matching.py` exercises the science and worker lifecycle. `tests/test_matching_pair.py` extends GUI filtering and embedded canvas checks. This document records the contract and verification.
+
+### Automated verification for Phase 2D.5.2
+
+Linux verification used PyQt6, napari 0.10.0 and an Xorg OpenGL canvas. All 385 distinct tests and 13 subtests passed across four processes.
+
+| Group | Passed | Coverage |
+| --- | ---: | --- |
+| Integrated automatic, pair and legacy automatic matching | 52 | Thresholds, nullable and large integer IDs, sparse counts, calibrated volumes, multiple associations, corrected geometry, cache reuse, stale jobs, empty GUI filters and rendered color changes in 2D/3D |
+| Wider regression suite | 328 + 13 subtests | Legacy matching and splits, protected brushes, independent sessions, scientific exports, checkpoints and ordinary desktop workflows |
+| Live plots | 4 | Existing plot behavior and measurement reuse |
+| Legacy launcher preview worker | 1 | Existing preview-worker lifecycle |
+
+A separate deterministic comparison loaded the original algorithm from commit `11f72aa` and compared 64 randomized volume pairs at four threshold combinations. All intersection counts, legacy output records and settings agreed exactly. Integrated classifications, candidate IDs, overlap fractions, IoU and Dice also agreed in all 256 runs.
+
+### Focused native macOS validation for Phase 2D.5.2
+
+1. Open a measured nuclear–cytoplasmic pair. Show both inputs, choose distinct opacities, then run at 0.50/0.20. Inspect progress, the executed settings, class fractions, linked IDs and multiple-association totals.
+2. Turn on classification colors. Inspect representative IDs in 2D and 3D, toggle nuclear visibility, then move between Matching and Proofreading. Confirm the ordinary session selection and appearance on exit and the automatic colors on return.
+3. Edit a threshold, confirm the outdated status and withdrawal of colors, then rerun. Restore Defaults and rerun. Inspect a nucleus near a threshold and verify the displayed settings on each run.
+4. In Mask Review, filter first one role and then both to zero. Run matching at each stage. Check the empty status, table headers, percentages and NO_MATCH rows. Restore the populations and rerun.
+5. Apply a measurement-only change, recalculate, and confirm compatible recovery. Commit a geometry edit or change retained IDs, recalculate the source measurements, and confirm matching requires a new run. Compare with a rename or alteration to an unrelated session.
+6. Start a long run and change the pair or threshold. Check that the obsolete completion has no effect. Repeat with project close or replacement, then select a new valid pair and run again.
+
+Native macOS validation for this phase is pending. Manual association decisions and history, guided splitting, matched density, final exports and native result persistence belong to later phases. Automatic links have no effect on quantification, ROI review or stereological eligibility.

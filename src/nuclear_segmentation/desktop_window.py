@@ -1636,7 +1636,7 @@ class DesktopWindow(QMainWindow):
             controls.setFixedHeight(min(72 + extra // 2, controls.widget().sizeHint().height()))
 
     def closeEvent(self, event) -> None:
-        if self.geometry_panel.busy or self._project_job is not None:
+        if self.matching_display.execution.busy or self.geometry_panel.busy or self._project_job is not None:
             self.statusBar().showMessage("Finish the active operation before closing.", 5000)
             event.ignore()
             return

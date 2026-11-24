@@ -1,52 +1,182 @@
-"""Voxel-wise DAPI/MAP2 matching using DAPI-normalized overlap fractions."""
+"""Sparse voxel-overlap matching shared by the legacy and integrated workspaces."""
 from collections import Counter, defaultdict
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+
 import numpy as np
 import pandas as pd
 
 COLORS = {'MATCH': (0.,1.,0.,1.), 'AMBIGUOUS': (1.,1.,0.,1.), 'NO_MATCH': (1.,0.,0.,1.)}
 
 
+@dataclass(frozen=True)
+class MatchingSettings:
+    match_min: float = .50
+    second_max: float = .20
+    method: str = field(default="voxel_overlap_v1", init=False)
+    denominator: str = field(default="entire retained nuclear label", init=False)
+    ranking: str = field(default="descending intersection voxels, then ascending cytoplasmic ID", init=False)
+    centroid_or_proximity_used: bool = field(default=False, init=False)
+
+    def __post_init__(self):
+        if not (0 < self.match_min <= 1 and 0 <= self.second_max <= 1):
+            raise ValueError("Match fraction must be in (0,1]; runner-up maximum must be in [0,1].")
+
+
 def thresholds(match_min=.5, second_max=.2):
-    values=np.asarray([match_min,second_max],float)
-    if not np.isfinite(values).all() or not 0 < values[0] <= 1 or not 0 <= values[1] <= 1:
-        raise ValueError('Match fraction must be in (0,1]; runner-up maximum must be in [0,1].')
-    return dict(match_min=float(values[0]),second_match_max=float(values[1]),
-                method='voxel_overlap_v1',denominator='entire DAPI label',
-                tie_break='smallest MAP2 ID',centroid_or_proximity_used=False)
+    settings = MatchingSettings(float(match_min), float(second_max))
+    return dict(match_min=settings.match_min, second_match_max=settings.second_max,
+                method=settings.method, denominator='entire DAPI label',
+                tie_break='smallest MAP2 ID', centroid_or_proximity_used=False)
 
 
-def overlap_pairs(dapi,map2):
-    """Process planes independently; sparse IDs never allocate a max-ID matrix."""
-    if dapi.shape!=map2.shape or dapi.ndim!=3:raise ValueError('Masks must share a ZYX grid.')
-    counts=Counter()
-    for a,b in zip(dapi,map2):
-        inside=(a>0)&(b>0)
-        if not inside.any():continue
-        pairs,n=np.unique(np.column_stack((a[inside],b[inside])),axis=0,return_counts=True)
-        counts.update({(int(i),int(j)):int(v) for (i,j),v in zip(pairs,n)})
+def _count_intersections(counts, nuclear, cytoplasmic):
+    inside = (nuclear > 0) & (cytoplasmic > 0)
+    if inside.any():
+        # Preserve exact IDs even when the two integer types promote to float64.
+        pairs = np.rec.fromarrays((nuclear[inside], cytoplasmic[inside]), names="n,c")
+        unique, sizes = np.unique(pairs, return_counts=True)
+        counts.update({(int(n), int(c)): int(size) for (n, c), size in zip(unique, sizes)})
+
+
+def overlap_pairs(dapi, map2):
+    if dapi.shape != map2.shape or dapi.ndim != 3:
+        raise ValueError("Masks must share a ZYX grid.")
+    counts = Counter()
+    for nuclear, cytoplasmic in zip(dapi, map2):
+        _count_intersections(counts, nuclear, cytoplasmic)
     return counts
 
 
-def classify(dapi_volumes,map2_volumes,voxel_volume,pairs,match_min=.5,second_max=.2):
-    settings=thresholds(match_min,second_max)
-    by_dapi=defaultdict(list)
-    for (a,b),n in pairs.items():by_dapi[a].append((b,n))
-    rows=[]
-    for a,volume in dapi_volumes.items():
-        n=int(round(volume/voxel_volume));ranked=sorted(by_dapi[a],key=lambda p:(-p[1],p[0]))
-        b,intersection=ranked[0] if ranked else (None,0)
-        second,second_n=ranked[1] if len(ranked)>1 else (None,0)
-        first_fraction=intersection/n;second_fraction=second_n/n
-        status=('NO_MATCH' if not intersection else 'MATCH' if first_fraction>=settings['match_min'] and second_fraction<=settings['second_match_max'] else 'AMBIGUOUS')
-        nb=int(round(map2_volumes[b]/voxel_volume)) if b is not None else 0
-        rows.append(dict(dapi_id=int(a),auto_class=status,best_map2_id=b,second_map2_id=second,
-            dapi_volume_um3=float(volume),best_map2_volume_um3=map2_volumes.get(b),
-            overlap_voxels=intersection,overlap_volume_um3=intersection*voxel_volume,
-            best_dapi_fraction=first_fraction,second_dapi_fraction=second_fraction,
-            total_dapi_fraction=sum(v for _,v in ranked)/n,overlapping_map2_count=len(ranked),
-            iou=intersection/(n+nb-intersection) if intersection else 0.,
-            dice=2*intersection/(n+nb) if intersection else 0.))
-    return rows,settings
+@dataclass(frozen=True)
+class OverlapStatistics:
+    population_identity: tuple
+    voxel_volume_um3: float
+    nuclear_voxels: Mapping[int, int]
+    cytoplasmic_voxels: Mapping[int, int]
+    intersections: Mapping[tuple[int, int], int]
+
+
+def scan_overlaps(pair, progress):
+    nuclear, cytoplasmic, intersections = Counter(), Counter(), Counter()
+    depth = pair.grid.shape_zyx[0]
+    last_percent = -1
+    for z, (a, b) in enumerate(zip(pair.nuclear.labels, pair.cytoplasmic.labels, strict=True)):
+        for plane, counts in ((a, nuclear), (b, cytoplasmic)):
+            ids, sizes = np.unique(plane, return_counts=True)
+            counts.update({int(i): int(size) for i, size in zip(ids, sizes) if i})
+        _count_intersections(intersections, a, b)
+        percent = 100 * (z + 1) // depth
+        if percent != last_percent:
+            progress(percent)
+            last_percent = percent
+    return OverlapStatistics(pair.population_identity, float(np.prod(pair.grid.spacing_zyx_um)),
+                             MappingProxyType(nuclear), MappingProxyType(cytoplasmic),
+                             MappingProxyType(intersections))
+
+
+@dataclass(frozen=True, slots=True)
+class NuclearOverlap:
+    nuclear_id: int
+    auto_class: str
+    best_cytoplasmic_id: int | None
+    second_cytoplasmic_id: int | None
+    nuclear_volume_um3: float
+    best_cytoplasmic_volume_um3: float | None
+    overlap_voxels: int
+    overlap_volume_um3: float
+    best_nuclear_fraction: float
+    second_nuclear_fraction: float
+    total_nuclear_fraction: float
+    cytoplasmic_candidate_count: int
+    iou: float
+    dice: float
+
+    @property
+    def accepted_cytoplasmic_id(self):
+        return self.best_cytoplasmic_id if self.auto_class == "MATCH" else None
+
+
+def _classify_counts(nuclear, cytoplasmic, voxel_volume, intersections, settings):
+    by_nucleus = defaultdict(list)
+    for (nuclear_id, cytoplasmic_id), count in intersections.items():
+        by_nucleus[nuclear_id].append((cytoplasmic_id, count))
+
+    for nuclear_id, nuclear_size in nuclear.items():
+        ranked = sorted(by_nucleus.get(nuclear_id, ()), key=lambda item: (-item[1], item[0]))
+        best, overlap = ranked[0] if ranked else (None, 0)
+        second, runner_up = ranked[1] if len(ranked) > 1 else (None, 0)
+        first_fraction = overlap / nuclear_size
+        second_fraction = runner_up / nuclear_size
+        status = "NO_MATCH"
+        if overlap:
+            accepted = first_fraction >= settings.match_min and second_fraction <= settings.second_max
+            status = "MATCH" if accepted else "AMBIGUOUS"
+        cytoplasmic_size = cytoplasmic[best] if best is not None else 0
+        combined_size = nuclear_size + cytoplasmic_size
+        yield NuclearOverlap(
+            nuclear_id=int(nuclear_id), auto_class=status,
+            best_cytoplasmic_id=best, second_cytoplasmic_id=second,
+            nuclear_volume_um3=nuclear_size * voxel_volume,
+            best_cytoplasmic_volume_um3=cytoplasmic_size * voxel_volume if best is not None else None,
+            overlap_voxels=overlap, overlap_volume_um3=overlap * voxel_volume,
+            best_nuclear_fraction=first_fraction, second_nuclear_fraction=second_fraction,
+            total_nuclear_fraction=sum(count for _, count in ranked) / nuclear_size,
+            cytoplasmic_candidate_count=len(ranked),
+            iou=overlap / (combined_size - overlap), dice=2 * overlap / combined_size,
+        )
+
+
+def classify(dapi_volumes, map2_volumes, voxel_volume, pairs, match_min=.5, second_max=.2):
+    """Legacy physical-volume API and DAPI/MAP2 output schema."""
+    legacy = thresholds(match_min, second_max)
+    nuclear, cyto = ({i: int(round(v / voxel_volume)) for i, v in volumes.items()}
+                     for volumes in (dapi_volumes, map2_volumes))
+    rows = []
+    for r in _classify_counts(nuclear, cyto, voxel_volume, pairs,
+                              MatchingSettings(legacy["match_min"], legacy["second_match_max"])):
+        rows.append(dict(dapi_id=r.nuclear_id, auto_class=r.auto_class, best_map2_id=r.best_cytoplasmic_id,
+                         second_map2_id=r.second_cytoplasmic_id, dapi_volume_um3=float(dapi_volumes[r.nuclear_id]),
+                         best_map2_volume_um3=map2_volumes.get(r.best_cytoplasmic_id),
+                         overlap_voxels=r.overlap_voxels, overlap_volume_um3=r.overlap_volume_um3,
+                         best_dapi_fraction=r.best_nuclear_fraction, second_dapi_fraction=r.second_nuclear_fraction,
+                         total_dapi_fraction=r.total_nuclear_fraction, overlapping_map2_count=r.cytoplasmic_candidate_count,
+                         iou=r.iou, dice=r.dice))
+    return rows, legacy
+
+
+@dataclass(frozen=True, slots=True)
+class CytoplasmicAssociations:
+    matched_nuclei: int
+
+    @property
+    def multiple(self):
+        return self.matched_nuclei > 1
+
+
+@dataclass(frozen=True, eq=False)
+class AutomaticMatchingResult:
+    statistics: OverlapStatistics
+    measurement_revisions: tuple[int, int]
+    settings: MatchingSettings
+    nuclei: tuple[NuclearOverlap, ...]
+    associations: Mapping[int, CytoplasmicAssociations]
+    class_counts: Mapping[str, int]
+    multiple_objects: int
+    nuclei_in_multiple: int
+
+
+def classify_population(stats, settings, revisions):
+    rows = tuple(_classify_counts(stats.nuclear_voxels, stats.cytoplasmic_voxels,
+                                  stats.voxel_volume_um3, stats.intersections, settings))
+    links = Counter(r.best_cytoplasmic_id for r in rows if r.auto_class == "MATCH")
+    associations = {i: CytoplasmicAssociations(links[i]) for i in stats.cytoplasmic_voxels}
+    counts = Counter(r.auto_class for r in rows)
+    multiple = [n for n in links.values() if n > 1]
+    return AutomaticMatchingResult(stats, revisions, settings, rows, MappingProxyType(associations),
+                                   MappingProxyType({k: counts[k] for k in COLORS}),
+                                   len(multiple), sum(multiple))
 
 
 def plot_automatic(rows,sample_id):

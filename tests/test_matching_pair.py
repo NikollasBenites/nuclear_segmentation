@@ -7,6 +7,7 @@ import pytest
 from qtpy.QtCore import QSettings, Qt
 from qtpy.QtTest import QTest
 
+from nuclear_segmentation.automatic_matching import COLORS
 from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.filtering_workspace import calculate_filtering_prerequisites
 from nuclear_segmentation.geometry_edit import GeometryEdit
@@ -487,6 +488,21 @@ def test_automatic_restoration_after_session_switch_and_remeasurement(gui_filter
     assert ordinary_cyto.visible and viewer.layers.selection.active is ordinary_cyto
     assert cyto.display_state == cyto_preferences
 
+    window.set_workflow("matching")
+    panel.run.click()
+    _wait(app, lambda: not window.matching_display.execution.busy)
+    panel.class_colors.setChecked(True)
+    result = state.matching_pair.current_result
+    state.invalidate_filtering()
+    assert panel.table_model.rowCount() == 0 and not window.matching_display.layers
+    assert state.matching_pair.current_result is None
+    window.set_workflow("mask_review")
+    measure(window, app)
+    window.set_workflow("matching")
+    assert state.matching_pair.current_result is result
+    assert panel.table_model.rowCount() == 1
+    np.testing.assert_allclose(window.matching_display.layers["nuclear"].colormap.color_dict[1], COLORS["MATCH"])
+    window.set_workflow("proofreading")
     state.select_session(nuclear.session_id)
     edit = GeometryEdit(state, filtered=True)
     edit.preview[0, 1, 2] = 0
@@ -510,6 +526,7 @@ def test_automatic_restoration_after_session_switch_and_remeasurement(gui_filter
     assert window.matching_display.layers["nuclear"].data[0, 1, 2] == 0
     assert window.matching_display.layers["cytoplasmic"].opacity == .40
     assert state.matching_pair.is_current(recovered)
+    assert state.matching_pair.current_result is None and "Outdated" in panel.result_status.text()
 
 
 def test_empty_feedback_from_gui_filters_in_narrow_context(gui_filtered_pair):
@@ -539,6 +556,20 @@ def test_empty_feedback_from_gui_filters_in_narrow_context(gui_filtered_pair):
         _wait(app, lambda: session.filtering_result["retained_count"] == int(not empty))
         token = state.matching_pair.capture()
         window.set_workflow("matching")
+        panel.run.click()
+        _wait(app, lambda: not window.matching_display.execution.busy)
+        result = state.matching_pair.current_result
+        assert result is not None and panel.table_model.columnCount() == 15
+        assert panel.table_model.rowCount() == int(not expected[0])
+        assert ("Current empty result" in panel.result_status.text()) == expected[0]
+        assert result.class_counts["NO_MATCH"] == int(not expected[0] and expected[1])
+        assert result.class_counts["MATCH"] == int(not any(expected))
+        assert ("absence of marker expression" in panel.summary.text()) == expected[1]
+        panel.class_colors.setChecked(True)
+        if not expected[0]:
+            status = "NO_MATCH" if expected[1] else "MATCH"
+            np.testing.assert_allclose(window.matching_display.layers["nuclear"].colormap.color_dict[1],
+                                       COLORS[status])
         scroll = window.context_panel.stack.currentWidget()
         app.processEvents()
         assert len(window.matching_display.layers) == 2
@@ -575,6 +606,9 @@ def test_matching_on_native_qt_canvas_2d_and_3d(qapp, tmp_path):
         panel = choose_in_panel(window, nuclear, cyto)
         window.navigation.set_collapsed(True)
         panel.show_inputs.click()
+        panel.run.click()
+        _wait(qapp, lambda: not window.matching_display.execution.busy)
+        assert window.project_state.matching_pair.current_result.nuclei[0].auto_class == "MATCH"
         viewer = window.embedding.viewer
         canvas = window.embedding.qt_viewer.canvas
         layers = tuple(window.matching_display.layers.values())
@@ -584,8 +618,13 @@ def test_matching_on_native_qt_canvas_2d_and_3d(qapp, tmp_path):
             viewer.reset_view()
             QTest.qWait(100)
             assert canvas.native.isVisible() and viewer.dims.ndisplay == dimensions
+            panel.class_colors.setChecked(False)
+            original = canvas.screenshot()
+            panel.class_colors.setChecked(True)
             composite = canvas.screenshot()
-            assert not composite.isNull()
+            assert not composite.isNull() and composite != original
+            np.testing.assert_allclose(layers[0].colormap.color_dict[7], COLORS["MATCH"])
+            assert np.shares_memory(layers[0].data, nuclear.filtering_result["filtered_masks"])
             for role, control in panel.visibility.items():
                 control.setChecked(False)
                 assert canvas.screenshot() != composite, f"{role} layer is missing from the {dimensions}D render"
@@ -602,6 +641,7 @@ def test_matching_on_native_qt_canvas_2d_and_3d(qapp, tmp_path):
         restored = tuple(window.matching_display.layers.values())
         assert len(restored) == 2 and not panel.show_inputs.isEnabled()
         assert all(layer.visible and not layer.editable for layer in restored)
+        np.testing.assert_allclose(restored[0].colormap.color_dict[7], COLORS["MATCH"])
         QTest.qWait(100)
         assert not canvas.screenshot().isNull()
     finally:
