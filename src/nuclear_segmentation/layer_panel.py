@@ -40,6 +40,7 @@ class LayerTreeModel(QStandardItemModel):
         if any(
             metadata.get(key)
             for key in (
+                "nucytoseg_scientific_roi",
                 "nucytoseg_projection",
                 "nucytoseg_crop_selection",
                 "nucytoseg_crop_preview",

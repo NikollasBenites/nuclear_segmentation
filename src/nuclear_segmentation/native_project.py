@@ -418,6 +418,10 @@ def _validated_state(dataset, payload, version):
             ):
                 raise ValueError("The checkpoint contains an invalid session ID.")
             record = {"display_state": {}, **record}
+            if isinstance(record["display_state"], dict):
+                pending = record["display_state"].pop("pending_geometry_revision", None)
+                record.setdefault("pending_geometry_revision", pending)
+            record.setdefault("measurement_error", None)
             if set(record) == set(SESSION_FIELDS).difference(normalization_fields, {"normalization_settings"}):
                 record = dict(record, normalization_settings=None, **previous_normalization)
             if set(record) != set(SESSION_FIELDS):
@@ -433,6 +437,10 @@ def _validated_state(dataset, payload, version):
                 or any(type(value) is not int or value < 0 for value in (
                     session.input_revision, session.geometry_revision, session.measurement_revision
                 ))
+                or (session.pending_geometry_revision is not None and (
+                    type(session.pending_geometry_revision) is not int
+                    or session.pending_geometry_revision != session.geometry_revision or session.filtering_is_current))
+                or (session.measurement_error is not None and not isinstance(session.measurement_error, str))
                 or any(type(value) is not bool for value in (
                     session.segmentation_is_current, session.filtering_is_current,
                     session.scientific_roi_reviewed, session.quantification_is_current,
@@ -441,6 +449,17 @@ def _validated_state(dataset, payload, version):
             ):
                 raise ValueError("The checkpoint contains incompatible session metadata.")
             _validate_display_state(session.display_state, indexes)
+            # Phase 2D.4.3 used a separate visible layer for the pending selection.
+            display = session.display_state
+            if "retained" in display:
+                retained = display.pop("retained")
+                filtered = display.get("filtered", {})
+                display["filtered"] = ({**filtered, **retained} if session.pending_geometry_revision is not None
+                                       else {**retained, **filtered})
+            if display.get("mode") == "retained":
+                display["mode"] = "filtered"
+            if display.get("selected_layer") == "retained":
+                display["selected_layer"] = "filtered"
             sessions[session_id] = session
         active_id = payload["active_session_id"]
         if active_id not in sessions or "nuclear" not in sessions:
@@ -598,6 +617,8 @@ def _validate_results(state):
         return bool(provenance) and all(provenance.get(key) == value for key, value in grid.items())
 
     segmentation = state.segmentation_result
+    if session.pending_geometry_revision is not None and not (segmentation or {}).get("edit_history"):
+        raise ValueError("A pending geometry revision requires committed edit history.")
     ids = set()
     if segmentation is not None:
         masks = segmentation["masks"]

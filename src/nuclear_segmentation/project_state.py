@@ -81,6 +81,8 @@ class SegmentationSession:
     legacy_import: dict[str, Any] | None = None
     input_revision: int = 0
     geometry_revision: int = 0
+    pending_geometry_revision: int | None = None
+    measurement_error: str | None = None
     measurement_revision: int = 0
     segmentation_result: dict[str, Any] | None = None
     segmentation_is_current: bool = False
@@ -184,6 +186,7 @@ class ProjectState(QObject):
         self.normalization_roi_mask_yx: np.ndarray | None = None
         self.normalization_roi_vertices_yx: tuple[tuple[float, float], ...] = ()
         self.normalization_roi_provenance: dict[str, Any] | None = None
+        self._measurement_volumes = {}
         self.z_correction_options: dict[int, dict[str, Any]] = {}
         self.z_correction_reports: dict[int, dict[str, Any]] = {}
         self.z_correction_applied: set[int] = set()
@@ -289,6 +292,26 @@ class ProjectState(QObject):
         if session.segmentation_result is not value:
             session.geometry_revision += 1
         session.segmentation_result = value
+
+    @property
+    def geometry_pending(self):
+        session = self.active_session
+        return (self.segmentation_is_current and self.segmentation_result is not None
+                and session.pending_geometry_revision == session.geometry_revision)
+
+    @property
+    def provisional_ids(self):
+        if self.geometry_pending and not self.filtering_is_current:
+            history = self.segmentation_result.get("edit_history", ())
+            if history:
+                return history[-1].get("reviewed_ids")
+        return None
+
+    @property
+    def proofreading_ids(self):
+        if self.filtering_is_current:
+            return self.filtering_result["retained_ids"]
+        return self.provisional_ids
 
     @property
     def dataset_ready(self) -> bool:
@@ -497,14 +520,39 @@ class ProjectState(QObject):
             self.normalization_roi_changed.emit(None)
 
     def set_z_correction_preview(
-        self, channel_index: int, options: dict[str, Any], report: dict[str, Any]
+        self, channel_index: int, options: dict[str, Any], report: dict[str, Any], *, pixels=None
     ) -> None:
         index = int(channel_index)
+        self._measurement_volumes.pop(index, None)
+        if pixels is not None and options.get("measurement"):
+            pixels.setflags(write=False)
+            self._measurement_volumes[index] = pixels
         self.z_correction_options[index] = dict(options)
         self.z_correction_reports[index] = dict(report)
         self.z_correction_applied.discard(index)
         self.invalidate_segmentation()
         self.z_correction_changed.emit(index)
+
+    def corrected_measurement_volumes(self):
+        """Reuse applied scientific pixels. Older checkpoints can carry just the plane gains."""
+        volumes = {}
+        for channel in self.channels:
+            index = channel.index
+            if index not in self.z_correction_applied or not self.z_correction_options[index]["measurement"]:
+                continue
+            if index not in self._measurement_volumes:
+                source = self.working_dataset.data_czyx[index]
+                gains = np.asarray(self.z_correction_reports[index].get("gain"), dtype=np.float32)
+                if gains.shape != (len(source),) or not np.isfinite(gains).all() or (gains <= 0).any():
+                    raise ValueError(f"Missing or invalid saved Z gains for {channel.name}.")
+                pixels = source.astype(np.float32, copy=True)
+                pixels *= gains[:, None, None]
+                if not np.isfinite(pixels).all():
+                    raise ValueError(f"Invalid corrected intensities for {channel.name}.")
+                pixels.setflags(write=False)
+                self._measurement_volumes[index] = pixels
+            volumes[channel.name] = self._measurement_volumes[index]
+        return volumes
 
     def apply_z_corrections(self, channel_indexes) -> None:
         indexes = {int(index) for index in channel_indexes}
@@ -516,6 +564,7 @@ class ProjectState(QObject):
 
     def reset_z_corrections(self, channel_indexes, *, emit: bool = True) -> None:
         for index in tuple(int(value) for value in channel_indexes):
+            self._measurement_volumes.pop(index, None)
             self.z_correction_options.pop(index, None)
             self.z_correction_reports.pop(index, None)
             self.z_correction_applied.discard(index)
@@ -525,6 +574,7 @@ class ProjectState(QObject):
 
     def reset_all_z_corrections(self, *, emit: bool = True) -> None:
         self.z_correction_options = {}
+        self._measurement_volumes.clear()
         self.z_correction_reports = {}
         self.z_correction_applied = set()
         self.invalidate_segmentation()
@@ -534,6 +584,7 @@ class ProjectState(QObject):
     def invalidate_z_corrections(self) -> None:
         if not self.z_correction_reports and not self.z_correction_applied:
             return
+        self._measurement_volumes.clear()
         self.z_correction_reports = {}
         self.z_correction_applied = set()
         self.invalidate_segmentation()
@@ -541,6 +592,7 @@ class ProjectState(QObject):
 
     def invalidate_z_correction(self, channel_index: int) -> None:
         index = int(channel_index)
+        self._measurement_volumes.pop(index, None)
         self.z_correction_reports.pop(index, None)
         self.z_correction_applied.discard(index)
         self.invalidate_segmentation()
@@ -659,9 +711,10 @@ class ProjectState(QObject):
         masks.setflags(write=False)
         stored = dict(result)
         stored["masks"] = masks
+        self.active_session.pending_geometry_revision = None
+        self.active_session.measurement_error = None
         self.clear_filtering_result()
         self.clear_scientific_roi()
-        self.active_session.display_state.pop("pending_geometry_revision", None)
         self.segmentation_result = stored
         self.segmentation_is_current = True
         self.segmentation_result_changed.emit(stored, True)
@@ -688,6 +741,8 @@ class ProjectState(QObject):
             self.quantification_result_changed.emit(self.quantification_result, False)
 
     def clear_segmentation_result(self, *, emit: bool = True) -> None:
+        self.active_session.pending_geometry_revision = None
+        self.active_session.measurement_error = None
         self.clear_filtering_result(emit=emit)
         self.clear_scientific_roi(emit=emit)
         self.segmentation_result = None
@@ -703,8 +758,13 @@ class ProjectState(QObject):
         stored["filtered_masks"] = filtered
         self.active_session.measurement_revision += 1
         display = self.active_session.display_state
-        if current and display.pop("pending_geometry_revision", None) is not None:
-            display["mode"] = "filtered"
+        if current:
+            first_working_layer = self.filtering_result is None and self.provisional_ids is None
+            mode = display.get("mode")
+            if mode in ("before", "edited") or (first_working_layer and mode in (None, "raw")):
+                display["mode"] = "filtered"
+            self.active_session.measurement_error = None
+            self.active_session.pending_geometry_revision = None
         self.filtering_result = stored
         self.filtering_is_current = current
         self.filtering_result_changed.emit(stored, current)

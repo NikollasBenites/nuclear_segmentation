@@ -1,4 +1,69 @@
-# Phase 2D.4 native macOS validation
+# Phase 2D.4.4 unified mask review
+
+## Working with masks
+
+Filter the active session, then open **Mask Review → Mask Editing → Start Editing**. Live filtered masks shows the retained objects. Start Editing opens the existing protected preview. Save Changes validates the transaction and immediately updates the same working layer. Another Start Editing continues with the accepted objects, including split children. Pause, Resume, Stop, the selection tools and the calibrated brush operate on that preview as before.
+
+The Layers panel reports the working result's scientific status. **Automatically recalculate measurements after saving edits** is a desktop preference, initially off. Use **Recalculate Measurements** after a batch of corrections, or enable the preference to run the existing measurement worker after each save. A failed calculation reports the error and offers a retry. Each nuclear geometry change requires another ROI review before final quantification and export.
+
+**Advanced Layers & History** provides the complete committed geometry, the retained view immediately before the latest saved edit when available, a revision history and undo. Returning to the working view releases hidden comparisons. With no retained selection, the editor explains the all-mask scope. Saving in this scope can display the complete correction as a labeled diagnostic until a retained view is available.
+
+## State ownership and scientific integrity
+
+| Record | Owner and lifetime |
+| --- | --- |
+| Original Cellpose labels | The segmentation result keeps the read-only original ZYX array. The raw comparison layer references this array. |
+| Complete geometry | The existing geometry transaction validates the preview, restores hidden objects and publishes the committed array and voxel delta. Undo creates a new revision. |
+| Provisional retained IDs | The latest edit record stores the accepted selection. The session's pending geometry revision determines when that selection can seed proofreading. An empty list represents a known empty selection. An absent selection requires reconciliation by measurement. |
+| Validated filtering | The measurement worker reads complete effective geometry. The filtering result holds its properties, retained IDs, settings and mask array. Compatible thresholds run against every surviving object. Excluded objects can qualify again. |
+| Scientific status | The session stores its pending revision and any measurement error. The controller derives running status from the worker owner and measurement revision. Successful compatible publication clears the pending state. |
+| Layer identity | The filtering controller owns one napari Labels object for the active session. It updates its data, revision metadata and read-only setting in place. The display controller retains opacity, visibility and selection. Session changes rebuild views from the selected session's records. |
+| Checkpoint | Native v2 stores full geometry, history, pending controls, scientific results and session display preferences. Loading an earlier v2 checkpoint maps its pending revision and retained-layer preferences to the working view. A legacy filtered edit's before-selection can be recovered from its reviewed, new and removed IDs. |
+
+A saved all-mask removal drops vanished IDs from the prior selection. A split inherits its parent's membership. A merge of retained and excluded objects, a new freehand ID, or a brush transfer across those groups leaves the selection unresolved. Recalculate to establish membership in those cases. History also records the pre-edit IDs so undo can restore the appropriate proofreading scope.
+
+The measurement path reuses applied measurement-channel pixels to avoid repeating image preprocessing. For a checkpoint carrying correction reports, the first measurement can materialize those pixels from the verified source grid and saved per-plane gains, using the original float32 multiplication. Subsequent measurements share the read-only array. Segmentation-only correction leaves measurement intensities in their original domain. Regression tests compare both routes against the existing scientific input preparation.
+
+Scientific export reads the model's current filtering and quantification records. Its filtered TIFF uses the validated mask array, its retained table uses the validated IDs, and its all-object table describes complete committed geometry. The raw TIFF uses the original labels. The nuclear density gate additionally requires a reviewed ROI and eligible counting results. Tests exercise export while a historical comparison is visible, rejection after a save, and successful TIFF and CSV export after recalculation and ROI review. Cytoplasmic sessions retain their existing measurement and export capabilities.
+
+## Memory and limits
+
+A filtered edit still needs its writable preview and a complete validated commit. A provisional display with excluded labels needs one ZYX working array and plane-sized temporary masks. When every label is retained, the view shares committed geometry. Complete comparison shares the committed array. Opening a historical comparison materializes one ZYX volume from the latest delta. The checkpoint stores IDs for these projections. Voxel history still grows with the number of changed voxels. A measurement-routed corrected channel can retain one float32 ZYX array until its correction or project is invalidated.
+
+## Automated verification
+
+The complete Linux regression run covered 302 distinct pytest tests and 13 scientific subtests using Python 3.12.14, Qt 6.11.0 with PyQt6, and napari 0.10.0. The rendered 2D/3D canvas test ran under Xorg with software OpenGL.
+
+| Test group | Result |
+| --- | --- |
+| Geometry editing, mask review and context menu, native checkpoints, scientific inputs and quantification/export | 116 passed |
+| Remaining modules outside live plots and legacy workflow | 171 passed, plus 13 subtests |
+| Live plots | 4 passed |
+| Legacy workflow, including launcher preview | 10 passed together and 1 passed separately |
+
+A combined run aborted in the legacy launcher preview while processing Qt events. Combined runs also exposed timing-sensitive first renders in the live-plot tests. The final groups ran the live-plot module and the legacy launcher preview in fresh processes with their existing assertions. Native macOS validation of this phase is pending.
+
+## Native macOS validation checklist
+
+Use a duplicate calibrated project with nonzero crop offset, anisotropic spacing, and nuclear and cytoplasmic sessions containing overlapping numeric IDs.
+
+- [ ] Before filtering, check that only raw segmentation is listed. Filter out a known object. Verify raw is hidden, the retained layer is visible, and ROI appears with the overlays. Record the thresholds, layer order and opacity.
+- [ ] With automatic recalculation off, paint, erase, split, merge and remove across successive saves. Check IDs, counts, layer order, opacity, selected object and pending status. Attempt to paint a hidden object or use its ID. Compare complete and raw geometry in 2D and 3D.
+- [ ] Pause and resume in a different slice plane. Verify pixel and µm brush readouts, Stop dialog choices and cleanup after discard. Undo twice and verify that subsequent splits allocate unused IDs.
+- [ ] Save before recalculation, quit and reopen. Check the corrected working view, status, settings, history and blocked export. Repeat with a baseline v2 checkpoint and a legacy import.
+- [ ] Recalculate and review the nuclear ROI. Compare retained IDs, measured volumes, intensities, counting eligibility, density, CSV rows and raw and filtered TIFFs with the expected geometry. Save and reopen the current result.
+- [ ] Enable automatic recalculation, save another correction, and watch the transition through running to current. Verify an intentional mixed-membership all-mask merge requires recalculation. Compare the prior retained view and return to the working layer.
+- [ ] Repeat in the cytoplasmic session. Verify independent edits, thresholds and display choices, then return to Nuclear and confirm its ROI and density. Switch sessions, close projects and quit the native viewer while idle.
+
+## Files changed in Phase 2D.4.4
+
+Under `src/nuclear_segmentation/`, geometry and persistence changes are in `geometry_edit.py`, `project_state.py` and `native_project.py`. Measurement routing and worker handling are in `filtering_workspace.py`, `scientific_input.py` and `z_correction_workspace.py`. Desktop and display changes are in `desktop_window.py`, `geometry_panel.py`, `layer_panel.py`, `mask_context_menu.py`, `mask_review_panel.py`, `segmentation_execution.py` and `session_display.py`.
+
+Regression changes are in `tests/test_geometry_edit.py`, `tests/test_mask_review_gui.py`, `tests/test_native_project.py`, `tests/test_quantification_gui.py` and `tests/test_scientific_input.py`. This document contains the workflow and native validation procedure.
+
+---
+
+## Earlier phases — native macOS validation
 
 Use a duplicate of a validated nuclear project and a calibrated multichannel image with a cytoplasmic session. Include a cropped image with nonzero XY offset, anisotropic spacing, and at least two objects per session. Record the commit, macOS, Qt and napari versions, image and series, session names, raw mask signatures, spacing, offset, filter settings and nuclear ROI. Save the starting project in a separate folder for comparison.
 

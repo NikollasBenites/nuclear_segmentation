@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from qtpy.QtCore import QSettings
-from qtpy.QtTest import QTest
 from qtpy.QtWidgets import QApplication, QLabel, QWidget
 
 from nuclear_segmentation.desktop_window import DesktopWindow
@@ -91,7 +90,7 @@ def test_mask_review_page_activation_and_result_summary(review_window):
     assert not layer.editable
 
 
-def test_filter_slider_is_debounced_without_requesting_measurement(review_window):
+def test_filter_slider_is_debounced_without_requesting_measurement(review_window, qapp):
     window, _ = review_window
     panel = window.context_panel.mask_review_page
     window.set_workflow("mask_review")
@@ -105,7 +104,7 @@ def test_filter_slider_is_debounced_without_requesting_measurement(review_window
     panel.minimum_sphericity.editor.setValue(.62)
     panel.minimum_sphericity.editor.setValue(.63)
     assert emitted == []
-    QTest.qWait(150)
+    _wait(qapp, lambda: bool(emitted))
     assert emitted == [True]
     assert recalculated == []
 

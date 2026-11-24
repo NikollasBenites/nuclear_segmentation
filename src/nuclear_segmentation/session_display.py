@@ -12,7 +12,6 @@ class SessionMaskDisplay(QObject):
 
     _keys = {
         "before": "nucytoseg_before_editing",
-        "retained": "nucytoseg_retained_segmentation",
         "edited": "nucytoseg_edited_segmentation",
         "raw": "nucytoseg_raw_segmentation",
         "filtered": "nucytoseg_filtered_segmentation",
@@ -66,7 +65,7 @@ class SessionMaskDisplay(QObject):
         if event.type == "visible" and role != "roi":
             selected_target = self._mode() == "selected" and role == self.preferences["selected_layer"]
             if not selected_target:
-                for key in ("raw", "edited", "retained", "before", "filtered"):
+                for key in ("raw", "edited", "before", "filtered"):
                     other = self.layers.get(key)
                     if other is not None:
                         self.preferences.setdefault(key, {})["visible"] = other.visible
@@ -75,8 +74,20 @@ class SessionMaskDisplay(QObject):
             self._status()
         self.changed.emit()
 
+    def _default_mode(self):
+        # An outdated filter on the same geometry is still a useful read-only view.
+        # Only ProjectState.proofreading_ids may seed a retained edit.
+        if self.state.proofreading_ids is not None:
+            return "filtered"
+        session = self.state.active_session
+        record = session.filtering_result
+        if (session.segmentation_is_current and record is not None and session.roi_grid_compatible
+                and record.get("geometry_revision") == session.geometry_revision):
+            return "filtered"
+        return "raw"
+
     def _mode(self):
-        return self.preferences.get("mode", "filtered" if self.state.filtering_is_current else "raw")
+        return self.preferences.get("mode", self._default_mode())
 
     def _restore_layer(self, role, layer):
         settings = self.preferences.get(role, {})
@@ -117,29 +128,28 @@ class SessionMaskDisplay(QObject):
             return
         mode = self._mode()
         filtered = self.layers.get("filtered")
-        retained = (self.state.filtering_result or {}).get("retained_ids", ())
+        retained = self.state.proofreading_ids or ()
         if mode == "selected":
             role = self.preferences["selected_layer"]
             label = self.preferences["selected_id"]
             if (self.preferences["geometry_revision"] != self.state.active_session.geometry_revision
                     or (role == "filtered" and label not in retained)):
-                self.preferences["mode"] = "filtered" if self.state.filtering_is_current else "raw"
+                self.preferences["mode"] = self._default_mode()
         if filtered is not None:
             selected = self.selection.label_for_layer(filtered)
             if selected is not None and selected not in retained:
                 self.selection.clear_selection(filtered)
         if self._mode() == "edited" and "edited" not in self.layers:
             self.preferences["mode"] = "raw"
-        if self._mode() in ("before", "retained") and self._mode() not in self.layers:
-            if "pending_geometry_revision" not in self.preferences:
-                self.preferences["mode"] = "filtered" if self.state.filtering_is_current else "raw"
-        if self._mode() == "filtered" and not self.state.filtering_is_current:
+        if self._mode() == "before" and "before" not in self.layers:
+            self.preferences["mode"] = self._default_mode()
+        if self._mode() == "filtered" and self._default_mode() == "raw":
             self.preferences["mode"] = "raw"
         for role, layer in self.layers.items():
             if self.state.owns_mask_layer(layer):
                 self._restore_layer(role, layer)
         mode = self._mode()
-        saved_selection = (mode in ("edited", "retained") and self.preferences.get("selected_layer") == mode
+        saved_selection = ((mode == "edited" or (mode == "filtered" and self.preferences.get("selected_id") in retained)) and self.preferences.get("selected_layer") == mode
                            and self.preferences.get("geometry_revision") == self.state.active_session.geometry_revision)
         if restore_selection and (mode == "selected" or saved_selection):
             layer = self.layers.get(self.preferences["selected_layer"])
@@ -159,52 +169,53 @@ class SessionMaskDisplay(QObject):
             visibility = "" if layer is not None and layer.visible else " · hidden"
             message = f"Selected only: Mask ID {self.preferences['selected_id']} ({role}){visibility}."
         elif mode == "custom":
-            names = {"edited": "complete geometry (diagnostic)", "before": "filtered before editing (outdated)",
-                     "retained": "committed retained (provisional)"}
-            visible = [names.get(role, role) for role in ("raw", "edited", "retained", "before", "filtered")
+            names = {"edited": "complete geometry (diagnostic)", "before": "filtered before editing (historical)"}
+            visible = [names.get(role, role) for role in ("raw", "edited", "before", "filtered")
                        if role in self.layers and self.layers[role].visible]
             message = "Visible masks: " + (" and ".join(visible) if visible else "none") + "."
         else:
             message = {"raw": "Showing all raw segmentation masks.", "edited": "Showing complete committed geometry (diagnostic).",
                        "before": "Filtered — Before Editing (Outdated)",
-                       "retained": "Committed — Retained · Provisional — Recalculation Required",
                        "filtered": "Showing all retained masks."}[mode]
         self.status.emit(message)
 
     def show(self, mode):
         if self.suspended:
             return
-        if mode == "filtered" and (not self.state.filtering_is_current or "filtered" not in self.layers):
+        if mode == "filtered" and (self._default_mode() != "filtered" or "filtered" not in self.layers):
             self.status.emit(f"Calculate current filtering results to show retained masks. Current display: {self._mode()}.")
             return
         if mode == "selected":
             layer = self.selection.selected_layer
             label = self.selection.selected_mask_id
-            role = next((key for key in ("raw", "edited", "retained", "filtered") if self.layers.get(key) is layer), None)
+            role = next((key for key in ("raw", "edited", "filtered") if self.layers.get(key) is layer), None)
             if layer is None or label is None or role is None or not self.state.owns_mask_layer(layer):
                 self.status.emit("Select a segmentation mask with Review / Select first.")
                 return
             self.preferences.update(selected_layer=role, selected_id=int(label),
                                     geometry_revision=self.state.active_session.geometry_revision)
-        for key in ("raw", "edited", "retained", "before", "filtered"):
+        for key in ("raw", "edited", "before", "filtered"):
             self.preferences.get(key, {}).pop("visible", None)
+        previous_mode = self._mode()
         self.preferences["mode"] = mode
+        if mode == "filtered" and previous_mode == "selected":
+            self.selection.clear_selection(self.layers["filtered"])
         self.sync()
-        if mode in ("raw", "edited", "retained", "before", "filtered") and mode in self.layers:
+        if mode in ("raw", "edited", "before", "filtered") and mode in self.layers:
             self.viewer.layers.selection.active = self.layers[mode]
         self.changed.emit()
 
     def selection_cleared(self, layer):
-        if not self.suspended and self._mode() in ("edited", "retained") and layer is self.layers.get(self._mode()):
+        if not self.suspended and self._mode() in ("edited", "filtered") and layer is self.layers.get(self._mode()):
             self.preferences.pop("selected_id", None)
             self.preferences.pop("selected_layer", None)
         if self._mode() == "selected" and self.layers.get(self.preferences["selected_layer"]) is layer:
             role = self.preferences["selected_layer"]
-            self.show("raw" if role == "filtered" and not self.state.filtering_is_current else role)
+            self.show(self._default_mode() if role == "filtered" else role)
 
     def selection_changed(self, layer, label):
         mode = self._mode()
-        if (not self.suspended and mode in ("edited", "retained") and label is not None
+        if (not self.suspended and mode in ("edited", "filtered") and label is not None
                 and layer is self.layers.get(mode) and self.state.owns_mask_layer(layer)):
             self.preferences.update(selected_id=int(label), selected_layer=mode,
                                     geometry_revision=self.state.active_session.geometry_revision)

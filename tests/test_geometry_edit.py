@@ -109,10 +109,14 @@ def test_native_edited_geometry_measurement_and_undo(project, tmp_path):
         assert rows.loc[label, "mean_intensity_" + state.channels[0].name] == pytest.approx(
             state.working_dataset.data_czyx[0][region].mean())
     window.filtering._calculated(result)
+    window.filtering.filtered_layer.opacity = .58
+    # A pre-unification project can still carry a previous provisional layer preference.
+    state.active_session.display_state["retained"] = {"opacity": .71}
     folder = tmp_path / "edited"
     save(window, app, folder)
     open_saved(window, app, folder)
     assert not warnings
+    assert window.filtering.filtered_layer.opacity == pytest.approx(.58)
     assert state.filtering_is_current and np.array_equal(effective_masks(state.segmentation_result), expected)
     assert np.array_equal(state.segmentation_result["masks"], raw)
     assert state.segmentation_result["edit_history"][-1]["operation"] == "split"
@@ -190,7 +194,7 @@ def test_rendered_geometry_preview(qapp, tmp_path):
         assert edited.visible and not edited.editable
         assert edited.data[0, 1, 1] != raw[0, 1, 1]
         window.mask_display.show("raw")
-        assert window.segmentation.result_layer.visible and not edited.visible
+        assert window.segmentation.result_layer.visible and edited not in panel.viewer.layers
 
         state = window.project_state
         child = int(edited.data[0, 1, 1])
@@ -207,12 +211,12 @@ def test_rendered_geometry_preview(qapp, tmp_path):
             window.viewer_toolbar.set_ndisplay(dimensions)
             qapp.processEvents()
             layers = window.mask_display.layers
-            assert {role for role, layer in layers.items() if layer.visible} == {"retained"}
-            assert layers["retained"].data[0, 0, 0] == child
+            assert {role for role, layer in layers.items() if layer.visible} == {"filtered"}
+            assert layers["filtered"].data[0, 0, 0] == child
             panel.buttons["show_before"].click()
             qapp.processEvents()
             assert layers["before"].visible and layers["before"].data[0, 0, 0] == 0
-            assert not layers["retained"].visible and not layers["raw"].visible
+            assert not layers["filtered"].visible and not layers["raw"].visible
             panel.buttons["show_retained"].click()
     finally:
         if panel.busy:
@@ -442,8 +446,11 @@ def test_filtered_selection_scope_and_hidden_geometry(retained_second_mask):
     expected[0, 0, 0] = 2
     np.testing.assert_array_equal(effective_masks(state.segmentation_result), expected)
     assert state.segmentation_result["edit_history"][-1]["affected_ids"] == [2]
-    assert not state.filtering_is_current and panel.scope.currentIndex() == 1
-    assert not panel.scope.model().item(0).isEnabled()
+    assert not state.filtering_is_current and panel.scope.currentIndex() == 0
+    assert panel.scope.model().item(0).isEnabled()
+    assert "edited" not in window.mask_display.layers
+    panel.show_edited()
+    panel.scope.setCurrentIndex(1)
     committed = window.mask_display.layers["edited"]
     window.mask_display.show("edited")
     window.viewer_toolbar.activate_tool("review")
@@ -494,7 +501,8 @@ def test_collapsing_editor_preserves_transaction_and_merge(review_window, qapp):
     panel.discard()
 
 
-def test_filtered_commit_resumes_with_excluded_geometry_and_undo(project, tmp_path):
+@pytest.mark.parametrize("old_v2", [False, True])
+def test_filtered_commit_resumes_with_excluded_geometry_and_undo(project, tmp_path, monkeypatch, old_v2):
     window, app, _, _, warnings = project
     state = window.project_state
     raw = _segment(window)
@@ -509,17 +517,40 @@ def test_filtered_commit_resumes_with_excluded_geometry_and_undo(project, tmp_pa
     edit = GeometryEdit(state, filtered=True)
     edit.remove(child)
     edit.commit()
-    retained = window.mask_display.layers["retained"]
+    retained = window.mask_display.layers["filtered"]
     assert retained.visible and not retained.data.any()
     retained.opacity = .39
     window.geometry_panel.buttons["show_before"].click()
+    if old_v2:
+        from nuclear_segmentation import desktop_window
+        snapshot_state = desktop_window.snapshot_state
+
+        def previous_format(project_state):
+            snapshot = snapshot_state(project_state)
+            saved = snapshot["sessions"]["nuclear"]
+            saved.pop("measurement_error")
+            saved["display_state"] = dict(saved["display_state"], mode="retained",
+                                          pending_geometry_revision=saved.pop("pending_geometry_revision"))
+            saved["display_state"]["retained"] = saved["display_state"].pop("filtered")
+            saved["display_state"]["filtered"] = {"opacity": .71}
+            geometry = dict(saved["segmentation_result"])
+            history = [dict(item) for item in geometry["edit_history"]]
+            history[-1].pop("previous_reviewed_ids")
+            saved["segmentation_result"] = dict(geometry, edit_history=history)
+            return snapshot
+        monkeypatch.setattr(desktop_window, "snapshot_state", previous_format)
     folder = tmp_path / "filtered-edit"
     save(window, app, folder)
     open_saved(window, app, folder)
     assert not warnings
     np.testing.assert_array_equal(state.segmentation_result["masks"], raw)
     np.testing.assert_array_equal(effective_masks(state.segmentation_result), np.where(before == child, 0, before))
-    retained = window.mask_display.layers["retained"]
+    retained = window.mask_display.layers["filtered"]
+    assert state.provisional_ids == [] and not state.filtering_is_current
+    assert state.filtering_result is None and state.quantification_result is None
+    if old_v2:
+        assert retained.visible and "before" not in window.mask_display.layers
+        window.geometry_panel.show_before()
     snapshot = window.mask_display.layers["before"]
     assert snapshot.visible and not retained.visible and not snapshot.editable
     np.testing.assert_array_equal(snapshot.data, np.where(before == child, before, 0))
@@ -548,6 +579,8 @@ def test_empty_and_outdated_filtering_never_removes_objects(retained_second_mask
     state.invalidate_filtering()
     assert not panel.buttons["commit"].isEnabled()
     panel.discard()
+    assert window.filtering.filtered_layer.visible and not window.segmentation.result_layer.visible
+    assert window.filtering.working_status == "Recalculation required"
     panel.start()
     assert not panel.edit.filtered and panel.selected_id is None
     np.testing.assert_array_equal(panel.layer.data, raw)
@@ -656,7 +689,7 @@ def test_stop_dialog_from_pause(review_window, choice):
 def test_filtered_save_split_recalculate_same_thresholds(retained_second_mask, qapp):
     from test_desktop_normalization import _wait
 
-    window, raw, _ = retained_second_mask
+    window, raw, filtered = retained_second_mask
     state = window.project_state
     panel = window.geometry_panel
     settings = state.filtering_result["settings"]
@@ -667,21 +700,22 @@ def test_filtered_save_split_recalculate_same_thresholds(retained_second_mask, q
     panel.layer.paint((0, 5, 6), child)
     expected = panel.edit.preview.copy()
     panel.commit()
-    retained = window.mask_display.layers["retained"]
-    complete = window.mask_display.layers["edited"]
-    assert retained.visible and not complete.visible and not retained.editable
-    assert retained.name.endswith("Committed — Retained (Provisional)")
+    retained = window.mask_display.layers["filtered"]
+    assert "edited" not in window.mask_display.layers and "before" not in window.mask_display.layers
+    assert retained.visible and not retained.editable
+    assert retained is filtered and retained.name == "Live filtered masks"
     assert window.mask_selection.selected_layer is retained and window.mask_selection.selected_mask_id == 2
     np.testing.assert_array_equal(retained.data, expected)
-    assert complete.data[0, 1, 1] == 1 and complete.data[0, 5, 6] == child
+    complete = effective_masks(state.segmentation_result)
+    assert complete[0, 1, 1] == 1 and complete[0, 5, 6] == child
     assert raw[0, 5, 6] == 2 and state.filtering_result is None
-    assert state.active_session.filter_controls == settings
+    assert state.active_session.filter_controls == settings and state.active_session.filter_controls is not settings
     assert state.segmentation_result["edit_history"][-1]["reviewed_ids"] == [2, child]
     assert window.filtering.calculate()
     _wait(qapp, lambda: not window.filtering.busy)
     assert state.filtering_is_current and state.filtering_result["settings"] == settings
     assert "before" not in window.mask_display.layers
-    assert retained not in panel.viewer.layers and window.filtering.filtered_layer.visible
+    assert retained is window.filtering.filtered_layer and retained.visible
     assert window.mask_display.preferences["mode"] == "filtered"
     assert set(state.filtering_result["properties"].index) == {1, 2, child}
 
@@ -707,7 +741,7 @@ def test_filtered_merge_retains_target_and_isolates_sessions(retained_second_mas
     panel.toggle_pause()
     panel.toggle_pause()
     panel.commit()
-    retained = window.mask_display.layers["retained"]
+    retained = window.mask_display.layers["filtered"]
     np.testing.assert_array_equal(retained.data, np.where(raw, 2, 0))
     assert state.segmentation_result["edit_history"][-1]["reviewed_ids"] == [2]
     assert (effective_masks(state.segmentation_result)[:, 0, 0] == 83).all()
@@ -722,11 +756,11 @@ def test_filtered_merge_retains_target_and_isolates_sessions(retained_second_mas
     panel.commit()
     assert window.mask_display.layers["edited"].visible and "retained" not in window.mask_display.layers
     state.select_session("nuclear")
-    restored = window.mask_display.layers["retained"]
+    restored = window.mask_display.layers["filtered"]
     assert restored.visible and restored.opacity == pytest.approx(.42)
     np.testing.assert_array_equal(restored.data, np.where(raw, 2, 0))
     panel.undo()
-    assert "retained" not in window.mask_display.layers
+    assert state.provisional_ids == [1, 2]
     np.testing.assert_array_equal(effective_masks(state.segmentation_result), masks)
 
 
@@ -747,7 +781,7 @@ def test_changed_filter_definition_requires_review(retained_second_mask, qapp):
     review = window.context_panel.mask_review_page
     assert not state.filtering_is_current and state.quantification_result is None
     assert channel in review.measurement_status.text() and "incompatible" in review.measurement_status.text()
-    assert window.mask_display.layers["retained"].visible and "before" in window.mask_display.layers
+    assert window.mask_display.layers["filtered"].visible and "before" not in window.mask_display.layers
     assert window.filtering.calculate()
     _wait(qapp, lambda: not window.filtering.busy)
     assert state.filtering_is_current and window.filtering.filtered_layer.visible
@@ -767,7 +801,7 @@ def test_thresholds_survive_narrower_measured_range(retained_second_mask, qapp):
     _click_mask(panel.layer, (0, 5, 6))
     panel.remove()
     panel.commit()
-    assert not window.mask_display.layers["retained"].data.any()
+    assert not window.mask_display.layers["filtered"].data.any()
     assert window.filtering.calculate()
     _wait(qapp, lambda: not window.filtering.busy)
     assert state.filtering_is_current and state.filtering_result["retained_count"] == 0
@@ -822,24 +856,144 @@ def test_filtered_before_and_after_are_session_owned(retained_second_mask, edit_
     expected[0, 0, 0] = kept
     panel.buttons["commit"].click()
     qapp.processEvents()
-    snapshot = display.layers["before"]
-    assert snapshot.data is source and not snapshot.editable and not snapshot.data.flags.writeable
-    assert snapshot.metadata["source_geometry_revision"] == active.geometry_revision - 1
-    assert snapshot.metadata["mask_type"] == active.scientific_role
-    assert {role for role, layer in display.layers.items() if layer.visible} == {"retained"}
-    np.testing.assert_array_equal(display.layers["retained"].data, expected)
-    np.testing.assert_array_equal(display.layers["edited"].data[excluded], raw[excluded])
+    assert "before" not in display.layers and "edited" not in display.layers
+    assert {role for role, layer in display.layers.items() if layer.visible} == {"filtered"}
+    np.testing.assert_array_equal(display.layers["filtered"].data, expected)
+    np.testing.assert_array_equal(effective_masks(active.segmentation_result)[excluded], raw[excluded])
     np.testing.assert_array_equal(display.layers["raw"].data, raw)
     assert active.filtering_result is None and active.quantification_result is None
     panel.buttons["show_before"].click()
+    snapshot = display.layers["before"]
+    np.testing.assert_array_equal(snapshot.data, source)
+    assert not snapshot.editable and not snapshot.data.flags.writeable
+    assert snapshot.metadata["source_geometry_revision"] == active.geometry_revision - 1
+    assert snapshot.metadata["mask_type"] == active.scientific_role
     state.select_session(other.session_id)
     assert other.filtering_result is other_filter and other.filtering_is_current
     assert other.geometry_revision == other_revision and display.layers["filtered"].visible
     assert display.layers["filtered"].data is other_filter["filtered_masks"]
     assert "before" not in display.layers and "retained" not in display.layers
     state.select_session(active.session_id)
-    assert display.layers["before"].visible and not display.layers["edited"].visible
+    assert display.layers["before"].visible and "edited" not in display.layers
     np.testing.assert_array_equal(display.layers["before"].data, source)
     panel.undo()
     assert not active.filtering_is_current and "before" not in display.layers
     np.testing.assert_array_equal(effective_masks(state.segmentation_result), raw)
+
+
+def test_repeated_provisional_edits_keep_scope_and_allocate_unused_ids(retained_second_mask):
+    window, raw, working = retained_second_mask
+    state, panel = window.project_state, window.geometry_panel
+    original = raw.copy()
+    working.opacity = .38
+    tree = window.layer_panel.model
+    primary = tree.item_for_layer(working).parent()
+    assert primary.rowCount() == 2
+    assert tree.item_for_layer(window.filtering.roi_layer).parent().text() == "Annotations & Overlays"
+    index = panel.viewer.layers.index(working)
+    assert not panel.auto_recalculate.isChecked() and not panel.advanced.expanded
+    for position, expected_child in [((0, 5, 6), 3), ((1, 5, 6), 4)]:
+        panel.start()
+        assert panel.edit.filtered and panel.edit.next_id == expected_child
+        assert not panel.edit.preview[raw == 1].any()
+        panel.edit.preview[0, 1, 1] = 2
+        with pytest.raises(ValueError, match="excluded object"):
+            panel.commit()
+        panel.edit.preview[0, 1, 1] = 0
+        assert not panel.edit.allows_label(1)
+        assert panel.edit.split(2) == expected_child
+        panel.edit.preview[position] = expected_child
+        panel.commit()
+        assert working is window.filtering.filtered_layer and working.visible
+        assert working.opacity == pytest.approx(.38) and not working.editable
+        assert panel.viewer.layers.index(working) == index
+        assert not window.segmentation.result_layer.visible
+        assert state.filtering_result is None and not state.filtering_is_current
+        assert not window.filtering.busy and "recalculation required" in panel.scientific_status.text()
+        np.testing.assert_array_equal(effective_masks(state.segmentation_result)[raw == 1], raw[raw == 1])
+    assert state.provisional_ids == [2, 3, 4]
+    panel.undo()
+    assert state.provisional_ids == [2, 3]
+    panel.undo()
+    assert state.provisional_ids == [2]
+    panel.start()
+    assert panel.edit.next_id == 5 and panel.edit.filtered
+    panel.discard()
+    np.testing.assert_array_equal(effective_masks(state.segmentation_result), original)
+    np.testing.assert_array_equal(raw, original)
+    assert not raw.flags.writeable
+
+
+def test_all_scope_reconciliation_and_ambiguous_merge(retained_second_mask):
+    window, raw, working = retained_second_mask
+    state = window.project_state
+    edit = GeometryEdit(state)
+    edit.preview[0, 0, 0] = 1
+    edit.commit()
+    assert state.provisional_ids == [2] and not working.data[0, 0, 0]
+    edit = GeometryEdit(state)
+    edit.merge([1, 2], 2)
+    edit.commit()
+    assert state.provisional_ids is None and state.filtering_result is None
+    assert window.filtering.filtered_layer is None
+    assert "establish retained objects" in window.filtering.working_status
+    assert effective_masks(state.segmentation_result)[0, 0, 0] == 2 and raw[0, 0, 0] == 0
+    GeometryEdit.undo(state)
+    assert state.provisional_ids == [2] and window.filtering.filtered_layer.visible
+
+
+def test_auto_recalculate_failure_and_retry(retained_second_mask, qapp, monkeypatch):
+    from nuclear_segmentation import filtering_workspace
+    from test_desktop_normalization import _wait
+
+    window, _, working = retained_second_mask
+    state, panel = window.project_state, window.geometry_panel
+    settings = state.filtering_result["settings"].copy()
+    statuses = []
+    window.filtering.status_changed.connect(statuses.append)
+    panel.auto_recalculate.setChecked(True)
+    with monkeypatch.context() as scoped:
+        def fail(*args):
+            raise ValueError("test measurement failure")
+        scoped.setattr(filtering_workspace, "_measure", fail)
+        panel.start()
+        panel.edit.preview[0, 0, 0] = 2
+        panel.commit()
+        assert window.filtering.busy and "Recalculating" in panel.scientific_status.text()
+        _wait(qapp, lambda: not window.filtering.busy)
+    committed = effective_masks(state.segmentation_result)
+    assert committed[0, 0, 0] == 2 and working.data[0, 0, 0] == 2
+    assert state.filtering_result is None and state.provisional_ids == [2]
+    assert "test measurement failure" in panel.scientific_status.text()
+    assert panel.buttons["recalculate"].isEnabled()
+    panel.buttons["recalculate"].click()
+    _wait(qapp, lambda: not window.filtering.busy)
+    assert state.filtering_is_current and state.filtering_result["settings"] == settings
+    assert effective_masks(state.segmentation_result) is committed and state.provisional_ids is None
+    assert window.filtering.filtered_layer is working and not state.scientific_roi_reviewed
+    assert "Measurements up to date" in panel.scientific_status.text()
+    panel.start()
+    panel.edit.preview[0, 0, 1] = 2
+    panel.commit()
+    _wait(qapp, lambda: not window.filtering.busy)
+    assert state.filtering_is_current and statuses.count("Recalculating measurements and filters…") == 3
+
+
+def test_remeasurement_can_retain_previously_excluded_object(retained_second_mask, qapp):
+    from test_desktop_normalization import _wait
+
+    window, raw, working = retained_second_mask
+    state = window.project_state
+    # Erase half the bright object, leaving its bright pixels available to a
+    # subsequent all-mask brush edit. Both IDs survive each transaction.
+    edit = GeometryEdit(state, filtered=True)
+    edit.preview[0:2][raw[0:2] == 2] = 0
+    edit.commit()
+    edit = GeometryEdit(state)
+    edit.preview[0:2][raw[0:2] == 2] = 1
+    edit.commit()
+    assert state.provisional_ids == [2] and not working.data[raw == 1].any()
+    assert window.filtering.calculate()
+    _wait(qapp, lambda: not window.filtering.busy)
+    assert state.filtering_is_current and set(state.filtering_result["retained_ids"]) == {1, 2}
+    np.testing.assert_array_equal(working.data, effective_masks(state.segmentation_result))

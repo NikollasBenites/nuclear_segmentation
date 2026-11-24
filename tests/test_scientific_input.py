@@ -179,3 +179,30 @@ def test_cytoplasmic_normalization_requires_its_inference_channel_and_route(tmp_
     corrected, _ = correct_z(image[1], Z_DEFAULTS)
     np.testing.assert_array_equal(scientific.namespace["model_input_volume"], corrected)
     np.testing.assert_array_equal(scientific.namespace["channel_volumes"]["Marker"], image[1])
+
+
+@pytest.mark.parametrize("saved_pixels", [True, False])
+def test_measurements_reuse_executed_z_domain(tmp_path, monkeypatch, saved_pixels):
+    from nuclear_segmentation.scientific_input import capture_scientific_input, prepare_captured_scientific_input
+    state, data = _state(tmp_path)
+    for index, measured in [(0, False), (1, True)]:
+        options = dict(Z_DEFAULTS, measurement=measured)
+        pixels, report = correct_z(data[index], options)
+        report.update(_z_report(state, index, options))
+        state.set_z_correction_preview(index, options, report, pixels=pixels if saved_pixels else None)
+        state.apply_z_corrections([index])
+    config = _config(state)
+    expected = prepare_scientific_input(state, config).namespace["channel_volumes"]
+    def unexpected(*args):
+        pytest.fail("Measurement recalculation repeated image preprocessing")
+    monkeypatch.setattr("nuclear_segmentation.scientific_input.prepare_volumes", unexpected)
+    previous = None
+    for _ in range(2):
+        job = capture_scientific_input(state, config, measurement=True)
+        volumes = prepare_captured_scientific_input(job).namespace["channel_volumes"]
+        for name, reference in expected.items():
+            np.testing.assert_array_equal(volumes[name], reference)
+        assert np.shares_memory(volumes["DNA"], data) and not volumes["Marker"].flags.writeable
+        if previous is not None:
+            assert volumes["Marker"] is previous
+        previous = volumes["Marker"]

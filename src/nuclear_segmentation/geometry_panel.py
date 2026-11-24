@@ -3,7 +3,7 @@ import math
 
 from napari.layers import LayerLock
 from qtpy.QtCore import QSignalBlocker, Qt
-from qtpy.QtWidgets import (QComboBox, QFormLayout, QLabel, QLineEdit, QHBoxLayout, QMessageBox,
+from qtpy.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QLabel, QLineEdit, QHBoxLayout, QMessageBox,
                             QListWidget, QPushButton, QSlider, QSpinBox, QVBoxLayout, QWidget)
 
 from .collapsible_section import CollapsibleSection
@@ -30,7 +30,27 @@ class GeometryPanel(CollapsibleSection):
             return control
 
         layout.addWidget(button("start", "Start Editing"))
-        layout.addWidget(button("undo", "Undo Last Saved Edit"))
+        self.scientific_status = window.working_mask_status
+        layout.addWidget(button("recalculate", "Recalculate Measurements"))
+        self.auto_recalculate = QCheckBox("Automatically recalculate\nmeasurements after saving edits")
+        self.auto_recalculate.setAccessibleName("Automatically recalculate measurements after saving edits")
+        settings = window.workspace_settings.settings
+        key = "editing/auto_recalculate"
+        self.auto_recalculate.setChecked(settings.value(key, False, type=bool))
+        self.auto_recalculate.toggled.connect(lambda enabled: settings.setValue(key, enabled))
+        layout.addWidget(self.auto_recalculate)
+        self.advanced = CollapsibleSection("geometry_history", "Advanced Layers & History", expanded=False)
+        advanced = QVBoxLayout()
+        self.advanced.set_content_layout(advanced)
+        advanced.addWidget(button("show_edited", "Complete Committed Geometry"))
+        advanced.addWidget(button("show_before", "Filtered Before Editing"))
+        advanced.addWidget(button("show_retained", "Return to Live Filtered Masks"))
+        self.history = QListWidget()
+        self.history.setMaximumHeight(100)
+        self.history.setAccessibleName("Geometry revisions and editing history")
+        advanced.addWidget(self.history)
+        advanced.addWidget(button("undo", "Undo Last Saved Edit"))
+        layout.addWidget(self.advanced)
         self.transaction_controls = QWidget()
         layout.addWidget(self.transaction_controls)
         layout = QVBoxLayout(self.transaction_controls)
@@ -100,16 +120,14 @@ class GeometryPanel(CollapsibleSection):
         merge.addWidget(QLabel("Retained target ID"))
         merge.addWidget(self.merge_target)
         merge.addWidget(button("merge", "Preview Merge"))
-        review.show_raw_button.parentWidget().layout().insertWidget(1, button("show_edited", "Show Complete Geometry (Diagnostic)"))
-        review.show_raw_button.parentWidget().layout().insertWidget(2, button("show_retained", "Show Committed — Retained"))
-        review.show_raw_button.parentWidget().layout().insertWidget(3, button("show_before", "Show Filtered — Before Editing"))
         self.merge_target.currentIndexChanged.connect(self.refresh)
         self.merge_list.currentRowChanged.connect(self.refresh)
         self.status = QLabel()
         self.status.setWordWrap(True)
         self.layout().insertWidget(1, self.status)
         review.pages["mask_editing"].layout().insertWidget(1, self)
-        self.state.segmentation_result_changed.connect(self.refresh)
+        self.state.segmentation_result_changed.connect(self._sync_scope)
+        window.filtering.status_changed.connect(self.refresh)
         self.viewer.dims.events.ndisplay.connect(self._dimensions)
         self.viewer.dims.events.order.connect(self._dimensions)
         window.viewer_toolbar.tool_changed.connect(self.refresh)
@@ -122,12 +140,13 @@ class GeometryPanel(CollapsibleSection):
         self.viewer.dims.events.ndisplay.disconnect(self._dimensions)
         self.viewer.dims.events.order.disconnect(self._dimensions)
         self.window.viewer_toolbar.tool_changed.disconnect(self.refresh)
-        self.state.segmentation_result_changed.disconnect(self.refresh)
+        self.state.segmentation_result_changed.disconnect(self._sync_scope)
+        self.window.filtering.status_changed.disconnect(self.refresh)
         self.state.filtering_result_changed.disconnect(self._sync_scope)
         self.window.mask_selection.selection_changed.disconnect(self._selection_changed)
 
     def _sync_scope(self, *args):
-        current = self.state.filtering_is_current and self.state.filtering_result is not None
+        current = self.state.proofreading_ids is not None
         self.scope.model().item(0).setEnabled(current)
         if self.busy:
             if self.edit.filtered and not self.edit.filter_current:
@@ -139,8 +158,8 @@ class GeometryPanel(CollapsibleSection):
 
     def _scope_text(self):
         if self.scope.currentData():
-            return "Filtered · retained objects"
-        return "All masks" if self.state.filtering_is_current else "All masks · filtered editing unavailable"
+            return "Filtered · retained objects" if self.state.filtering_is_current else "Provisional · retained objects"
+        return "All masks" if self.state.proofreading_ids is not None else "All masks · no retained selection available"
 
     def _change_scope(self):
         if self.busy:
@@ -174,11 +193,11 @@ class GeometryPanel(CollapsibleSection):
         selection = self.window.mask_selection
         layer, label = selection.selected_layer, selection.selected_mask_id
         if (label is None or not self.state.owns_mask_layer(layer)
-                or layer not in (self.window.mask_display.layers.get(role) for role in ("raw", "filtered", "edited", "retained"))):
+                or layer not in (self.window.mask_display.layers.get(role) for role in ("raw", "filtered", "edited"))):
             return None
-        if layer is self.window.mask_display.layers.get("filtered") and not self.state.filtering_is_current:
+        if layer is self.window.mask_display.layers.get("filtered") and self.state.proofreading_ids is None:
             return None
-        if self.scope.currentData() and label not in (self.state.filtering_result or {}).get("retained_ids", ()):
+        if self.scope.currentData() and label not in (self.state.proofreading_ids or ()):
             return None
         result = self.state.segmentation_result
         if result is None or not self.state.segmentation_is_current:
@@ -225,12 +244,21 @@ class GeometryPanel(CollapsibleSection):
         self.buttons["merge"].setEnabled(self.merge_target.isEnabled() and self.merge_target.currentIndex() >= 0)
         self.buttons["start"].setEnabled(current and not self.busy)
         self.buttons["undo"].setEnabled(current and not self.busy and bool(undo_stack(result.get("edit_history", ()))))
-        self.buttons["show_edited"].setEnabled(not self.busy and "edited" in self.window.mask_display.layers)
+        history = result.get("edit_history", ())
+        if history is not getattr(self, "_displayed_history", None):
+            self.history.clear()
+            self.history.addItems([f"Revision {r['result_revision']} · {r['operation']}" for r in reversed(history)])
+            self._displayed_history = history
         self.buttons["undo"].setVisible(self.buttons["undo"].isEnabled())
-        self.buttons["show_retained"].setVisible("retained" in self.window.mask_display.layers)
-        self.buttons["show_before"].setVisible("before" in self.window.mask_display.layers)
-        self.buttons["show_before"].setEnabled(not self.busy)
-        self.buttons["show_retained"].setEnabled(not self.busy)
+        self.advanced.setVisible(result.get("edited_masks") is not None)
+        self.buttons["show_edited"].setEnabled(not self.busy)
+        self.buttons["show_before"].setEnabled(not self.busy and bool(history) and (
+            "previous_reviewed_ids" in history[-1] or history[-1].get("editing_scope") == "filtered"))
+        self.buttons["show_retained"].setEnabled(not self.busy and self.state.proofreading_ids is not None)
+        self.scientific_status.setText(self.window.filtering.working_status)
+        self.scientific_status.setVisible(bool(result))
+        self.buttons["recalculate"].setVisible(self.state.geometry_pending)
+        self.buttons["recalculate"].setEnabled(not self.busy and not self.window.filtering.busy)
         if self.busy:
             active = self.viewer.layers.selection.active is self.layer and self.layer.visible
             can_paint = available and active and self.layer.editable and not self.paused
@@ -500,11 +528,19 @@ class GeometryPanel(CollapsibleSection):
             session.intensity_controls = controls
         self.discard()
         display = self.window.mask_display
-        layer = display.layers.get(display.preferences["mode"])
+        role = display.preferences.get("mode")
+        layer = display.layers.get("filtered" if self.state.provisional_ids is not None else role)
         if layer is not None and layer.visible:
             self.viewer.layers.selection.active = layer
             if selected is not None and any((plane == selected).any() for plane in layer.data):
                 self.window.mask_selection.restore_selection(layer, selected)
+
+        if self.auto_recalculate.isChecked():
+            self.recalculate()
+
+    def recalculate(self):
+        self.window.filtering.calculate()
+        self.refresh()
 
     def toggle_pause(self):
         self._require_preview()
@@ -545,7 +581,11 @@ class GeometryPanel(CollapsibleSection):
 
     def undo(self):
         if self.window._project_idle():
+            if self.state.filtering_result is not None:
+                self.state.active_session.intensity_controls = self.window.context_panel.mask_review_page.intensity_control_settings()
             GeometryEdit.undo(self.state)
+            if self.auto_recalculate.isChecked():
+                self.recalculate()
 
     def remove(self):
         self._require_preview()
@@ -602,10 +642,12 @@ class GeometryPanel(CollapsibleSection):
         self.status.setText(f"Merge preview retains ID {retained}. Save or discard.")
 
     def show_before(self):
+        self.window.segmentation.ensure_comparison("before")
         self.window.mask_display.show("before")
 
     def show_retained(self):
-        self.window.mask_display.show("retained")
+        self.window.mask_display.show("filtered")
 
     def show_edited(self):
+        self.window.segmentation.ensure_comparison("edited")
         self.window.mask_display.show("edited")

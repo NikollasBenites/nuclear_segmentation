@@ -48,7 +48,7 @@ class MaskContextMenu:
         layer = self.viewer.layers.selection.active
         if layer is not None and self.state.owns_mask_layer(layer) and any(
             layer.metadata.get(key) for key in ("nucytoseg_edit_preview", "nucytoseg_raw_segmentation",
-                                                "nucytoseg_retained_segmentation", "nucytoseg_edited_segmentation", "nucytoseg_filtered_segmentation")
+                                                "nucytoseg_edited_segmentation", "nucytoseg_filtered_segmentation")
         ):
             self.layer = layer
             layer.mouse_drag_callbacks.append(self._gesture)
@@ -61,9 +61,9 @@ class MaskContextMenu:
         if self.panel.busy:
             return layer is self.panel.layer and self.panel._owns_preview()
         layers = self.window.mask_display.layers
-        if layer is layers.get("filtered") and not self.state.filtering_is_current:
+        if layer is layers.get("filtered") and self.state.proofreading_ids is None:
             return False
-        return any(layer is layers.get(role) for role in ("raw", "edited", "retained", "filtered"))
+        return any(layer is layers.get(role) for role in ("raw", "edited", "filtered"))
 
     def _label_at(self, layer, position, axes, direction):
         if not self._can_pick(layer) or tuple(self.viewer.dims.displayed) != axes:
@@ -115,7 +115,7 @@ class MaskContextMenu:
             review = self.window.context_panel.mask_review_page
             source = effective_masks(self.state.segmentation_result)
             scope_ok = (not self.panel.scope.currentData()
-                        or hit.label in (self.state.filtering_result or {}).get("retained_ids", ()))
+                        or hit.label in (self.state.proofreading_ids or ()))
             if (subpage in ("filtering", "mask_editing") and scope_ok and self.state.segmentation_is_current
                     and self.window._project_idle() and not review._filter_timer.isActive()
                     and (source is hit.layer.data or any((plane == hit.label).any() for plane in source))):

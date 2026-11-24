@@ -229,7 +229,7 @@ class ZCorrectionController(QObject):
                 working_offset_yx=list(self.project_state.working_offset_yx),
             )
             self.project_state.set_z_correction_preview(
-                index, report["options"], report
+                index, report["options"], report, pixels=previews[index]
             )
             self.panel.set_channel_state(index, "Preview ready")
         self._set_previews(previews, preview_index)

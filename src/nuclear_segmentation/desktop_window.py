@@ -240,6 +240,7 @@ class DesktopWindow(QMainWindow):
         self.mask_display = SessionMaskDisplay(self.embedding.viewer, self.project_state, self.mask_selection, self)
         self.mask_display.status.connect(review_panel.set_visualization_status)
         self.mask_display.changed.connect(self._mark_project_dirty)
+        self.mask_display.changed.connect(self._release_comparisons)
         self.mask_selection.selection_changed.connect(self.mask_display.selection_changed)
         self.mask_selection.selection_cleared.connect(self.mask_display.selection_cleared)
         self.filtering.display_updated.connect(self._sync_mask_display)
@@ -329,6 +330,10 @@ class DesktopWindow(QMainWindow):
         self.layer_panel = LayerPanel(self.embedding.viewer)
         layers_layout = QVBoxLayout()
         layers_layout.setContentsMargins(0, 0, 0, 0)
+        self.working_mask_status = QLabel()
+        self.working_mask_status.setWordWrap(True)
+        self.working_mask_status.setAccessibleName("Working mask scientific status")
+        layers_layout.addWidget(self.working_mask_status)
         layers_layout.addWidget(self.layer_panel)
         self.layers_section.set_content_layout(layers_layout)
         layout.addWidget(self.layers_section, 1)
@@ -1387,14 +1392,19 @@ class DesktopWindow(QMainWindow):
         self.selected_mask_panel.set_selection(layer, mask_id)
         if layer is None or layer not in (
             self.segmentation.result_layer, self.filtering.filtered_layer,
-            self.mask_display.layers.get("edited"), self.mask_display.layers.get("retained"), self.geometry_panel.layer,
+            self.mask_display.layers.get("edited"), self.geometry_panel.layer,
         ):
             layer = mask_id = None
         self.context_panel.mask_review_page.set_selection(layer, mask_id)
 
+    def _release_comparisons(self):
+        if not self.mask_display.suspended and not self.project_state.restoring_project:
+            self.segmentation.release_hidden_comparisons()
+
     def _sync_mask_display(self, *args):
         if not self.project_state.restoring_project:
             self.mask_display.sync(restore_selection=True)
+            self._release_comparisons()
 
     def set_workflow(self, key: str) -> None:
         self.navigation.set_workflow(key)

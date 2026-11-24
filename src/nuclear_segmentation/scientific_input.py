@@ -34,6 +34,7 @@ class ScientificInputSnapshot:
     crop_mask_yx: np.ndarray | None
     _config: dict[str, Any]
     _provenance: dict[str, Any]
+    corrected_measurements: dict[str, np.ndarray] | None = None
 
     def config(self) -> dict[str, Any]:
         return deepcopy(self._config)
@@ -148,7 +149,7 @@ def validate_scientific_input(project_state, config: dict[str, Any], *, complete
     return validated
 
 
-def capture_scientific_input(project_state, config: dict[str, Any], *, completed_result=None) -> ScientificInputSnapshot:
+def capture_scientific_input(project_state, config: dict[str, Any], *, completed_result=None, measurement=False) -> ScientificInputSnapshot:
     validated = validate_scientific_input(project_state, config, completed_result=completed_result)
     crop_mask = project_state.roi_mask_yx
     normalization = project_state.normalization_configuration or {}
@@ -160,6 +161,7 @@ def capture_scientific_input(project_state, config: dict[str, Any], *, completed
         normalization_report=deepcopy(report),
         image_czyx=np.asarray(project_state.working_dataset.data_czyx),
         crop_mask_yx=None if crop_mask is None else np.asarray(crop_mask, dtype=bool),
+        corrected_measurements=project_state.corrected_measurement_volumes() if measurement else None,
         _config=validated,
         _provenance=scientific_input_provenance(project_state, validated),
     )
@@ -203,7 +205,10 @@ def prepare_captured_scientific_input(snapshot: ScientificInputSnapshot) -> Scie
         roi_source="inferred_" + validated["MNTB_ROI_MODE"] if roi is not None else None,
         crop_inclusion_mask_yx=snapshot.crop_mask_yx,
     )
-    prepare_volumes(namespace)
+    if snapshot.corrected_measurements is None:
+        prepare_volumes(namespace)
+    else:
+        namespace["channel_volumes"].update(snapshot.corrected_measurements)
     return ScientificInput(namespace=namespace, provenance=provenance)
 
 

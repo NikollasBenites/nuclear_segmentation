@@ -11,7 +11,7 @@ from .core import (
     calculate_mask_properties, calculate_perinuclear_marker_metrics, safe_key,
 )
 from .filtering import apply_filter_settings, apply_object_filters
-from .geometry_edit import effective_masks
+from .geometry_edit import effective_masks, retained_geometry
 from .manual_review import ManualReview
 from .normalization import mask_digest
 from .runtime import validate_roi_geometry
@@ -22,7 +22,7 @@ def calculate_filtering_prerequisites(project_state, config):
     """Measure the committed session geometry with the same functions as legacy stages."""
     segmentation = project_state.segmentation_result
     return _measure(
-        capture_scientific_input(project_state, config, completed_result=segmentation), effective_masks(segmentation),
+        capture_scientific_input(project_state, config, completed_result=segmentation, measurement=True), effective_masks(segmentation),
         segmentation.get("input_provenance", {}),
     )
 
@@ -176,10 +176,10 @@ class FilteringController(QObject):
         if self.busy or any(item.busy for item in self.conflict_operations) or not self.state.segmentation_is_current: return False
         try:
             job = capture_scientific_input(
-                self.state, self._measurement_config(), completed_result=self.state.segmentation_result
+                self.state, self._measurement_config(), completed_result=self.state.segmentation_result, measurement=True
             )
         except Exception as error:
-            self.status_changed.emit(f"Measurements unavailable: {error}")
+            self._measurement_error(str(error))
             return False
         self._pending_filter_settings = (
             deepcopy(self.panel.filter_settings())
@@ -187,7 +187,7 @@ class FilteringController(QObject):
         )
         session = self.state.active_session
         if (self.state.filtering_result is None
-                and session.display_state.get("pending_geometry_revision") == session.geometry_revision):
+                and self.state.geometry_pending):
             self._pending_filter_settings = deepcopy(session.filter_controls)
         legacy = self.state.legacy_import
         if self._pending_filter_settings is None and legacy and self.state.segmentation_result.get("legacy_imported"):
@@ -199,8 +199,32 @@ class FilteringController(QObject):
         worker.finished.connect(thread.quit); worker.finished.connect(worker.deleteLater); thread.finished.connect(self._finished); thread.finished.connect(thread.deleteLater)
         self._worker, self._thread = worker, thread; self.panel.calculate_button.setEnabled(False)
         self._job = job
-        self.panel.measurement_status.setText("Calculating existing scientific measurements…")
+        self.state.active_session.measurement_error = None
+        self.panel.measurement_status.setText(self.working_status)
+        self.status_changed.emit(self.working_status)
         thread.start(); return True
+    @property
+    def working_status(self):
+        state = self.state
+        if self._job is not None and self._job.owner == state.session_revision() and self._worker is not None:
+            if self._worker.measurement_revision == state.active_session.measurement_revision:
+                return "Recalculating measurements and filters…"
+        if error := state.active_session.measurement_error:
+            return f"Recalculation failed — {error}. Retry Recalculate Measurements."
+        if state.filtering_is_current:
+            return "Measurements up to date"
+        incompatible = (state.filtering_result or {}).get("incompatible_settings")
+        if incompatible:
+            return "Review incompatible filters for " + ", ".join(incompatible) + " and recalculate."
+        if state.geometry_pending:
+            ids = state.provisional_ids
+            if ids is None:
+                return "Manual edits saved — recalculation required to establish retained objects"
+            return f"Manual edits saved — recalculation required · {len(ids):,} retained in preview"
+        if state.filtering_result is not None:
+            return "Recalculation required"
+        return "Measurements have not been calculated."
+
     def _measurement_config(self):
         result = self.state.segmentation_result or {}
         executed = result.get("scientific_config")
@@ -228,7 +252,10 @@ class FilteringController(QObject):
             self.panel.measurement_status.setText(message)
             self.status_changed.emit(message)
             return
-        self._calculated(result)
+        try:
+            self._calculated(result)
+        except (KeyError, ValueError, TypeError) as error:
+            self._measurement_error(str(error))
 
     def _calculated(self, result):
         if self._roi_is_compatible(result):
@@ -244,7 +271,7 @@ class FilteringController(QObject):
             )
         session = self.state.active_session
         reviewing_settings = bool((self.state.filtering_result or {}).get("incompatible_settings"))
-        pending = session.display_state.get("pending_geometry_revision") == session.geometry_revision
+        pending = self.state.geometry_pending
         controls = {}
         incompatible = []
         if pending and not reviewing_settings and self._pending_filter_settings is not None:
@@ -284,31 +311,76 @@ class FilteringController(QObject):
         self.panel.configure_filtering(result, current=not incompatible)
         if pending:
             self.panel.restore_intensity_controls(controls)
-            session.filter_controls = result["settings"]
+            session.filter_controls = deepcopy(result["settings"])
             session.intensity_controls = self.panel.intensity_control_settings()
-            if not incompatible:
-                self.viewer.layers.selection.active = self.filtered_layer
         if incompatible:
-            self.filtered_layer.name = "Live filtered masks — outdated"
+            self.filtered_layer.name = "Live filtered masks — recalculation required"
             message = "Review incompatible filter settings for " + ", ".join(dict.fromkeys(incompatible)) + " and recalculate."
             self.panel.measurement_status.setText(message)
         else:
             message = "Scientific measurements and preliminary filters are ready."
         self.status_changed.emit(message)
     def _failed(self, text):
-        message = str(text).strip().splitlines()[-1]; self.panel.measurement_status.setText("Measurement failed: " + message); self.status_changed.emit("Measurement failed: " + message)
+        if (self._job is not None and self._job.owner == self.state.session_revision()
+                and self._worker.measurement_revision == self.state.active_session.measurement_revision):
+            self._measurement_error(str(text).strip().splitlines()[-1])
+
+    def _measurement_error(self, detail):
+        self.state.active_session.measurement_error = detail
+        message = f"Measurement failed: {detail}. Retry Recalculate Measurements."
+        self.panel.measurement_status.setText(message)
+        self.status_changed.emit(message)
+
     def _finished(self):
-        self._thread = None; self._worker = None; self._pending_filter_settings = None; self.panel.calculate_button.setEnabled(self.state.segmentation_is_current)
-        self._job = None
+        self._thread = self._worker = self._pending_filter_settings = self._job = None
+        self.panel.calculate_button.setEnabled(self.state.segmentation_is_current)
+        self.status_changed.emit(self.working_status)
+
+    def _update_working_layer(self, data):
+        layer = self.filtered_layer
+        owner = self.state.mask_layer_metadata()
+        if (layer is None or layer not in self.viewer.layers
+                or any(layer.metadata.get(k) != owner[k] for k in ("project_id", "session_id"))):
+            self.clear_layers()
+            spacing = tuple(self.state.voxel_spacing_zyx_um)
+            oy, ox = self.state.working_offset_yx
+            layer = self.viewer.add_labels(
+                data, name="Live filtered masks", scale=spacing, translate=(0, oy * spacing[1], ox * spacing[2]),
+                metadata={**owner, "nucytoseg_filtered_segmentation": True},
+            )
+            self.filtered_layer = layer
+        else:
+            layer.metadata.update(owner)
+            if layer.data is not data:
+                layer.data = data
+        if layer.name in ("Live filtered masks — outdated", "Live filtered masks — recalculation required"):
+            layer.name = "Live filtered masks"
+        layer.editable = False
+
+    def _sync_provisional(self):
+        ids = self.state.provisional_ids
+        if ids is None:
+            return False
+        if not self.state.owns_mask_layer(self.filtered_layer) or self.filtered_layer not in self.viewer.layers:
+            result = self.state.segmentation_result
+            masks = effective_masks(result)
+            projection = masks if len(ids) == result["edited_object_count"] else retained_geometry(masks, ids)
+            self._update_working_layer(projection)
+        self._clear_roi_layer()
+        return True
+
     def _create_layers(self, result):
-        spacing = tuple(self.state.voxel_spacing_zyx_um); oy, ox = self.state.working_offset_yx; translate = (0, oy * spacing[1], ox * spacing[2])
-        self.clear_layers()
-        self.filtered_layer = self.viewer.add_labels(result["filtered_masks"], name="Live filtered masks", scale=spacing, translate=translate,
-            metadata={**self.state.mask_layer_metadata(), "nucytoseg_filtered_segmentation": True})
-        self.filtered_layer.editable = False
+        previously_active = self.viewer.layers.selection.active
+        if not self._sync_provisional():
+            self._update_working_layer(result["filtered_masks"])
+        self._clear_roi_layer()
         if result["scientific_roi"] is not None:
             self._create_roi_layer(result["scientific_roi"], result.get("roi_reviewed"), editable=True)
         self.display_updated.emit()
+        if previously_active in self.viewer.layers and previously_active.visible:
+            self.viewer.layers.selection.active = previously_active
+        elif self.filtered_layer.visible:
+            self.viewer.layers.selection.active = self.filtered_layer
 
     def _create_roi_layer(self, roi, reviewed, *, editable=False):
         spacing = self.state.voxel_spacing_zyx_um
@@ -335,7 +407,7 @@ class FilteringController(QObject):
                 roi = np.asarray(self.roi_layer.data) > 0
             updated = self._result_with_settings(current, settings, roi)
             self.state.set_filtering_result(updated)
-            if self.filtered_layer is not None: self.filtered_layer.data = updated["filtered_masks"]
+            self._update_working_layer(updated["filtered_masks"])
             self.display_updated.emit()
             self.panel.update_filter_summary(updated, True); self.panel.update_selected_properties(self.panel._selected_id)
         except ValueError as error: self.panel.show_filter_error(f"Invalid filter settings: {error}")
@@ -447,8 +519,11 @@ class FilteringController(QObject):
         )
     def _state_changed(self, result, current):
         if result is None:
-            self.clear_project()
+            if not self._sync_provisional():
+                self.clear_project()
             self.panel.configure_filtering(None, False)
+            if self.state.geometry_pending:
+                self.panel.measurement_status.setText(self.working_status)
         elif not current:
             if self.filtered_layer is not None: self.filtered_layer.name = "Live filtered masks — outdated"
             if self.roi_layer is not None:
@@ -472,14 +547,20 @@ class FilteringController(QObject):
             message = "Perinuclear positive-fraction filters updated from cached measurements."
         self.panel.measurement_status.setText(message)
         self.status_changed.emit(message)
-    def clear_layers(self):
+    def _clear_roi_layer(self):
         if self.roi_layer is not None and self._roi_callback is not None:
             for name in self._roi_events:
                 getattr(self.roi_layer.events, name).disconnect(self._roi_callback)
             self._roi_callback = None
-        for layer in (self.filtered_layer, self.roi_layer):
-            if layer is not None and layer in self.viewer.layers: self.viewer.layers.remove(layer)
-        self.filtered_layer = self.roi_layer = None
+        if self.roi_layer is not None and self.roi_layer in self.viewer.layers:
+            self.viewer.layers.remove(self.roi_layer)
+        self.roi_layer = None
+
+    def clear_layers(self):
+        self._clear_roi_layer()
+        if self.filtered_layer is not None and self.filtered_layer in self.viewer.layers:
+            self.viewer.layers.remove(self.filtered_layer)
+        self.filtered_layer = None
     def clear_project(self):
         self.clear_layers()
         self._manual_review_cache = None

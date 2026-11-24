@@ -2,16 +2,15 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 import traceback
-from weakref import ref
 
 import numpy as np
 from qtpy.QtCore import QObject, QThread, QTimer, Signal, Slot
 
+from .geometry_edit import effective_masks, previous_reviewed_ids, retained_geometry
 from .runtime import execute_stage
 from .scientific_input import capture_scientific_input, prepare_captured_scientific_input
 
@@ -128,9 +127,7 @@ class SegmentationController(QObject):
         self._job = None
         self._result_layer = None
         self._edited_layer = None
-        self._retained_layer = None
         self._before_layer = None
-        self._filtered_reference = None
         self._started = None
         self._timer = QTimer(self)
         self._timer.setInterval(250)
@@ -143,7 +140,6 @@ class SegmentationController(QObject):
         panel.run_requested.connect(self.run)
         panel.configuration_changed.connect(self._configuration_changed)
         project_state.segmentation_result_changed.connect(self._sync_result_layer)
-        project_state.filtering_result_changed.connect(self._filtering_changed)
         project_state.sessions_changed.connect(self._refresh_result_layer_name)
 
     @property
@@ -283,8 +279,6 @@ class SegmentationController(QObject):
         )
 
     def _sync_result_layer(self, result, current: bool) -> None:
-        filtered_reference = self._filtered_reference
-        self._filtered_reference = None
         if result is None:
             self.clear_project()
             return
@@ -300,68 +294,27 @@ class SegmentationController(QObject):
             and np.shape(result["masks"]) == state.working_dataset.standardized_shape[1:]
         )
         if current or display_outdated:
-            self.clear_project()
-            spacing = tuple(self.project_state.voxel_spacing_zyx_um)
-            offset_y, offset_x = self.project_state.working_offset_yx
-            self._result_layer = self.viewer.add_labels(
-                result["masks"], name=self._result_layer_name(current), scale=spacing,
-                visible=state.active_session.display_state.get("mode") not in ("retained", "before"),
-                translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
-                metadata={
-                    **state.mask_layer_metadata(),
-                    "nucytoseg_raw_segmentation": True,
-                    "session_display_name": state.active_session.display_name,
-                },
-            )
-            self._result_layer.editable = False
-            if result.get("edited_masks") is not None and (
-                result.get("edit_history") or not np.array_equal(result["edited_masks"], result["masks"])
-            ):
-                self._edited_layer = self.viewer.add_labels(
-                    result["edited_masks"], name=f"{state.active_session.display_name} · Committed — All (Diagnostic)",
-                    visible=state.active_session.display_state.get("mode") not in ("retained", "before"),
-                    scale=spacing, translate=self._result_layer.translate,
-                    metadata={**state.mask_layer_metadata(), "nucytoseg_edited_segmentation": True},
+            self._clear_comparisons()
+            if self.result_layer is not None and self.result_layer.data is result["masks"]:
+                self.result_layer.metadata.update(state.mask_layer_metadata())
+                self.result_layer.name = self._result_layer_name(current)
+            else:
+                self.clear_project()
+                spacing = tuple(state.voxel_spacing_zyx_um)
+                offset_y, offset_x = state.working_offset_yx
+                self._result_layer = self.viewer.add_labels(
+                    result["masks"], name=self._result_layer_name(current), scale=spacing,
+                    translate=(0.0, offset_y * spacing[1], offset_x * spacing[2]),
+                    metadata={**state.mask_layer_metadata(), "nucytoseg_raw_segmentation": True,
+                              "session_display_name": state.active_session.display_name},
                 )
-                self._edited_layer.editable = False
-                history = result.get("edit_history", ())
-                display = state.active_session.display_state
-                if (current and history and "reviewed_ids" in history[-1]
-                        and display.get("pending_geometry_revision") == history[-1]["result_revision"]):
-                    masks = result["edited_masks"]
-                    ids = history[-1]["reviewed_ids"]
-                    retained = masks
-                    if len(ids) != result["edited_object_count"]:
-                        retained = np.zeros_like(masks)
-                        if ids:
-                            for z, plane in enumerate(masks):
-                                np.copyto(retained[z], plane, where=np.isin(plane, ids))
-                        retained.setflags(write=False)
-                    record = history[-1]
-                    source_owner = replace(state.session_revision(), geometry_revision=record["source_revision"])
-                    snapshot = None
-                    if filtered_reference and filtered_reference[0] == source_owner:
-                        snapshot = filtered_reference[1]()
-                    if snapshot is None:
-                        # A filtered edit cannot touch excluded voxels. Reverse just its
-                        # validated changes in the retained output to recover the input.
-                        snapshot = retained.copy()
-                        snapshot.flat[record["indexes"]] = record["before"]
-                        snapshot.setflags(write=False)
-                    self._before_layer = self.viewer.add_labels(
-                        snapshot, name=f"{state.active_session.display_name} · Filtered — Before Editing (Outdated)",
-                        visible=False, scale=spacing, translate=self._result_layer.translate,
-                        metadata={**state.mask_layer_metadata(), "nucytoseg_before_editing": True,
-                                  "source_geometry_revision": record["source_revision"]},
-                    )
-                    self._before_layer.editable = False
-                    self._retained_layer = self.viewer.add_labels(
-                        retained, name=f"{state.active_session.display_name} · Committed — Retained (Provisional)",
-                        visible=display.get("mode") == "retained",
-                        scale=spacing, translate=self._result_layer.translate,
-                        metadata={**state.mask_layer_metadata(), "nucytoseg_retained_segmentation": True},
-                    )
-                    self._retained_layer.editable = False
+                self._result_layer.editable = False
+            display = state.active_session.display_state
+            mode = display.get("mode")
+            for role in ("before", "edited"):
+                if (mode == role or (mode == "selected" and display.get("selected_layer") == role)
+                        or (mode == "custom" and display.get(role, {}).get("visible"))):
+                    self.ensure_comparison(role)
         elif self._result_layer is not None and self._result_layer in self.viewer.layers:
             self._result_layer.name = self._result_layer_name(current)
 
@@ -382,24 +335,61 @@ class SegmentationController(QObject):
             layer.metadata["session_display_name"] = display_name
             layer.name = self._result_layer_name(state.segmentation_is_current)
 
-    def _filtering_changed(self, result, current):
-        if current and result is not None:
-            self._filtered_reference = (self.project_state.session_revision(), ref(result["filtered_masks"]))
-            self._remove_retained()
+    def ensure_comparison(self, role):
+        state = self.project_state
+        result = state.segmentation_result or {}
+        masks = result.get("edited_masks")
+        if masks is None or self.result_layer is None:
+            return
+        if role == "edited":
+            if self._edited_layer in self.viewer.layers:
+                return
+            data = effective_masks(result)
+            title = "Complete Committed Geometry (Diagnostic)"
+            metadata = {"nucytoseg_edited_segmentation": True}
+        else:
+            history = result.get("edit_history", ())
+            if not history or self._before_layer in self.viewer.layers:
+                return
+            record = history[-1]
+            ids = previous_reviewed_ids(record)
+            if ids is None:
+                return
+            # Reverse the delta and project onto the selection at the source revision.
+            data = retained_geometry(masks, ids)
+            data.setflags(write=True)
+            before = record["before"]
+            data.flat[record["indexes"]] = np.where(np.isin(before, ids), before, 0)
+            data.setflags(write=False)
+            title = "Filtered — Before Editing (Historical)"
+            metadata = {"nucytoseg_before_editing": True, "source_geometry_revision": record["source_revision"]}
+        layer = self.viewer.add_labels(
+            data, name=f"{state.active_session.display_name} · {title}", visible=False,
+            scale=self.result_layer.scale, translate=self.result_layer.translate,
+            metadata={**state.mask_layer_metadata(), **metadata},
+        )
+        layer.editable = False
+        if role == "edited":
+            self._edited_layer = layer
+        else:
+            self._before_layer = layer
 
-    def _remove_retained(self):
-        if self._before_layer is not None and self._before_layer in self.viewer.layers:
-            self.viewer.layers.remove(self._before_layer)
-        self._before_layer = None
-        if self._retained_layer is not None and self._retained_layer in self.viewer.layers:
-            self.viewer.layers.remove(self._retained_layer)
-        self._retained_layer = None
+    def release_hidden_comparisons(self):
+        for attr in ("_edited_layer", "_before_layer"):
+            layer = getattr(self, attr)
+            if layer is not None and not layer.visible:
+                if layer in self.viewer.layers:
+                    self.viewer.layers.remove(layer)
+                setattr(self, attr, None)
+
+    def _clear_comparisons(self):
+        for layer in (self._edited_layer, self._before_layer):
+            if layer is not None and layer in self.viewer.layers:
+                self.viewer.layers.remove(layer)
+        self._edited_layer = self._before_layer = None
 
     def clear_project(self) -> None:
-        self._remove_retained()
-        if self._edited_layer is not None and self._edited_layer in self.viewer.layers:
-            self.viewer.layers.remove(self._edited_layer)
-        self._edited_layer = None
+        self._clear_comparisons()
         if self._result_layer is not None and self._result_layer in self.viewer.layers:
             self.viewer.layers.remove(self._result_layer)
         self._result_layer = None
@@ -414,7 +404,6 @@ class SegmentationController(QObject):
         self.clear_project()
         self.panel.run_requested.disconnect(self.run)
         self.panel.configuration_changed.disconnect(self._configuration_changed)
-        self.project_state.filtering_result_changed.disconnect(self._filtering_changed)
         self.project_state.sessions_changed.disconnect(self._refresh_result_layer_name)
         self.project_state.segmentation_result_changed.disconnect(
             self._sync_result_layer

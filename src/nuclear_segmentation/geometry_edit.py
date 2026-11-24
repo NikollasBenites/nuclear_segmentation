@@ -1,4 +1,5 @@
 """Session-scoped label transactions. History stores changed voxels per commit."""
+from copy import deepcopy
 from datetime import datetime, timezone
 
 import numpy as np
@@ -9,6 +10,43 @@ from .manual_review import mask_signature
 def effective_masks(result):
     edited = result.get("edited_masks")
     return result["masks"] if edited is None else edited
+
+
+def retained_geometry(masks, ids):
+    """Materialize a read-only display projection with plane-sized scratch space."""
+    out = np.zeros_like(masks)
+    for z, plane in enumerate(masks):
+        np.copyto(out[z], plane, where=np.isin(plane, ids))
+    out.setflags(write=False)
+    return out
+
+
+def previous_reviewed_ids(record):
+    if "previous_reviewed_ids" in record:
+        return record["previous_reviewed_ids"]
+    if record.get("editing_scope") == "filtered" and "reviewed_ids" in record:
+        # Phase 2D.4.3 filtered edits could only create/remove visible IDs.
+        return sorted(set(record["reviewed_ids"]).difference(record["new_ids"]) | set(record["removed_ids"]))
+    return None
+
+
+def reconcile_all_mask_edit(record, previous):
+    """Propagate a proofreading selection only when the edited labels have clear membership."""
+    kept = set(previous)
+    params = record["parameters"]
+    if record["operation"] == "split" and params["parent"] in kept:
+        kept.add(params["new_id"])
+    elif record["operation"] == "merge":
+        members = set(params["ids"])
+        if members & kept and members - kept:
+            return None
+    elif record["operation"] == "paint/erase":
+        before, after = record["before"], record["after"]
+        transferred = (before != 0) & (after != 0)
+        if record["new_ids"] or np.any(np.isin(before[transferred], previous)
+                                       != np.isin(after[transferred], previous)):
+            return None
+    return sorted(kept.difference(record["removed_ids"]))
 
 
 def undo_stack(history):
@@ -34,24 +72,30 @@ class GeometryEdit:
         previous_ids = (label for record in result.get("edit_history", ()) for label in record["affected_ids"])
         self.next_id = 1 + max(int(self.base.max()), int(result["masks"].max()), max(previous_ids, default=0))
         self.filter_record = state.filtering_result if state.filtering_is_current else None
-        if filtered and self.filter_record is None:
+        self.retained_ids = state.proofreading_ids
+        if filtered and self.retained_ids is None:
             raise ValueError("Current filtering is unavailable.")
         self.filtered = filtered
         self._excluded_ids = None
-        source = self.filter_record["filtered_masks"] if filtered else self.base
+        source = self.filter_record["filtered_masks"] if filtered and self.filter_record is not None else self.base
         self.preview = np.array(source, dtype=np.promote_types(self.base.dtype, np.uint32),
                                 order="C", copy=True)
+        if filtered and self.filter_record is None:
+            self._restore_or_hide(self.preview, True)
         self.paused = False
         self.operation = "paint/erase"
         self.parameters = {}
 
     @property
     def filter_current(self):
-        return (self.filter_record is not None and self.state.filtering_is_current
+        if self.filter_record is None:
+            return (self.retained_ids is not None and self.state.provisional_ids is self.retained_ids
+                    and self.owner == self.state.session_revision())
+        return (self.state.filtering_is_current
                 and self.state.filtering_result is self.filter_record)
 
     def has_changes(self):
-        source = self.filter_record["filtered_masks"] if self.filtered else self.base
+        source = self._visible_planes() if self.filtered else self.base
         return any(not np.array_equal(a, b) for a, b in zip(self.preview, source, strict=True))
 
     def is_pristine(self):
@@ -63,8 +107,15 @@ class GeometryEdit:
             ids = set()
             for plane in self.base:
                 ids.update(map(int, np.unique(plane)))
-            self._excluded_ids = tuple(ids.difference(self.filter_record["retained_ids"], {0}))
+            self._excluded_ids = tuple(ids.difference(self.retained_ids, {0}))
         return self._excluded_ids
+
+    def _visible_planes(self):
+        if self.filter_record is not None:
+            yield from self.filter_record["filtered_masks"]
+        else:
+            for plane in self.base:
+                yield np.where(np.isin(plane, self.retained_ids), plane, 0)
 
     def allows_label(self, label):
         return not self.filtered or label not in self.excluded_ids
@@ -72,7 +123,7 @@ class GeometryEdit:
     def _validate_scope(self):
         if not self.filter_current:
             raise ValueError("Filtering changed. Discard the preview and start again.")
-        visible = self.filter_record["filtered_masks"]
+        visible = self._visible_planes()
         for base, kept, preview in zip(self.base, visible, self.preview, strict=True):
             hidden = base != kept
             expected = kept if self.filtered else base
@@ -94,7 +145,7 @@ class GeometryEdit:
         self.filtered = filtered
 
     def _restore_or_hide(self, target, hide):
-        for base, kept, plane in zip(self.base, self.filter_record["filtered_masks"], target, strict=True):
+        for base, kept, plane in zip(self.base, self._visible_planes(), target, strict=True):
             hidden = base != kept
             plane[hidden] = 0 if hide else base[hidden]
 
@@ -183,6 +234,16 @@ class GeometryEdit:
             for plane in self.preview:
                 visible_ids.update(map(int, np.unique(plane)))
             record["reviewed_ids"] = sorted(visible_ids - {0})
+        if self.retained_ids is not None:
+            record["previous_reviewed_ids"] = sorted(map(int, self.retained_ids))
+        if self.operation == "undo":
+            restored = previous_reviewed_ids(undo_stack(result["edit_history"])[-1])
+            if restored is not None:
+                record["reviewed_ids"] = restored
+        elif not self.filtered and self.retained_ids is not None:
+            reconciled = reconcile_all_mask_edit(record, record["previous_reviewed_ids"])
+            if reconciled is not None:
+                record["reviewed_ids"] = reconciled
         filtering = state.filtering_result
         if filtering is not None:
             record["filter_definitions"] = {
@@ -202,17 +263,26 @@ class GeometryEdit:
                       edited_object_count=len(result_ids),
                       geometry_revision=revision + 1, manual_review=None)
         if state.filtering_result is not None and "settings" in state.filtering_result:
-            state.active_session.filter_controls = state.filtering_result["settings"]
-        elif state.active_session.display_state.get("pending_geometry_revision") != revision:
+            state.active_session.filter_controls = deepcopy(state.filtering_result["settings"])
+        elif state.active_session.pending_geometry_revision != revision:
             state.active_session.filter_controls = None
             state.active_session.intensity_controls = None
-        state.clear_filtering_result()
+        state.clear_filtering_result(emit=False)
         state.scientific_roi_reviewed = False
-        state.scientific_roi_changed.emit(state.scientific_roi, False)
         state.segmentation_result = stored
         display = state.active_session.display_state
-        display["pending_geometry_revision"] = revision + 1
-        display["mode"] = "retained" if self.filtered else "edited"
+        state.active_session.pending_geometry_revision = revision + 1
+        state.active_session.measurement_error = None
+        if "reviewed_ids" in record:
+            if display.get("mode") == "selected" and display.get("selected_id") in record["reviewed_ids"]:
+                display.update(selected_layer="filtered", geometry_revision=revision + 1)
+            elif display.get("mode") != "custom":
+                display["mode"] = "filtered"
+        else:
+            display["mode"] = "edited"
+        state.scientific_roi_changed.emit(state.scientific_roi, False)
+        state.filtering_result_changed.emit(None, False)
+        state.quantification_result_changed.emit(None, False)
         state.segmentation_result_changed.emit(stored, True)
 
     @classmethod
@@ -264,7 +334,7 @@ def validate_history(result, session):
             raise ValueError("Geometry timestamps require a time zone.")
         if "reviewed_ids" in record:
             reviewed = record["reviewed_ids"]
-            if (record.get("editing_scope") != "filtered" or not isinstance(reviewed, list)
+            if (record.get("editing_scope") not in ("all", "filtered") or not isinstance(reviewed, list)
                     or any(type(label) is not int or label <= 0 for label in reviewed)
                     or reviewed != sorted(set(reviewed)) or not set(reviewed).issubset(np.unique(masks))):
                 raise ValueError("Invalid provisional retained IDs in geometry history.")
@@ -277,6 +347,20 @@ def validate_history(result, session):
                 or not np.array_equal(masks.flat[indexes], record["after"])):
             raise ValueError("Incompatible geometry edit history.")
         masks.flat[indexes] = record["before"]
+        previous = record.get("previous_reviewed_ids")
+        if previous is not None and (not isinstance(previous, list)
+                or any(type(label) is not int or label <= 0 for label in previous)
+                or previous != sorted(set(previous)) or not set(previous).issubset(np.unique(masks))):
+            raise ValueError("Invalid pre-edit retained IDs in geometry history.")
+        if previous is not None and record["operation"] != "undo":
+            if record["editing_scope"] == "filtered":
+                expected = sorted(set(previous).difference(record["removed_ids"]) | set(record["new_ids"]))
+                if not np.isin(record["before"], [0, *previous]).all():
+                    raise ValueError("Filtered history modifies an excluded object.")
+            else:
+                expected = reconcile_all_mask_edit(record, previous)
+            if record.get("reviewed_ids") != expected:
+                raise ValueError("Retained IDs disagree with the recorded geometry edit.")
         signature = mask_signature(masks)
         if signature != record["before_signature"]:
             raise ValueError("Invalid geometry edit signature.")

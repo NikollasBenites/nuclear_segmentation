@@ -889,10 +889,10 @@ def test_session_display_survives_switches_filter_refresh_and_resume(project, tm
     window.mask_selection.select_mask(filtered, 90000)
     panel.show_selected_button.click()
     assert filtered.show_selected_label and filtered.selected_label == 90000
-    # Recalculate measurements through the normal worker, replacing the layer.
+    # Recalculate through the worker, preserving the same selected working layer.
     assert window.filtering.calculate()
     _wait(app, lambda: not window.filtering.busy)
-    assert filtered not in viewer.layers
+    assert filtered is window.filtering.filtered_layer and filtered in viewer.layers
     assert window.filtering.filtered_layer.opacity == .77
     assert window.filtering.filtered_layer.show_selected_label
     assert window.mask_selection.selected_layer is window.filtering.filtered_layer

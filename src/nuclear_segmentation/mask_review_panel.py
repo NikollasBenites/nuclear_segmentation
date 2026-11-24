@@ -284,7 +284,7 @@ class MaskReviewPanel(QWidget):
         layout = QVBoxLayout()
         layout.setContentsMargins(10, 8, 10, 10)
         self.show_raw_button = QPushButton("Show Raw Masks")
-        self.show_all_button = QPushButton("Show All Masks")
+        self.show_all_button = QPushButton("Show Live Filtered Masks")
         self.show_selected_button = QPushButton("Show Selected Mask Only")
         self.clear_button = QPushButton("Clear mask selection")
         self.show_raw_button.clicked.connect(self.show_raw_requested)
@@ -334,7 +334,6 @@ class MaskReviewPanel(QWidget):
         self._selected_is_raw = self.project_state.owns_mask_layer(layer) and bool(
             metadata.get("nucytoseg_raw_segmentation")
             or metadata.get("nucytoseg_edited_segmentation")
-            or metadata.get("nucytoseg_retained_segmentation")
             or metadata.get("nucytoseg_filtered_segmentation")
         )
         self._selected_identity = (
@@ -380,7 +379,8 @@ class MaskReviewPanel(QWidget):
         self.pages["roi_counting"].setEnabled(nuclear)
         self.calculate_button.setText(f"Calculate {role.title()} Measurements")
         if result is None:
-            self.measurement_status.setText("Measurements have not been calculated.")
+            self.measurement_status.setText("Manual edits saved — recalculation required" if self.project_state.geometry_pending
+                                            else "Measurements have not been calculated.")
             self.accept_roi_button.setEnabled(False)
             self.counting_error.hide()
             self.filter_summary.setText("Live filtering is unavailable.")
@@ -532,7 +532,7 @@ class MaskReviewPanel(QWidget):
     def update_selected_properties(self, mask_id):
         result = self.project_state.filtering_result
         if (
-            result is None or mask_id is None
+            not self.project_state.filtering_is_current or result is None or mask_id is None
             or self._selected_identity != self.project_state.mask_identity(mask_id)
             or int(mask_id) not in result["properties"].index
         ):
@@ -691,8 +691,8 @@ class MaskReviewPanel(QWidget):
             )
         self._refresh_actions()
         session = self.project_state.active_session
-        if current and session.display_state.get("pending_geometry_revision") == session.geometry_revision:
-            self.measurement_status.setText("Geometry changed. Recalculate measurements and filtering.")
+        if self.project_state.geometry_pending:
+            self.measurement_status.setText("Manual edits saved — recalculation required")
             if session.filter_controls is not None:
                 self.filter_summary.setText("Previous filter settings are available for recalculation.")
         self.calculate_button.setEnabled(result is not None and current)

@@ -661,15 +661,33 @@ def test_edited_export_preserves_raw_and_uses_committed_marker_geometry(scientif
     edit = GeometryEdit(state)
     edit.remove(13)
     edit.commit()
+    edit = GeometryEdit(state, filtered=True)
+    removed_voxel = tuple(np.argwhere(raw == 37)[0])
+    edit.preview[removed_voxel] = 0
+    edit.commit()
+    expected = np.where(raw == 13, 0, raw)
+    expected[removed_voxel] = 0
+    rejected = tmp_path / "provisional"
+    window.geometry_panel.show_before()
+    assert not window.image_export.export_scientific(rejected) and not rejected.exists()
+    assert not state.quantification_is_current
     assert window.filtering.calculate()
     _wait(qapp, lambda: not window.filtering.busy)
     window.filtering.accept_roi()
     panel = window.context_panel.export_page
     for key, field in panel.scientific_options.items():
-        field.setChecked(key == "tiff")
+        field.setChecked(key in ("tiff", "csv"))
+    window.geometry_panel.show_before()
     destination = tmp_path / "edited"
     assert window.image_export.export_scientific(destination)
     _wait(qapp, lambda: not window.image_export.busy)
+    assert pd.read_csv(destination / "retained_mask_properties.csv")["label"].tolist() == list(state.filtering_result["retained_ids"])
+    assert pd.read_csv(destination / "all_mask_properties.csv")["label"].tolist() == [37]
+    historical = window.mask_display.layers["before"]
+    assert historical.visible and historical.data[removed_voxel] == 37
+    assert state.filtering_result["filtered_masks"][removed_voxel] == 0
+    np.testing.assert_array_equal(tifffile.imread(destination / "filtered_masks_syglass.tif"),
+                                  state.filtering_result["filtered_masks"])
     np.testing.assert_array_equal(tifffile.imread(destination / "cellpose_raw_masks.tif"), raw)
     np.testing.assert_array_equal(tifffile.imread(destination / "Marker_associated_dapi_nuclei.tif"),
-                                  np.where(raw == 13, 0, raw))
+                                  expected)
