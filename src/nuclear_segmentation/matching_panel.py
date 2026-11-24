@@ -1,0 +1,274 @@
+"""Matching controls and read-only layers in the existing desktop viewer."""
+from __future__ import annotations
+
+from napari.utils.colormaps import CyclicLabelColormap
+from qtpy.QtCore import QObject, QSignalBlocker, Qt
+from qtpy.QtWidgets import (
+    QCheckBox, QComboBox, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+)
+
+from .collapsible_section import CollapsibleSection
+from .matching_pair import MATCHING_LAYER, MATCHING_ROLES
+from .ui_icons import icon
+
+
+class MatchingPanel(QWidget):
+    def __init__(self):
+        super().__init__()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 8, 0, 0)
+        self.selectors = {}
+        self.summaries = {}
+        self.visibility = {}
+        self.opacity = {}
+        for role in MATCHING_ROLES:
+            layout = self._section(root, role, f"{role.title()} Masks")
+            label = QLabel(f"{role.title()} Session")
+            selector = self.selectors[role] = QComboBox()
+            selector.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            selector.setAccessibleName(label.text())
+            label.setBuddy(selector)
+            layout.addWidget(label)
+            layout.addWidget(selector)
+            self.summaries[role] = self._note(layout)
+
+        compatibility = self._section(root, "compatibility", "Compatibility")
+        self.compatibility = self._note(compatibility)
+        visualization = self._section(root, "visualization", "Visualization")
+        self.show_inputs = QPushButton(icon("labels"), "Show Matching Inputs")
+        visualization.addWidget(self.show_inputs)
+        for role in MATCHING_ROLES:
+            visible = self.visibility[role] = QCheckBox(f"Show {role} masks")
+            visible.setChecked(True)
+            visualization.addWidget(visible)
+            label = QLabel(f"{role.title()} opacity")
+            opacity = self.opacity[role] = QSpinBox()
+            opacity.setRange(0, 100)
+            opacity.setSuffix("%")
+            opacity.setValue(60)
+            opacity.setAccessibleName(label.text())
+            label.setBuddy(opacity)
+            visualization.addWidget(label)
+            visualization.addWidget(opacity)
+        root.addStretch(1)
+
+    @staticmethod
+    def _section(root, key, title):
+        section = CollapsibleSection(key, title)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(8, 5, 8, 8)
+        section.set_content_layout(layout)
+        root.addWidget(section)
+        return layout
+
+    @staticmethod
+    def _note(layout):
+        label = QLabel()
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(label)
+        return label
+
+
+class MatchingDisplay(QObject):
+    """Present a captured pair without adopting the active session's layer ownership."""
+
+    _colors = {"nuclear": (0.16, 0.8, 1.0, 1.0), "cytoplasmic": (1.0, 0.52, 0.16, 1.0)}
+
+    def __init__(self, viewer, state, panel, session_display, parent=None):
+        super().__init__(parent)
+        self.viewer = viewer
+        self.state = state
+        self.panel = panel
+        self.session_display = session_display
+        self.layers = {}
+        self._pair = state.matching_pair
+        self._displayed = None
+        self._previous_layer = None
+        self._active = False
+        self._showing = False
+        self._state_signals = (
+            state.sessions_changed, state.channels_changed, state.matching_selection_changed,
+            state.segmentation_result_changed, state.filtering_result_changed,
+            state.inactive_session_validity_changed,
+        )
+        for signal in self._state_signals:
+            signal.connect(self.refresh)
+        panel.show_inputs.clicked.connect(self.show)
+        viewer.layers.events.removed.connect(self._removed)
+        for role in MATCHING_ROLES:
+            panel.selectors[role].currentIndexChanged.connect(lambda _, role=role: self._select(role))
+            panel.visibility[role].toggled.connect(lambda visible, role=role: self._set_visible(role, visible))
+            panel.opacity[role].valueChanged.connect(lambda value, role=role: self._set_opacity(role, value))
+
+    def set_active(self, active):
+        if self._active == active:
+            return
+        self._active = active
+        if active:
+            self.refresh()
+        else:
+            self._stop_showing()
+
+    def show(self):
+        if not self._active or self._pair.capture() is None:
+            return
+        if not self._showing:
+            if self.session_display.suspended:
+                return
+            self._previous_layer = self.viewer.layers.selection.active
+            self.session_display.suspend(keep_hidden=True)
+            self._showing = True
+        self.refresh()
+
+    def _stop_showing(self):
+        self._remove_layers()
+        if self._showing:
+            self._showing = False
+            self.session_display.resume()
+            previous = self._previous_layer
+            if previous in self.viewer.layers and previous.visible:
+                self.viewer.layers.selection.active = previous
+        self._previous_layer = None
+
+    def _select(self, role):
+        self._pair.select(role, self.panel.selectors[role].currentData())
+
+    def _session_summary(self, session):
+        segmentation = ("current" if session.segmentation_is_current else
+                        "outdated" if session.segmentation_result else "missing")
+        filtering = ("current" if session.filtering_is_current else
+                     "recalculation required" if session.filtering_result or session.pending_geometry_revision is not None
+                     else "missing")
+        count = (session.filtering_result or {}).get("retained_count")
+        summary = f"Segmentation {segmentation} · Filtering {filtering}"
+        if count is not None:
+            summary += f" · {count:,} retained" if session.filtering_is_current else f" · {count:,} previously retained"
+        return summary
+
+    def _refresh_selector(self, role):
+        selector = self.panel.selectors[role]
+        with QSignalBlocker(selector):
+            selector.clear()
+            selector.addItem(f"Select a {role} session", None)
+            if self.state.dataset_ready:
+                channels = {c.index: c.name for c in self.state.channels}
+                for session in self.state.sessions.values():
+                    if session.scientific_role != role:
+                        continue
+                    index = session.source_channel_index
+                    if index is None:
+                        index = self.state.segmentation_channel_index
+                    source = channels.get(index, "Source channel unavailable")
+                    title = f"{session.display_name} · {source}"
+                    selector.addItem(title, session.session_id)
+                    selector.setItemData(
+                        selector.count() - 1, f"{title}\n{self._session_summary(session)}",
+                        Qt.ItemDataRole.ToolTipRole,
+                    )
+            selector.setCurrentIndex(max(0, selector.findData(self._pair.session_id(role))))
+            selector.setEnabled(selector.count() > 1)
+            selector.setToolTip(selector.currentText())
+        session = self.state.sessions.get(self._pair.session_id(role))
+        self.panel.summaries[role].setText(self._session_summary(session) if session else "")
+
+    def refresh(self, *args):
+        if self._pair is not self.state.matching_pair:
+            self._stop_showing()
+            self._pair = self.state.matching_pair
+        if not self._active:
+            return
+        for role in MATCHING_ROLES:
+            self._refresh_selector(role)
+        pair, checks = self._pair.inspect()
+        if not self.state.dataset_ready:
+            message = "Load an image to select matching inputs."
+        elif pair is None:
+            message = "\n".join(
+                f"{role.title()} · {checks[role].message}" for role in MATCHING_ROLES if checks[role].input is None
+            )
+        else:
+            message = "Compatible grid and validated retained masks."
+            for role in MATCHING_ROLES:
+                if not checks[role].input.retained_ids:
+                    message += f"\n{role.title()} retained population is empty."
+        if pair is None or not self._showing:
+            self._remove_layers()
+        elif self._displayed != pair or len(self.layers) != len(MATCHING_ROLES):
+            self._remove_layers()
+            self._add_layers(pair)
+        else:
+            for role, layer in self.layers.items():
+                layer.name = self._layer_name(role)
+        self.panel.compatibility.setText(message)
+        self.panel.show_inputs.setEnabled(pair is not None and len(self.layers) != len(MATCHING_ROLES))
+        for role in MATCHING_ROLES:
+            self.panel.visibility[role].setEnabled(role in self.layers)
+            self.panel.opacity[role].setEnabled(role in self.layers)
+
+    def _layer_name(self, role):
+        session = self.state.sessions[self._pair.session_id(role)]
+        return f"Matching · {role.title()} Masks · {session.display_name}"
+
+    def _add_layers(self, pair):
+        for role in MATCHING_ROLES:
+            source = getattr(pair, role)
+            layer = self.viewer.add_labels(
+                source.labels, name=self._layer_name(role),
+                scale=pair.grid.spacing_zyx_um, translate=pair.grid.translation_zyx_um,
+                units=("µm", "µm", "µm"), blending="additive",
+                colormap=CyclicLabelColormap(colors=[(0, 0, 0, 0), self._colors[role]]),
+                opacity=self.panel.opacity[role].value() / 100,
+                visible=self.panel.visibility[role].isChecked(),
+                metadata={MATCHING_LAYER: role, "matching_pair": pair.population_identity,
+                          "source_revision": source.owner, "measurement_revision": source.measurement_revision},
+            )
+            layer.editable = False
+            self.layers[role] = layer
+            layer.events.visible.connect(self._appearance_changed)
+            layer.events.opacity.connect(self._appearance_changed)
+        self._displayed = pair
+
+    def _appearance_changed(self, event):
+        role = event.source.metadata[MATCHING_LAYER]
+        if event.type == "visible":
+            control = self.panel.visibility[role]
+            with QSignalBlocker(control):
+                control.setChecked(event.source.visible)
+        else:
+            control = self.panel.opacity[role]
+            with QSignalBlocker(control):
+                control.setValue(round(event.source.opacity * 100))
+
+    def _set_visible(self, role, visible):
+        if role in self.layers:
+            self.layers[role].visible = visible
+
+    def _set_opacity(self, role, value):
+        if role in self.layers:
+            self.layers[role].opacity = value / 100
+
+    def _removed(self, event):
+        layer = event.value
+        role = layer.metadata.get(MATCHING_LAYER)
+        if self.layers.get(role) is layer:
+            layer.events.visible.disconnect(self._appearance_changed)
+            layer.events.opacity.disconnect(self._appearance_changed)
+            del self.layers[role]
+            if self._active and self._displayed is not None:
+                self.panel.visibility[role].setEnabled(False)
+                self.panel.opacity[role].setEnabled(False)
+                self.panel.show_inputs.setEnabled(True)
+        elif self._previous_layer is layer:
+            self._previous_layer = None
+
+    def _remove_layers(self):
+        self._displayed = None
+        for layer in tuple(self.layers.values()):
+            self.viewer.layers.remove(layer)
+
+    def dispose(self):
+        self.set_active(False)
+        for signal in self._state_signals:
+            signal.disconnect(self.refresh)
+        self.viewer.layers.events.removed.disconnect(self._removed)

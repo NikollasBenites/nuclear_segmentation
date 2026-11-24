@@ -347,7 +347,9 @@ def _filter_cache(state, tables, settings, config, label_sizes, manual, notes):
         dest[:] = np.where(np.isin(raw, retained), raw, 0)
     provenance = state.segmentation_result["input_provenance"]
     roi = state.scientific_roi
+    owner = state.session_revision()
     return dict(properties=properties, background_table=tables.get("channel_background_estimates", pd.DataFrame()),
+                session_id=owner.session_id, geometry_revision=owner.geometry_revision,
                 settings=settings, retained_ids=retained, retained_count=len(retained), filtered_masks=filtered,
                 raw_mask_shape=masks.shape, scientific_roi=roi, roi_reviewed=state.scientific_roi_reviewed,
                 intensity_definitions=intensity, perinuclear_definitions=markers, ring_labels={},

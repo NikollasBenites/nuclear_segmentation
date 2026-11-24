@@ -26,6 +26,7 @@ class SessionMaskDisplay(QObject):
         self.layers = {}
         self._syncing = False
         self.suspended = False
+        self._keep_hidden = False
         viewer.layers.events.inserted.connect(self._inserted)
         viewer.layers.events.removed.connect(self._removed)
 
@@ -57,7 +58,11 @@ class SessionMaskDisplay(QObject):
 
     def _appearance_changed(self, event):
         layer = event.source
-        if self._syncing or not self.state.owns_mask_layer(layer) or (self.suspended and event.type == "visible"):
+        if self._syncing or not self.state.owns_mask_layer(layer):
+            return
+        if self.suspended and event.type == "visible":
+            if self._keep_hidden and layer.visible:
+                layer.visible = False
             return
         role = next(key for key, value in self.layers.items() if value is layer)
         settings = self.preferences.setdefault(role, {})
@@ -96,6 +101,9 @@ class SessionMaskDisplay(QObject):
         try:
             if "opacity" in settings and layer.opacity != settings["opacity"]:
                 layer.opacity = settings["opacity"]
+            if self._keep_hidden:
+                layer.visible = False
+                return
             if role == "roi":
                 layer.visible = settings.get("visible", False)
                 return
@@ -114,13 +122,15 @@ class SessionMaskDisplay(QObject):
         finally:
             self._syncing = False
 
-    def suspend(self):
+    def suspend(self, *, keep_hidden=False):
         self.suspended = True
+        self._keep_hidden = keep_hidden
         for layer in self.layers.values():
             layer.visible = False
 
     def resume(self):
         self.suspended = False
+        self._keep_hidden = False
         self.sync(restore_selection=True)
 
     def sync(self, *, restore_selection=False):

@@ -4,6 +4,7 @@ from __future__ import annotations
 from qtpy.QtCore import QSize, Signal
 from qtpy.QtWidgets import QButtonGroup, QToolButton, QVBoxLayout, QWidget
 
+from .matching_pair import MATCHING_LAYER
 from .ui_icons import icon
 
 
@@ -66,7 +67,8 @@ class ViewerToolbar(QWidget):
         return self.viewer.layers.selection.active
 
     def _is_labels(self, layer) -> bool:
-        return layer is not None and type(layer).__name__.lower() == "labels"
+        return (layer is not None and type(layer).__name__.lower() == "labels"
+                and not layer.metadata.get(MATCHING_LAYER))
 
     def _active_layer_changed(self, event=None) -> None:
         self._disconnect_observed_layer()

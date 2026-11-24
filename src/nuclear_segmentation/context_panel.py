@@ -10,6 +10,7 @@ from .preprocessing_panel import PreprocessingPanel
 from .image_export_panel import ImageExportPanel
 from .segmentation_panel import SegmentationPanel
 from .mask_review_panel import MaskReviewPanel
+from .matching_panel import MatchingPanel
 from .quantification_panel import QuantificationPanel
 from .live_plots import ProjectLivePlots
 
@@ -66,8 +67,9 @@ class ContextPanel(QWidget):
             elif key == "export":
                 self.export_page = ImageExportPanel(project_state=project_state)
                 page = self.export_page
-            else:
-                page = self._matching_placeholder()
+            elif key == "matching":
+                self.matching_page = MatchingPanel()
+                page = self._scroll(self.matching_page)
 
             if workflow.subpages:
                 pages = QStackedWidget(page)
@@ -92,23 +94,6 @@ class ContextPanel(QWidget):
         area.setWidget(widget)
         widget.setAutoFillBackground(False)
         return area
-
-    @staticmethod
-    def _matching_placeholder():
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 8, 0, 0)
-        for section in ("Nuclear Masks", "Cytoplasmic Masks", "Associations"):
-            label = QLabel(section)
-            label.setObjectName("contextSection")
-            label.setToolTip("Scientific workflow integration begins in Phase 2")
-            layout.addWidget(label)
-        note = QLabel("Interface placeholder — no analysis is executed here yet.")
-        note.setObjectName("placeholderNote")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        layout.addStretch(1)
-        return page
 
     def set_workflow(self, key: str, subpage: str | None = None) -> None:
         if key not in self._indexes:

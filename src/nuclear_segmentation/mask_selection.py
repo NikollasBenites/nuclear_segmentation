@@ -4,6 +4,8 @@ from __future__ import annotations
 import numpy as np
 from qtpy.QtCore import QObject, Signal
 
+from .matching_pair import MATCHING_LAYER
+
 
 INTERNAL_HIGHLIGHT_KEY = "nucytoseg_selection_highlight"
 
@@ -34,7 +36,7 @@ class MaskSelectionController(QObject):
         return (
             layer is not None
             and type(layer).__name__.lower() == "labels"
-            and not metadata.get(INTERNAL_HIGHLIGHT_KEY, False)
+            and not (metadata.get(INTERNAL_HIGHLIGHT_KEY) or metadata.get(MATCHING_LAYER))
         )
 
     @property

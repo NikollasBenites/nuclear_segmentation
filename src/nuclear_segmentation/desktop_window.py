@@ -42,6 +42,7 @@ from .normalization_workspace import NormalizationController
 from .selected_mask_panel import SelectedMaskPanel
 from .project_state import ProjectState
 from .series_browser import ImageSeriesBrowser
+from .matching_panel import MatchingDisplay
 from .session_display import SessionMaskDisplay
 from .segmentation_execution import SegmentationController
 from .filtering_workspace import FilteringController
@@ -240,6 +241,9 @@ class DesktopWindow(QMainWindow):
         self.mask_selection.status_changed.connect(self.statusBar().showMessage)
         review_panel = self.context_panel.mask_review_page
         self.mask_display = SessionMaskDisplay(self.embedding.viewer, self.project_state, self.mask_selection, self)
+        self.matching_display = MatchingDisplay(
+            self.embedding.viewer, self.project_state, self.context_panel.matching_page, self.mask_display, self,
+        )
         self.mask_display.status.connect(review_panel.set_visualization_status)
         self.mask_display.changed.connect(self._mark_project_dirty)
         self.mask_display.changed.connect(self._release_comparisons)
@@ -509,9 +513,13 @@ class DesktopWindow(QMainWindow):
             self.context_panel.project_page.expand_section("calibration")
             self.statusBar().showMessage(f"Calibration: {error}", 6000)
             return
+        calibrated_spacing = self.project_state.voxel_spacing_zyx_um
+        offset_y, offset_x = self.project_state.working_offset_yx
+        translation = (0.0, offset_y * calibrated_spacing[1], offset_x * calibrated_spacing[2])
         for layer in self._channel_layer_callbacks:
             if layer in self.embedding.viewer.layers:
-                layer.scale = self.project_state.voxel_spacing_zyx_um
+                layer.scale = calibrated_spacing
+                layer.translate = translation
         self.context_panel.project_page.calibration_source.setText("manual override")
         self.statusBar().showMessage("Manual Z/Y/X calibration applied", 5000)
 
@@ -1411,8 +1419,11 @@ class DesktopWindow(QMainWindow):
             self._release_comparisons()
 
     def set_workflow(self, key: str) -> None:
+        if key == "matching" and self.geometry_panel.busy:
+            return
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
+        self.matching_display.set_active(key == "matching")
         self.context_panel.set_workflow(key, self.navigation.current_subpage)
         self.context_title.setText(self.context_panel.workflow_title)
         self.graph_window.setVisible(self.isVisible() and key == "quality_control")
@@ -1660,6 +1671,7 @@ class DesktopWindow(QMainWindow):
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
             self.geometry_panel.dispose()
             self.mask_context_menu.dispose()
+            self.matching_display.dispose()
             self.mask_display.dispose()
             self.mask_selection.dispose()
             self.normalization.dispose()

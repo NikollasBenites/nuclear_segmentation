@@ -8,6 +8,7 @@ from qtpy.QtCore import QSize, Qt, Signal
 from qtpy.QtGui import QColor, QStandardItem, QStandardItemModel
 from qtpy.QtWidgets import QAbstractItemView, QTreeView, QVBoxLayout, QWidget
 
+from .matching_pair import MATCHING_LAYER
 from .ui_icons import icon
 
 
@@ -37,6 +38,8 @@ class LayerTreeModel(QStandardItemModel):
         layer_type = type(layer).__name__.lower()
         metadata = getattr(layer, "metadata", {}) or {}
         role = str(metadata.get("mask_type", "")).lower()
+        if metadata.get(MATCHING_LAYER):
+            return "Matching Layers"
         if any(
             metadata.get(key)
             for key in (
@@ -77,17 +80,14 @@ class LayerTreeModel(QStandardItemModel):
         group_icons = {
             "Image Layers": "image",
             "Segmentation Layers": "labels",
+            "Matching Layers": "link",
             "Annotations & Overlays": "review",
         }
-        for title in (
-            "Image Layers",
-            "Segmentation Layers",
-            "Annotations & Overlays",
-        ):
+        for title, icon_name in group_icons.items():
             group = QStandardItem(title)
             group.setEditable(False)
             group.setSelectable(False)
-            group.setIcon(icon(group_icons[title]))
+            group.setIcon(icon(icon_name))
             group_font = group.font()
             group_font.setBold(True)
             group.setFont(group_font)
@@ -113,7 +113,10 @@ class LayerTreeModel(QStandardItemModel):
                 else "other"
             )
             name_item.setIcon(icon(icon_name))
-            name_item.setToolTip("Double-click or press F2 to rename this layer")
+            if metadata.get(MATCHING_LAYER):
+                name_item.setEditable(False)
+            else:
+                name_item.setToolTip("Double-click or press F2 to rename this layer")
             type_item = QStandardItem(type(layer).__name__)
             type_item.setEditable(False)
             type_item.setData(layer, LAYER_ROLE)

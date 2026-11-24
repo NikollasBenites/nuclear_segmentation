@@ -11,6 +11,8 @@ from uuid import UUID, uuid4
 import numpy as np
 from qtpy.QtCore import QObject, Signal
 
+from .matching_pair import MATCHING_LAYER, MatchingPairContext
+
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +163,8 @@ class ProjectState(QObject):
     """Own the shared image grid and independent analysis sessions."""
 
     sessions_changed = Signal()
+    inactive_session_validity_changed = Signal(str)
+    matching_selection_changed = Signal()
     active_session_about_to_change = Signal()
     active_session_changed = Signal()
     changed = Signal(object)
@@ -219,6 +223,7 @@ class ProjectState(QObject):
     def _reset_sessions(self) -> None:
         self._sessions = {"nuclear": SegmentationSession()}
         self._active_session_id = "nuclear"
+        self.matching_pair = MatchingPairContext(self)
 
     @property
     def sessions(self) -> Mapping[str, SegmentationSession]:
@@ -241,6 +246,7 @@ class ProjectState(QObject):
     ) -> None:
         self._sessions = dict(sessions)
         self._active_session_id = active_session_id
+        self.matching_pair = MatchingPairContext(self)
         self.sessions_changed.emit()
 
     @staticmethod
@@ -297,10 +303,12 @@ class ProjectState(QObject):
 
     def owns_mask_layer(self, layer) -> bool:
         metadata = getattr(layer, "metadata", {}) or {}
-        return all(metadata.get(key) == value for key, value in self.mask_layer_metadata().items())
+        return not metadata.get(MATCHING_LAYER) and all(
+            metadata.get(key) == value for key, value in self.mask_layer_metadata().items()
+        )
 
-    def session_revision(self) -> SessionRevision:
-        session = self.active_session
+    def session_revision(self, session_id: str | None = None) -> SessionRevision:
+        session = self.active_session if session_id is None else self._sessions[session_id]
         return SessionRevision(
             self._project_id, session.session_id,
             session.input_revision, session.geometry_revision,
@@ -840,6 +848,8 @@ class ProjectState(QObject):
                 self.scientific_roi_changed.emit(None, False)
                 self.segmentation_result_changed.emit(session.segmentation_result, False)
             self.quantification_result_changed.emit(session.quantification_result, False)
+        elif session is not self.active_session:
+            self.inactive_session_validity_changed.emit(session.session_id)
 
     def clear_segmentation_result(self, *, emit: bool = True) -> None:
         self.active_session.pending_geometry_revision = None

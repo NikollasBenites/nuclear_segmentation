@@ -4,14 +4,16 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from .config import validate_config
 from .core import reconstruct_mntb_roi, validate_channel_configuration
-from .project_state import SessionRevision
 from .z_correction import prepare_volumes, validate_options
+
+if TYPE_CHECKING:
+    from .project_state import SessionRevision
 
 
 @dataclass(frozen=True)

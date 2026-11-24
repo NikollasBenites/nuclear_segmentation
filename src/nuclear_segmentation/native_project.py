@@ -769,6 +769,11 @@ def _validate_results(state):
                 )
             except ValueError:
                 state.filtering_is_current = False
+        if state.filtering_is_current:
+            # Older records omitted ownership. The voxel projection and provenance
+            # have been verified against this session above.
+            filtering.setdefault("session_id", session.session_id)
+            filtering.setdefault("geometry_revision", session.geometry_revision)
     else:
         state.filtering_is_current = False
         state.scientific_roi_reviewed = bool(
