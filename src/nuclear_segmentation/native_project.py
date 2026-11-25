@@ -16,6 +16,7 @@ from qtpy.QtCore import QObject, QLockFile, Signal, Slot
 from .core import density_z_planes
 from .image_import import load_tiff_dataset, load_verified_image, source_digest
 from .lif_import import load_lif_dataset
+from . import association_checkpoint
 from .geometry_edit import effective_masks, validate_history
 from .manual_review import ManualReview
 from .normalization import mask_digest
@@ -139,6 +140,7 @@ def snapshot_state(state):
         "channels": [asdict(channel) for channel in state.channels],
         "crop": asdict(state.crop_provenance) if state.crop_provenance else None,
         "state": {key: getattr(state, key) for key in SHARED_FIELDS},
+        "association_state": association_checkpoint.snapshot(state.matching_pair),
         "sessions": sessions,
         "active_session_id": state.active_session_id,
     }
@@ -169,6 +171,8 @@ def save_project(folder, snapshot, active=None):
     if source["sha256"] is not None and source["sha256"] != digest:
         raise ValueError("The original image changed after import. Reopen the original image before saving.")
     snapshot = dict(snapshot, source=dict(source, sha256=digest))
+    snapshot["association_state"] = association_checkpoint.prepare(
+        snapshot.get("association_state"), snapshot["sessions"], source["path"], digest)
     created = active is None
     if created:
         folder.mkdir(exist_ok=False)
@@ -494,7 +498,10 @@ def _validated_state(dataset, payload, version):
     for session in sessions.values():
         session.display_state.setdefault("channels", {c.index: c.visible for c in channels})
     state.select_session(active_id)
-    return restored_state(state)
+    association_checkpoint.verify_geometry(payload.get("association_state"), state)
+    validated = restored_state(state)
+    validated["association_state"] = association_checkpoint.validate(state, payload.get("association_state"))
+    return validated
 
 
 def restored_state(state):

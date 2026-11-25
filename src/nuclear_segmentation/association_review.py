@@ -3,6 +3,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import json
+from weakref import ref
 
 STATES = ("Not Reviewed", "Matched", "Unmatched", "Uncertain")
 
@@ -29,9 +30,9 @@ class AssociationReview:
         self._stats = self._dependencies = None
 
     def identity(self, result):
-        if self._stats is not result.statistics:
+        if self._stats is None or self._stats() is not result.statistics:
             self._dependencies = dependencies(result)
-            self._stats = result.statistics
+            self._stats = ref(result.statistics)
         return self._dependencies
 
     def key(self, label):
@@ -41,7 +42,10 @@ class AssociationReview:
         event = self.records.get(self.key(label))
         if event is None:
             return STATES[0]
-        return event["status"] if event["dependencies"] == self.identity(result) else "Requires Review"
+        if (event["dependencies"] != self.identity(result) or label not in result.statistics.nuclear_voxels
+                or event["status"] == "Matched" and event["cytoplasmic_id"] not in result.statistics.cytoplasmic_voxels):
+            return "Requires Review"
+        return event["status"]
 
     def decide(self, result, label, status, target=None, comment=""):
         if result is None or result is not self.pair.current_result:

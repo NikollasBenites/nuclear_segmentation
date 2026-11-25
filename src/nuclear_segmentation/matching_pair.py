@@ -131,6 +131,7 @@ class MatchingPairContext:
     def __init__(self, state: ProjectState):
         self._state = state
         self.review = AssociationReview(self)
+        self.historical_result = None
         self._project_id = state.session_revision().project_id
         self._ids = dict.fromkeys(MATCHING_ROLES)
         self._verified = {}
@@ -142,6 +143,7 @@ class MatchingPairContext:
         self.error = None
 
     def discard_results(self):
+        self.historical_result = None
         self.job = None
         self._result = None
         self.error = None
@@ -286,6 +288,7 @@ class MatchingPairContext:
                 or result.measurement_revisions != job.snapshot.measurement_revisions):
             return False
         self._result = result
+        self.historical_result = None
         self.executed_settings = result.settings
         self._state.matching_result_changed.emit()
         return True

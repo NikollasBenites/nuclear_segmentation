@@ -142,6 +142,11 @@ class MatchingPanel(QWidget):
         self.minimum.setText(str(settings.match_min))
         self.maximum.setText(str(settings.second_max))
 
+    def sync_thresholds(self, settings):
+        with QSignalBlocker(self.minimum), QSignalBlocker(self.maximum):
+            self.minimum.setText(str(settings.match_min) if settings else "")
+            self.maximum.setText(str(settings.second_max) if settings else "")
+
     def reset_appearance(self):
         with QSignalBlocker(self.minimum), QSignalBlocker(self.maximum), QSignalBlocker(self.class_colors):
             self.reset_thresholds()

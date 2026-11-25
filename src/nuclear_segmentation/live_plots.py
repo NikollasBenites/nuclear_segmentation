@@ -6,6 +6,7 @@ from qtpy.QtWidgets import QWidget, QVBoxLayout, QComboBox, QLabel
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
+from .reviewed_qc import REVIEW_PLOTS, draw_review
 from .matching_plots import DECISION_SPACE, MatchingPlotData, PLOTS
 
 
@@ -258,7 +259,8 @@ class ProjectLivePlots(LivePlots):
         self.layout().insertWidget(0, self.category)
         self.matching_kind = QComboBox()
         self.matching_kind.setAccessibleName("Automatic matching graph")
-        self.matching_kind.addItems(PLOTS)
+        self.matching_kind.addItems((*PLOTS, *REVIEW_PLOTS))
+        project_state.association_review_changed.connect(self.schedule)
         self.layout().insertWidget(1, self.matching_kind)
         self.matching_kind.hide()
         self.category.currentTextChanged.connect(self._change_category)
@@ -345,10 +347,14 @@ class ProjectLivePlots(LivePlots):
             return
         self._apply_canvas_theme()
         kind = self.matching_kind.currentText()
-        self._matching_data.draw(self.axes, kind)
+        if kind in REVIEW_PLOTS:
+            draw_review(self.axes, kind, self._matching_data.result, self.project_state.matching_pair.review)
+            self.status.setText("Reviewed links include only current explicit Matched decisions.")
+        else:
+            self._matching_data.draw(self.axes, kind)
         counts = self._matching_data.result
         self.figure.suptitle(
-            f"Automatic classifications before manual association review\n"
+            ("Manual review and automatic evidence\n" if kind in REVIEW_PLOTS else "Automatic classifications before manual association review\n") +
             f"{len(counts.nuclei):,} retained nuclei · {len(counts.associations):,} retained cytoplasmic objects",
             color=self.axes.title.get_color(), fontsize=11)
         if kind == DECISION_SPACE and counts.nuclei:
@@ -462,6 +468,7 @@ class ProjectLivePlots(LivePlots):
             for signal in self._matching_signals:
                 signal.disconnect(self._sync_matching)
             state = self.project_state
+            state.association_review_changed.disconnect(self.schedule)
             state.segmentation_result_changed.disconnect(self.sync)
             state.filtering_result_changed.disconnect(self.sync)
             state.scientific_roi_changed.disconnect(self.sync)

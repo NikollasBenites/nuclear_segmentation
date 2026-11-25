@@ -42,6 +42,7 @@ from .normalization_workspace import NormalizationController
 from .selected_mask_panel import SelectedMaskPanel
 from .project_state import ProjectState
 from .series_browser import ImageSeriesBrowser
+from . import association_checkpoint
 from .association_panel import AssociationPanel
 from .matching_panel import MatchingDisplay
 from .session_display import SessionMaskDisplay
@@ -275,6 +276,7 @@ class DesktopWindow(QMainWindow):
         self.association_panel = AssociationPanel(self)
         review_panel.proofreading_page.layout().insertWidget(1, self.association_panel)
         self.project_state.association_review_changed.connect(self._mark_project_dirty)
+        self.project_state.matching_result_changed.connect(self._mark_project_dirty)
         self.context_panel.matching_page.explorer.review.clicked.connect(self.geometry_panel.guided.handoff)
         self.mask_context_menu = MaskContextMenu(self)
         self.mask_selection.selection_changed.connect(self._mask_selection_changed)
@@ -828,7 +830,7 @@ class DesktopWindow(QMainWindow):
             # Channel/calibration notifications must precede restored preprocessing.
             state.set_calibration(restored["voxel_spacing_zyx_um"], restored["calibration_source"])
             normalization_keys = ("normalization_configuration", "normalization_preview", "normalization_is_current")
-            session_keys = ("sessions", "active_session_id")
+            session_keys = ("sessions", "active_session_id", "association_state")
             for key, value in restored.items():
                 if key not in normalization_keys + session_keys:
                     setattr(state, key, value)
@@ -882,6 +884,8 @@ class DesktopWindow(QMainWindow):
             state.normalization_changed.emit(state.normalization_configuration, state.normalization_is_current)
             state.restore_sessions(restored["sessions"], restored["active_session_id"])
             self._display_active_session()
+            association_checkpoint.install(state, restored.get("association_state"))
+            self.context_panel.matching_page.sync_thresholds(state.matching_pair.pending_settings)
             self.set_workflow("project")
             return True
         finally:
