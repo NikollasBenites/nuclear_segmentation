@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     if font.pointSizeF() < 11:
         font.setPointSizeF(11)
         app.setFont(font)
-    window = DesktopWindow(load_demo=args.demo)
+    window = DesktopWindow(load_demo=args.demo, show_welcome=not args.demo)
     window.show()
     return app.exec()
 

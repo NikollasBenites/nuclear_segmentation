@@ -119,6 +119,7 @@ class ResultsWorkspace(QTabWidget):
         for signal in (state.changed, state.active_session_changed, state.filtering_result_changed,
                        state.quantification_result_changed, state.scientific_roi_changed):
             signal.connect(self.refresh)
+        context.quantification_page.presentation_changed.connect(self.refresh)
         self.refresh()
 
     def refresh(self, *args):
@@ -166,5 +167,6 @@ class ResultsWorkspace(QTabWidget):
             dialog.layout().addWidget(self.graphs)
         self.graphs.show()
         dialog.show()
+        if self.graphs.dirty:
+            self.graphs.redraw()
         dialog.raise_()
-

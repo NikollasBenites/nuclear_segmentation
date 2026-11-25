@@ -142,10 +142,11 @@ class MatchingPanel(QWidget):
         self.defaults = QPushButton("Restore Defaults")
         automatic.addWidget(self.defaults)
         self.run = QPushButton("Run Automatic Matching")
-        automatic.addWidget(self.run)
+        self.run.setProperty("priority", "primary")
+        root.addWidget(self.run)
         self.progress = QProgressBar()
         self.progress.setAccessibleName("Automatic matching progress")
-        automatic.addWidget(self.progress)
+        root.addWidget(self.progress)
         results = self._section(root, "results", "Matching Results")
         self.result_status = self._note(results)
         self.summary = self._note(results)
@@ -202,7 +203,8 @@ class MatchingPanel(QWidget):
     def present_result(self, current):
         if current != self._inspecting:
             self._inspecting = current
-            for key in ("nuclear", "cytoplasmic", "automatic", "compatibility"):
+            # Keep both population summaries accessible when a valid result is empty.
+            for key in ("automatic", "compatibility"):
                 self.sections[key].set_expanded(not current)
             self.sections["results"].set_expanded(False)
             self.sections["associations"].set_expanded(current)

@@ -12,7 +12,8 @@ def statuses(window):
     preparation = "Optional"
     if s.crop_provenance or s.z_correction_applied or s.normalization_is_current:
         preparation = "Complete"
-    if s.normalization_configuration and not s.normalization_is_current:
+    normalization_mode = (s.normalization_configuration or {}).get("mode", "cellpose_default")
+    if normalization_mode not in {"cellpose_default", "disabled"} and not s.normalization_is_current:
         preparation = "Outdated"
     values = {
         "project": "Complete" if s.dataset_ready else "Pending",
@@ -35,4 +36,3 @@ def statuses(window):
         if busy:
             values[key] = "Running"
     return values
-

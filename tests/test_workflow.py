@@ -253,6 +253,7 @@ def test_cli_main_with_real_napari_viewer(monkeypatch):
     import napari
     from nuclear_segmentation.app import main
     from nuclear_segmentation.ui import Launcher
+    from qtpy.QtWidgets import QApplication
     viewers=[]
     original_viewer=napari.Viewer
     def create_viewer(*args,**kwargs):
@@ -271,6 +272,8 @@ def test_cli_main_with_real_napari_viewer(monkeypatch):
         main([])
     finally:
         for viewer in viewers:viewer.close()
+    # Dispatch deferred dock sizing after the native window has been released.
+    QApplication.processEvents()
 
 
 def test_normalization_preview_before_model_and_roi_edit(sample,tmp_path,monkeypatch):

@@ -745,6 +745,7 @@ class GeometryPanel(CollapsibleSection):
         self.set_expanded(True)
         self.status.setText(self._scope_text() + " · Editing active")
         self.refresh()
+        window._refresh_progress()
 
     def discard(self):
         if self.edit.merge_selection is not None:
@@ -789,6 +790,7 @@ class GeometryPanel(CollapsibleSection):
         self.window.context_panel.mask_review_page._refresh_actions()
         self._sync_scope()
         self.window.association_panel._render()
+        self.window._refresh_progress()
 
     def commit(self):
         self._require_finished_stroke()

@@ -29,8 +29,17 @@ def main(argv=None):
     launcher.setup_dock = viewer.window.add_dock_widget(scroll(launcher), area='left', name='Analysis setup')
     fit_window(viewer)
     from qtpy.QtCore import Qt, QTimer
-    QTimer.singleShot(0, lambda: viewer.window._qt_window.resizeDocks([launcher.setup_dock], [380], Qt.Horizontal))
-    QTimer.singleShot(0, lambda: viewer.window._qt_window.resizeDocks([launcher.setup_dock], [450], Qt.Vertical))
+    # napari can release its native window before the first event-loop turn.
+    def size_setup_dock():
+        window = getattr(viewer.window, "_qt_window", None)
+        if window is not None:
+            window.resizeDocks([launcher.setup_dock], [380], Qt.Horizontal)
+            window.resizeDocks([launcher.setup_dock], [450], Qt.Vertical)
+
+    initial_layout = QTimer(launcher.setup_dock)
+    initial_layout.setSingleShot(True)
+    initial_layout.timeout.connect(size_setup_dock)
+    initial_layout.start(0)
     viewer.window._qt_window.installEventFilter(launcher)
     # The local reference stays alive while napari.run() blocks; the Qt dock
     # also owns the launcher. Viewer forbids arbitrary Pydantic attributes.

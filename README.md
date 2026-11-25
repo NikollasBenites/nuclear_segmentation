@@ -1,3 +1,9 @@
+# NuCytoSeg scientific desktop
+
+Run `nucytoseg` to open the PyQt6 workspace. Choose **New Project** to import microscopy data or **Open Project** to resume a native checkpoint. Use **Review & Proofreading** to inspect associations, correct mask geometry or record manual decisions. The Basic and Advanced profiles share project data, parameters and history.
+
+[Phase 3A implementation and screenshots](PHASE_3A_IMPLEMENTATION.md) · [Native validation checklist](PHASE_3A_NATIVE_VALIDATION.md) · [Phase 3 roadmap](PHASE_3_UX_ROADMAP.md)
+
 > GUI maintenance, 2026-10-19 (version remains 1.0.1): the analysis panel now
 > provides Filters, Density and auto-updating Graphs tabs. Long density and
 > matching text is scrollable; wrapped labels resize to their content. Graphs

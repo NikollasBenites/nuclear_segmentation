@@ -4,7 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 import numpy as np
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtWidgets import QFormLayout, QLabel, QVBoxLayout, QWidget
 
 from . import matched_quantification
@@ -133,6 +133,8 @@ def calculate_quantification_result(project_state):
 
 class QuantificationPanel(QWidget):
     """Display current counts, ROI volumes, and descriptive nuclear density."""
+
+    presentation_changed = Signal()
 
     def __init__(self, project_state, parent=None):
         super().__init__(parent)
@@ -351,6 +353,7 @@ class QuantificationPanel(QWidget):
                 if preserve_total and values is self.summary_values and key == "total":
                     continue
                 label.setText("—")
+        self.presentation_changed.emit()
 
     def _display(self, result):
         valid = result["density_status"] == "valid"
@@ -386,6 +389,7 @@ class QuantificationPanel(QWidget):
             ("sampling", "excluded_by_sampling_roi"),
         ):
             self.exclusion_values[key].setText(f"{result[result_key]:,}")
+        self.presentation_changed.emit()
 
     def dispose(self):
         for signal in self.association_signals:

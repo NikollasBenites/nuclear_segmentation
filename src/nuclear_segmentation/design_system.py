@@ -50,6 +50,7 @@ def apply_theme(window, name):
         QMenuBar::item:selected, QMenu::item:selected, QTabBar::tab:selected,
         QToolButton:checked {{ background: {c.accent}; color: white; }}
         #applicationHeader, #contextPanelHeader, QTabBar::tab {{ border-bottom: 1px solid {c.line}; }}
+        #welcomeTitle {{ font-size: 28pt; font-weight: bold; color: {c.highlight}; }}
         #applicationName {{ font-size: 15pt; font-weight: bold; }}
         #panelTitle, #contextHeading, #navigationBrand {{ font-size: 12pt; font-weight: bold; }}
         #headerWorkflow, #applicationSubtitle, #panelKicker {{ color: {c.muted}; }}
@@ -59,7 +60,7 @@ def apply_theme(window, name):
             border-radius: 4px; padding: 3px 6px; }}
         QPushButton, QComboBox, QAbstractSpinBox, QLineEdit {{ min-height: 19px; }}
         QPushButton:hover, QToolButton:hover {{ border-color: {c.line}; }}
-        #openImageButton, QPushButton[priority="primary"] {{ background: {c.accent}; color: white; }}
+        #openImageButton, QPushButton[priority="primary"], QToolButton[priority="primary"] {{ background: {c.accent}; color: white; }}
         QPushButton[priority="destructive"] {{ color: {c.destructive}; }}
         QComboBox, QAbstractSpinBox, QLineEdit, QPlainTextEdit, QAbstractItemView {{
             background: {c.field}; border: 1px solid {c.line}; border-radius: 3px;
@@ -74,4 +75,3 @@ def apply_theme(window, name):
         QHeaderView::section {{ color: {c.text}; padding: 3px; border: 0; }}
         QStatusBar {{ color: {c.muted}; min-height: 20px; }}
     """)
-

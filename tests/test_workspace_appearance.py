@@ -1,3 +1,4 @@
+import pytest
 from qtpy.QtCore import QSettings
 from qtpy.QtTest import QTest
 
@@ -6,6 +7,8 @@ from test_desktop_shell import qapp
 
 
 def test_theme_preserves_embedded_canvas_and_scientific_state(tmp_path, qapp):
+    if qapp.platformName() in {"minimal", "offscreen"}:
+        pytest.skip("A window-system OpenGL surface is required for canvas screenshots")
     window = DesktopWindow(load_demo=True, settings=QSettings(str(tmp_path / "theme.ini"), QSettings.Format.IniFormat))
     try:
         window.resize(1024, 680)
@@ -23,7 +26,8 @@ def test_theme_preserves_embedded_canvas_and_scientific_state(tmp_path, qapp):
                     viewer.camera.center, viewer.camera.zoom, tuple(window.splitter.sizes()),
                     window.context_panel.segmentation_page.pending_config())
         before = snapshot()
-        for name in ("Light", "Dark"):
+        for name, profile in (("Light", "Basic"), ("Dark", "Advanced")):
+            window.interface.selector.setCurrentText(profile)
             window.theme_combo.setCurrentText(name)
             QTest.qWait(80)
             assert window.embedding.qt_viewer.canvas is canvas

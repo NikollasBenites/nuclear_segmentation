@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QSplitter,
+    QStackedWidget,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -28,6 +29,7 @@ from .collapsible_section import CollapsibleSection
 from .context_panel import ContextPanel
 from .design_system import THEMES, apply_theme
 from .crop_workspace import CropWorkspaceController
+from .interface_profiles import InterfaceProfiles
 from .image_import import TiffImportWorker, inspect_tiff
 from .image_display_panel import ImageDisplayPanel
 from .image_preparation_workspace import ImagePreparationController
@@ -77,6 +79,7 @@ class DesktopWindow(QMainWindow):
         qt_viewer_factory=None,
         settings=None,
         restore_workspace: bool = True,
+        show_welcome: bool = False,
         bioimage_factory=None,
     ):
         super().__init__(parent)
@@ -307,6 +310,11 @@ class DesktopWindow(QMainWindow):
         self.context_panel.project_page.availability_changed.connect(
             self.close_project_action.setEnabled
         )
+        self.interface = InterfaceProfiles(self)
+        if self.interface.profile == "Basic":
+            for section in self.interface.advanced_sections():
+                section.set_expanded(False, emit=False)
+        self.context_container.layout().insertWidget(1, self.interface.guide)
         root = QWidget()
         root.setObjectName("desktopRoot")
         root_layout = QVBoxLayout(root)
@@ -323,7 +331,12 @@ class DesktopWindow(QMainWindow):
         self.results_height = 210
         self.results.hide()
         root_layout.addWidget(self.vertical_splitter, 1)
-        self.setCentralWidget(root)
+        self.screens = QStackedWidget()
+        self.workspace_page = root
+        self.screens.addWidget(root)
+        self.welcome = self.interface.welcome_page()
+        self.screens.addWidget(self.welcome)
+        self.setCentralWidget(self.screens)
         self._create_menus()
         self._create_status_widgets()
         self._progress_timer = QTimer(self)
@@ -346,6 +359,8 @@ class DesktopWindow(QMainWindow):
         self.set_theme(self.workspace_settings.settings.value("appearance/theme", "Dark"))
         if restore_workspace:
             self.restore_layout()
+        if show_welcome and not load_demo:
+            self.screens.setCurrentWidget(self.welcome)
 
     def _show_matching_graphs(self):
         self.context_panel.quality_control_page.category.setCurrentText("Matching")
@@ -451,6 +466,8 @@ class DesktopWindow(QMainWindow):
         self.session_selector.setMaximumWidth(240)
         self.session_selector.activated.connect(self._activate_header_session)
         layout.addWidget(self.session_selector)
+        layout.addWidget(self.interface.objective_selector)
+        layout.addWidget(self.interface.selector)
         self.theme_combo = QComboBox()
         self.theme_combo.setAccessibleName("Application appearance")
         self.theme_combo.setToolTip("Application appearance")
@@ -530,11 +547,7 @@ class DesktopWindow(QMainWindow):
         self.toggle_results_action.toggled.connect(self._toggle_results)
 
         self.about_action = QAction("About NuCytoSeg", self)
-        self.about_action.triggered.connect(
-            lambda: self.statusBar().showMessage(
-                "NuCytoSeg Phase 1B — independent Qt6 interface", 5000
-            )
-        )
+        self.about_action.triggered.connect(lambda: self.interface.about())
 
         self.focus_action = QAction("Focus Mode", self)
         self.focus_action.setIcon(icon("focus"))
@@ -571,8 +584,10 @@ class DesktopWindow(QMainWindow):
         self.workspace_menu.addAction("Restore Custom Layout", self.restore_custom_layout)
         self.workspace_menu.addAction(self.restore_layout_action)
         self.workspace_menu.addAction(self.reset_layout_action)
-        self.menuBar().addMenu("Tools")
+        tools_menu = self.menuBar().addMenu("Tools")
+        tools_menu.addAction("Preferences…", self.interface.preferences)
         help_menu = self.menuBar().addMenu("Help")
+        help_menu.addAction("Documentation", self.interface.documentation)
         help_menu.addAction(self.about_action)
 
     def _create_status_widgets(self) -> None:
@@ -720,6 +735,7 @@ class DesktopWindow(QMainWindow):
                 return False
             self.close_project(confirm=False)
         self.set_workflow("project")
+        self.screens.setCurrentWidget(self.workspace_page)
         return True
 
     def _ask_project_changes(self):
@@ -892,6 +908,8 @@ class DesktopWindow(QMainWindow):
             state.working_dataset = replace(state.working_dataset, source_sha256=digest)
             state.dataset = state.working_dataset
         self.project_directory = folder
+        self.interface.refresh_recents(folder)
+        self.screens.setCurrentWidget(self.workspace_page)
         self._project_revision = revision
         self._project_version = payload["checkpoint_version"] if job["kind"] == "open" else VERSION
         self.project_dirty = job["relocated"]
@@ -987,7 +1005,7 @@ class DesktopWindow(QMainWindow):
                 self.session_selector.addItem(f"{session.display_name} · {session.scientific_role}", session.session_id)
             self.session_selector.setCurrentIndex(self.session_selector.findData(state.active_session_id))
             self.session_selector.setToolTip(self.session_selector.currentText())
-            self.session_selector.setEnabled(state.dataset_ready)
+            self.session_selector.setEnabled(state.dataset_ready and not self.geometry_panel.busy)
         name = state.active_session.display_name
         label = self.active_session_title
         text = f"Session · {name}"
@@ -1142,6 +1160,7 @@ class DesktopWindow(QMainWindow):
         self.set_workflow("project")
         self.layer_status.setText("Layer: none")
         self.statusBar().showMessage("Project closed — ready to open another image", 5000)
+        self.screens.setCurrentWidget(self.welcome)
         return True
 
     def prepare_image_import(self, path, *, confirm_replacement: bool = True) -> bool:
@@ -1374,6 +1393,7 @@ class DesktopWindow(QMainWindow):
             f"series={dataset.series_index} CZYX={dataset.standardized_shape}"
         )
         self._finish_loading_dialog()
+        self.screens.setCurrentWidget(self.workspace_page)
         return True
 
     def _display_working_dataset(self, dataset) -> None:
@@ -1569,6 +1589,7 @@ class DesktopWindow(QMainWindow):
         if not manual:
             review.set_expanded(False, emit=False)
             review.restore()
+        self.screens.setCurrentWidget(self.workspace_page)
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
         if key != "matching":
@@ -1615,7 +1636,7 @@ class DesktopWindow(QMainWindow):
 
     def _refresh_progress(self, *args):
         values = statuses(self)
-        self.navigation.set_statuses(values)
+        self.interface.update(values)
         if "Running" in values.values():
             self._progress_timer.start(350)
 
@@ -1660,6 +1681,9 @@ class DesktopWindow(QMainWindow):
         self.statusBar().showMessage("Custom layout saved", 4000)
 
     def restore_custom_layout(self):
+        if self.geometry_panel.busy:
+            self.statusBar().showMessage("Save or discard the active geometry preview before restoring a layout.", 5000)
+            return
         snapshot = self.workspace_settings.read("custom")
         if snapshot:
             self.focus_action.setChecked(False)
@@ -1786,6 +1810,7 @@ class DesktopWindow(QMainWindow):
             self.theme_combo.setCurrentText(name)
         self.workspace_settings.settings.setValue("appearance/theme", name)
         apply_theme(self, name)
+        self.interface.sync()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
