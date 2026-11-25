@@ -42,6 +42,7 @@ from .normalization_workspace import NormalizationController
 from .selected_mask_panel import SelectedMaskPanel
 from .project_state import ProjectState
 from .series_browser import ImageSeriesBrowser
+from .association_panel import AssociationPanel
 from .matching_panel import MatchingDisplay
 from .session_display import SessionMaskDisplay
 from .segmentation_execution import SegmentationController
@@ -271,6 +272,9 @@ class DesktopWindow(QMainWindow):
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
         self.geometry_panel = GeometryPanel(self, review_panel)
+        self.association_panel = AssociationPanel(self)
+        review_panel.proofreading_page.layout().insertWidget(1, self.association_panel)
+        self.project_state.association_review_changed.connect(self._mark_project_dirty)
         self.context_panel.matching_page.explorer.review.clicked.connect(self.geometry_panel.guided.handoff)
         self.mask_context_menu = MaskContextMenu(self)
         self.mask_selection.selection_changed.connect(self._mask_selection_changed)
@@ -1433,6 +1437,8 @@ class DesktopWindow(QMainWindow):
             return
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
+        self.association_panel.active = key == "proofreading"
+        self.association_panel.refresh()
         if key != "proofreading":
             self.geometry_panel.guided.clear_context()
         self.matching_display.set_active(key == "matching")

@@ -166,6 +166,7 @@ class ProjectState(QObject):
     inactive_session_validity_changed = Signal(str)
     matching_selection_changed = Signal()
     matching_result_changed = Signal()
+    association_review_changed = Signal()
     active_session_about_to_change = Signal()
     active_session_changed = Signal()
     changed = Signal(object)

@@ -278,3 +278,11 @@ The real-canvas checks compare rendered images with the focus or seed layer visi
 8. Save Project, quit and reopen after a guided commit. Check child and residual volumes, ordered history, seed mapping and Undo of the saved geometry. Repeat after an independent nuclear geometry change. Open an older native checkpoint.
 
 Native macOS sign-off for Phase 2D.5.4 is pending. Controlled painting of watershed children, manual seed selection, general user-seeded workflows, manual association decisions, association persistence, matched density and final matching exports remain deferred.
+
+## Phase 2D.5.5 · Manual association review
+
+Select a measured pair and run Matching. Open Manual Association Review in Proofreading to navigate retained nuclei by automatic class and manual state. The target selector lists positive intersections in descending voxel count and accepts any retained target ID, following the legacy spatial review workflow. Focus or isolate the objects, then explicitly confirm the automatic link or record a decision and optional comment. Undo restores the preceding decision for the selected pair. Geometry editing uses its own transaction.
+
+Decisions belong to the project and ordered session pair. Each event retains the automatic class, accepted target and thresholds at review, manual origin, UTC timestamp, source channel and input/geometry revisions, acquisition grid and retained-ID digests. Compatible threshold reruns, renames and unrelated sessions preserve decisions. A different geometry revision, grid or retained population yields Requires Review. Decisions on absent nuclei remain historical. Replacing the project creates a fresh review context.
+
+Linux automated gate: 406 distinct tests and 13 subtests passed across the broad, isolated live-plot, isolated launcher and focused review runs. Native macOS and Windows checks remain pending.

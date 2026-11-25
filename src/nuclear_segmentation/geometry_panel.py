@@ -565,6 +565,7 @@ class GeometryPanel(CollapsibleSection):
         self.window.viewer_toolbar.activate_tool("review")
 
     def start(self, *, minimum_capacity=0):
+        self.window.association_panel.restore()
         window = self.window
         review = window.context_panel.mask_review_page
         if not window._project_idle() or review._filter_timer.isActive():

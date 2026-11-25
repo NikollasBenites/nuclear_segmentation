@@ -7,6 +7,7 @@ from weakref import ref
 
 import numpy as np
 
+from .association_review import AssociationReview
 from .automatic_matching import MatchingSettings, OverlapStatistics
 from .geometry_edit import effective_masks
 from .scientific_input import same_input_except_z_corrections
@@ -129,6 +130,7 @@ class MatchingPairContext:
 
     def __init__(self, state: ProjectState):
         self._state = state
+        self.review = AssociationReview(self)
         self._project_id = state.session_revision().project_id
         self._ids = dict.fromkeys(MATCHING_ROLES)
         self._verified = {}
