@@ -53,11 +53,16 @@ def test_sparse_tables_filter_sort_and_candidate_selection(qapp):
     selected = ui.selection
     assert selected.focus_id == 13 and selected.focus_role == "nuclear"
     assert selected.other_candidate_ids == (11, 13)
+    ui.candidates.sortByColumn(5, Qt.SortOrder.DescendingOrder)
+    assert [row.nuclear_fraction for row in candidates.rows] == [1., .9, .3, .2]
+    cell = candidates.index(1, 5)
+    assert cell.data() == "90.00%" and cell.data(Qt.ItemDataRole.UserRole) == .9
+    assert ui.selection == selected and ui.candidates.currentIndex().row() == 3
     ui.multiple.setChecked(False)
-    assert ui.selection == selected and len(model.rows) == 2
+    assert ui.selection == selected and len(model.rows) == 3
     ui.objects.sortByColumn(1, Qt.SortOrder.AscendingOrder)
-    assert [row[0] for row in model.rows] == [CYTO + 1, CYTO]
-    assert ui.selection == selected and ui.objects.currentIndex().row() == 1
+    assert [row[0] for row in model.rows] == [CYTO + 2, CYTO + 1, CYTO]
+    assert ui.selection == selected and ui.objects.currentIndex().row() == 2
     ui.previous.click()
     assert ui.selection.associated_ids == (13,) and ui.selection.focus_id == CYTO + 1
     ui.next.click()
@@ -268,6 +273,10 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
         canvas = window.embedding.qt_viewer.canvas
         display = window.matching_display
         n, c = display.layers["nuclear"], display.layers["cytoplasmic"]
+        def focused_boundary():
+            selection = ui.selection
+            return display.renderer.marks[selection.focus_role, selection.focus_id][1]
+
         sources = (nuclear.filtering_result["filtered_masks"], cytoplasmic.filtering_result["filtered_masks"])
         originals = tuple(a.copy() for a in sources)
         active = state.active_session_id
@@ -277,9 +286,9 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
             assert window.viewer_toolbar.set_ndisplay(dimensions)
             ui._object_clicked(ui.objects.currentIndex())
             ui.focus.click()
-            parent_highlight = display.inspection.highlight
+            parent_highlight = focused_boundary()
             assert parent_highlight is not None and not parent_highlight.editable
-            assert parent_highlight.data.sum() == (c.data == 99).sum()
+            assert parent_highlight.data.any() and not parent_highlight.visible
             assert not c.visible and state.active_session_id == active
             ui.isolate.click()
             assert n.visible and c.visible and ui.restore.isEnabled()
@@ -289,14 +298,14 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
             np.testing.assert_allclose(c.colormap.map(23), (0, 0, 0, 0))
             ui.candidates.selectRow(3)
             ui.focus.click()
-            highlight = display.inspection.highlight
+            highlight = focused_boundary()
             assert highlight is not parent_highlight and parent_highlight not in viewer.layers
-            assert not highlight.editable and highlight.data.sum() == (n.data == 13).sum()
-            for pos in np.argwhere(highlight.data):
-                source = np.rint(n.world_to_data(highlight.data_to_world(pos))).astype(int)
-                assert n.data[tuple(source)] == 13
+            assert not highlight.editable and highlight.data.any()
+            for pos in np.argwhere(n.data == 13):
+                local = np.rint(highlight.world_to_data(n.data_to_world(pos))).astype(int)
+                assert highlight.data[tuple(local)] == 0
             assert ui.selection.focus_id == 13 and ui.include.isChecked()
-            np.testing.assert_allclose(n.colormap.map(13), (1, 0, 1, 1))
+            np.testing.assert_allclose(n.colormap.map(13), COLORS["MATCH"])
             world = n.data_to_world((2, 0, 2))
             np.testing.assert_allclose(viewer.camera.center[-dimensions:], world[-dimensions:])
             if dimensions == 2:
@@ -304,9 +313,10 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
             assert viewer.dims.ndisplay == dimensions and len(display.layers) == 2
             QTest.qWait(100)
             assert window.viewer_toolbar.set_ndisplay(3 if dimensions == 2 else 2)
-            assert highlight is display.inspection.highlight and not highlight.editable
+            assert highlight not in viewer.layers and not focused_boundary().editable
             assert window.viewer_toolbar.set_ndisplay(dimensions)
             QTest.qWait(100)
+            highlight = focused_boundary()
             highlighted = canvas.screenshot()
             highlight.visible = False
             QTest.qWait(100)
@@ -328,7 +338,7 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
                 assert not window.viewer_toolbar.activate_tool("paint")
                 assert window.mask_selection.selected_mask_id is None
         ui.focus.click()
-        highlight = display.inspection.highlight
+        highlight = focused_boundary()
         viewer.layers.remove(n)
         assert highlight not in viewer.layers
         display.show()
@@ -342,27 +352,224 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
         ui.previous.click()
         ui.candidates.selectRow(3)
         ui.focus.click()
-        highlight = display.inspection.highlight
+        highlight = focused_boundary()
         window.set_workflow("proofreading")
         assert highlight not in viewer.layers
         assert not display.layers and not window.mask_display.suspended
         window.set_workflow("matching")
-        assert ui.selection.focus_id == 13 and not ui.restore.isEnabled()
+        assert ui.selection.focus_role == "cytoplasmic" and not ui.restore.isEnabled()
         ui.isolate.click()
         ui.focus.click()
-        highlight = display.inspection.highlight
+        highlight = focused_boundary()
         panel.minimum.setText(".9")
         assert highlight not in viewer.layers
         assert ui.selection is None and not ui.restore.isEnabled() and not display.inspection.appearance
-        assert not selected.is_current(state.matching_pair) and not display.inspection.positions
+        assert not selected.is_current(state.matching_pair) and not display.renderer.marks
         assert not display.layers["cytoplasmic"].visible
         panel.minimum.setText(".5")
         ui.isolate.click()
         ui.focus.click()
-        highlight = display.inspection.highlight
+        highlight = focused_boundary()
         assert window._apply_imported_dataset(dataset)
         assert highlight not in viewer.layers
         assert ui.selection is None and not display.layers and not display.inspection.appearance
     finally:
         window.close()
         qapp.processEvents()
+
+
+def click_mask(display, position, *, direction=None, drag=False):
+    from types import SimpleNamespace
+
+    viewer = display.viewer
+    event = SimpleNamespace(type="mouse_press", button=1, modifiers=(), pos=np.array([10, 10]),
+                            position=position, dims_displayed=viewer.dims.displayed, view_direction=direction)
+    callback = display._pick
+    assert callback in viewer.mouse_drag_callbacks
+    gesture = callback(viewer, event)
+    next(gesture, None)
+    if drag:
+        event.type = "mouse_move"
+        event.pos += 50
+        next(gesture, None)
+    event.type = "mouse_release"
+    next(gesture, None)
+
+
+def test_targeted_picks_and_read_only_appearance(window_pair):
+    window, _ = window_pair
+    n, c = inspection_pair(window)
+    panel = choose_in_panel(window, n, c)
+    result = run_job(window.project_state.matching_pair)
+    display = window.matching_display
+    viewer = display.viewer
+    panel.class_colors.setChecked(True)
+    nuclear = display.layers["nuclear"]
+    position = nuclear.data_to_world((2, 0, 0))  # Nucleus 13 overlaps cyto 99 here but matches 23.
+    viewer.dims.set_point(0, position[0])
+    center = viewer.camera.center
+    ui = panel.candidate_explorer
+    click_mask(display, position)
+    assert ui.nucleus == 13 and panel.explorer_mode.currentIndex() == 1
+    assert panel.table.currentIndex().siblingAtColumn(0).data() == "13"
+    assert panel.selection_status.text() == "Nucleus 13 · MATCH"
+    assert viewer.camera.center == center
+    marks = display.renderer.marks
+    assert marks["cytoplasmic", 23][1].name.startswith("Accepted")
+    assert marks["cytoplasmic", 99][1].name.startswith("Candidate")
+    panel.pick_target.setCurrentIndex(1)
+    click_mask(display, position, drag=True)
+    assert panel.explorer_mode.currentIndex() == 1
+    click_mask(display, position)
+    assert panel.explorer.selection.focus_id == 99 and panel.explorer_mode.currentIndex() == 0
+    assert viewer.camera.center == center
+    for label, kind in ((2, "Accepted"), (7, "Accepted"), (11, "Candidate"), (13, "Candidate")):
+        assert marks["nuclear", label][1].name.startswith(kind)
+    panel.pick_target.setCurrentIndex(0)
+    point = nuclear.data_to_world((1, 3, 0))
+    viewer.dims.set_point(0, point[0])
+    click_mask(display, point)
+    assert ui.nucleus == 11 and not ui.multiple.isChecked()
+    assert panel.selection_status.text().endswith("AMBIGUOUS")
+    assert all(layer.name.split()[0] != "Accepted" for _, layer in marks.values())
+    ui.isolate.setChecked(True)
+    np.testing.assert_array_equal(nuclear.colormap.map(11), COLORS["AMBIGUOUS"])
+    fraction = ui.candidates.model().index(0, 2)
+    assert fraction.data() == "20.00%" and fraction.data(Qt.ItemDataRole.UserRole) == .2
+    panel.table.sortByColumn(5, Qt.SortOrder.AscendingOrder)
+    assert panel.table.currentIndex().siblingAtColumn(0).data() == "11"
+    row = panel.table_model.row_numbers[7]
+    panel.table.selectRow(row)
+    assert ui.nucleus == 7 and panel.table_model.index(row, 5).data() == "100.00%"
+    panel.styles["nuclear"].setCurrentText("Outlines only")
+    panel.styles["cytoplasmic"].setCurrentText("Filled masks with outlines")
+    for dimensions in (3, 2):
+        window.viewer_toolbar.set_ndisplay(dimensions)
+        edge = display.renderer.edges["nuclear"][1]
+        np.testing.assert_array_equal(edge.colormap.map(7), COLORS["MATCH"])
+        assert nuclear.colormap.map(7)[-1] == 0 and edge.data.any()
+        assert edge.data_to_world((1, 2, 0)) == nuclear.data_to_world((1, 2, 0))
+        assert all(layer.contour == 0 for _, layer in marks.values())
+        for layer in (nuclear, edge, marks["nuclear", 7][1]):
+            layer.editable = True
+            assert not layer.editable
+            viewer.layers.selection.active = layer
+            for tool in ("paint", "erase"):
+                assert not window.viewer_toolbar.activate_tool(tool)
+        panel.opacity["nuclear"].setValue(39)
+        assert edge.opacity == .39
+        assert marks["nuclear", 7][1].opacity == pytest.approx(.39 * (.4 if dimensions == 3 else 1.))
+        panel.visibility["nuclear"].setChecked(False)
+        assert not edge.visible and not marks["nuclear", 7][1].visible
+        panel.visibility["nuclear"].setChecked(True)
+    ui.isolate.setChecked(False)
+    window.viewer_toolbar.set_ndisplay(3)
+    click_mask(display, nuclear.data_to_world((0, 1, 2)), direction=(1., 0., 0.))
+    assert ui.nucleus == 2 and viewer.dims.ndisplay == 3
+    assert window.project_state.matching_pair.current_result is result
+    window.set_workflow("proofreading")
+    assert ui.nucleus is None and not marks and not display.renderer.edges
+
+
+def test_zero_link_inspection(qapp):
+    from nuclear_segmentation.candidate_explorer import CandidateExplorer
+    from nuclear_segmentation.matching_appearance import relationships
+
+    result = population()
+    cyto = AssociationExplorer()
+    cyto.set_result(result, "")
+    cyto.multiple.setChecked(False)
+    cyto.objects.selectRow(2)
+    assert cyto.selection.cytoplasmic_id == CYTO + 2 and cyto.selection.associated_ids == ()
+    assert relationships(cyto.index, "cytoplasmic", CYTO + 2) == {("cytoplasmic", CYTO + 2): "selected"}
+    nuc = CandidateExplorer()
+    nuc.set_result(result, None)
+    nuc.multiple.setChecked(False)
+    pos = next(i for i, row in enumerate(nuc.objects.model().rows) if row[0] == 15)
+    nuc.objects.selectRow(pos)
+    assert nuc.nucleus == 15 and nuc.candidates.model().rowCount() == 0
+    assert relationships(cyto.index, "nuclear", 15) == {("nuclear", 15): "selected"}
+    assert not nuc.review.isEnabled()
+
+
+def test_matching_canvas_click_dispatch(qapp, tmp_path):
+    if qapp.platformName() in {"offscreen", "minimal"}:
+        pytest.skip("Requires the Qt OpenGL canvas")
+    window = DesktopWindow(settings=QSettings(str(tmp_path / "pick.ini"), QSettings.Format.IniFormat),
+                           restore_workspace=False)
+    try:
+        window.show()
+        assert window._apply_imported_dataset(_dataset(tmp_path / "pick.tif"))
+        nuclear, cyto = inspection_pair(window)
+        panel = choose_in_panel(window, nuclear, cyto)
+        run_job(window.project_state.matching_pair)
+        panel.class_colors.setChecked(True)
+        display = window.matching_display
+        widget = window.embedding.qt_viewer.canvas.native
+        world = display.layers["nuclear"].data_to_world((0, 1, 3))
+        for dimensions in (2, 3):
+            window.viewer_toolbar.set_ndisplay(dimensions)
+            camera = display.viewer.scene.camera
+            display.viewer.dims.set_point(0, world[0])
+            if dimensions == 3:
+                camera.set_view_direction((1, 0, 0))
+            camera.center = world
+            QTest.qWait(120)
+            for role, label in (("Nuclear", 2), ("Cytoplasmic", 99)):
+                panel.pick_target.setCurrentText(role)
+                center = camera.center
+                section = display.viewer.dims.point[0]
+                QTest.mouseClick(widget, Qt.MouseButton.LeftButton, pos=widget.rect().center())
+                QTest.qWait(50)
+                assert panel.explorer_mode.currentIndex() == int(role == "Nuclear")
+                assert display.renderer.marks[role.lower(), label][1].name.startswith("Selected")
+                assert camera.center == center
+                if dimensions == 2:
+                    assert display.viewer.dims.point[0] == pytest.approx(section)
+    finally:
+        window.close()
+        qapp.processEvents()
+
+
+def test_picking_disjoint_populations(window_pair):
+    window, _ = window_pair
+    nuclear, cyto = measured_pair(window, crop=True)
+    # Retain one nucleus and one cyto with no common voxels.
+    from test_matching_pair import publish
+    publish(window.project_state, nuclear, x=0, window=window)
+    publish(window.project_state, cyto, x=3, window=window)
+    panel = choose_in_panel(window, nuclear, cyto)
+    result = run_job(window.project_state.matching_pair)
+    assert result.nuclei[0].auto_class == "NO_MATCH"
+    panel.class_colors.setChecked(True)
+    display = window.matching_display
+    for role, point in (("cytoplasmic", (0, 1, 3)), ("nuclear", (0, 1, 0))):
+        layer = display.layers[role]
+        panel.pick_target.setCurrentText(role.title())
+        world = layer.data_to_world(point)
+        display.viewer.dims.set_point(0, world[0])
+        click_mask(display, world)
+        assert set(display.renderer.marks) == {(role, 7)}
+        ui = panel.explorer if role == "cytoplasmic" else panel.candidate_explorer
+        assert ui.candidates.model().rowCount() == 0 and not ui.multiple.isChecked()
+        assert ui.objects.currentIndex().siblingAtColumn(0).data() == "7"
+        ui.isolate.click()
+        if role == "cytoplasmic":
+            ui.restore.click()
+    np.testing.assert_array_equal(display.layers["nuclear"].colormap.map(7), COLORS["NO_MATCH"])
+    assert "NO_MATCH" in display.viewer.canvas.overlays.text.text
+
+
+def test_isolated_ray_skips_hidden_foreground(qapp):
+    from napari.components import ViewerModel
+    from nuclear_segmentation.mask_selection import pick_world_label
+    viewer = ViewerModel(ndisplay=3)
+    data = np.zeros((5, 3, 3), dtype=np.uint16)
+    data[0] = 7
+    data[4] = 11
+    layer = viewer.add_labels(data, scale=(2., .5, .3), translate=(4., 1., 6.))
+    point = layer.data_to_world((0, 1, 1))
+    args = (layer, point, (0, 1, 2), (1., 0., 0.))
+    assert pick_world_label(*args) == 7
+    assert pick_world_label(*args, visible_ids={11}) == 11
+    assert pick_world_label(*args, visible_ids=set()) is None

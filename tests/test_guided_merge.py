@@ -132,7 +132,7 @@ def test_review_overlay_lifecycle_and_navigation(window_pair):
     run_job(pair)
     explorer = matching.explorer
     explorer.next_nucleus.click()
-    assert window.matching_display.inspection.focused_selection == explorer.selection
+    assert ("nuclear", explorer.selection.focus_id) in window.matching_display.renderer.marks
     window.set_workflow("proofreading")
     ui = window.association_panel
     active = window.project_state.active_session
@@ -151,7 +151,8 @@ def test_review_overlay_lifecycle_and_navigation(window_pair):
     camera = viewer.camera.center
     ui.targets.setCurrentText("23")
     assert viewer.camera.center == camera and not pair.review.events
-    assert not np.array_equal(cyto.colormap.map(23), cyto.colormap.map(99))
+    np.testing.assert_array_equal(cyto.colormap.map(23), cyto.colormap.map(99))
+    assert ui.renderer.marks["cytoplasmic", 23][1].name.startswith("Selected")
     ui.visibility["nuclear"].setChecked(False)
     ui.opacity["cytoplasmic"].setValue(32)
     assert not nuclear.visible and cyto.opacity == .32

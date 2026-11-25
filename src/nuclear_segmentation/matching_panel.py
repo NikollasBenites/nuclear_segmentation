@@ -1,24 +1,27 @@
 """Matching controls and read-only layers in the existing desktop viewer."""
 from __future__ import annotations
 
-from napari.utils.colormaps import CyclicLabelColormap, DirectLabelColormap
-from qtpy.QtCore import QAbstractTableModel, QModelIndex, QObject, QSignalBlocker, Qt
+import numpy as np
+from qtpy.QtCore import QAbstractTableModel, QModelIndex, QObject, QSignalBlocker, Qt, Signal
 from qtpy.QtWidgets import (
-    QCheckBox, QComboBox, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
+    QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
     QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
-from .automatic_matching import COLORS, MatchingSettings
+from .automatic_matching import MatchingSettings
+from .matching_appearance import MaskAppearance, appearance_control, relationships
 from .candidate_explorer import CandidateExplorer
 from .matching_explorer import AssociationExplorer
-from .matching_inspection import MatchingInspection, ROLE_COLORS, add_population, focus_population, highlight_ids
+from .matching_inspection import MatchingInspection, add_population, focus_population
 from .matching_execution import MatchingExecution
 from .collapsible_section import CollapsibleSection
+from .mask_selection import pick_world_label
 from .matching_pair import MATCHING_LAYER, MATCHING_ROLES
 from .ui_icons import icon
 
 
 class MatchingTable(QAbstractTableModel):
+    sorted_rows = Signal()
     columns = (("Nucleus ID", "nuclear_id"), ("Automatic class", "auto_class"),
                ("Auto-linked cyto ID", "accepted_cytoplasmic_id"),
                ("Best cyto ID", "best_cytoplasmic_id"), ("Second cyto ID", "second_cytoplasmic_id"),
@@ -31,15 +34,34 @@ class MatchingTable(QAbstractTableModel):
     def __init__(self, parent):
         super().__init__(parent)
         self.result = None
+        self.rows = []
+        self.row_numbers = {}
+        self.order = 0, Qt.SortOrder.AscendingOrder
 
     def show_result(self, result):
         if self.result is not result:
-            self.beginResetModel()
             self.result = result
-            self.endResetModel()
+            self.sort(*self.order)
+
+    def sort(self, column, order):
+        if not 0 <= column < len(self.columns):
+            return
+        field = self.columns[column][1]
+
+        def sort_key(row):
+            value = getattr(row, field)
+            return value is None, value
+
+        self.beginResetModel()
+        self.order = column, order
+        rows = self.result.nuclei if self.result else ()
+        self.rows = sorted(rows, key=sort_key, reverse=order == Qt.SortOrder.DescendingOrder)
+        self.row_numbers = {row.nuclear_id: i for i, row in enumerate(self.rows)}
+        self.endResetModel()
+        self.sorted_rows.emit()
 
     def rowCount(self, parent=QModelIndex()):
-        return len(self.result.nuclei) if self.result and not parent.isValid() else 0
+        return 0 if parent.isValid() else len(self.rows)
 
     def columnCount(self, parent=QModelIndex()):
         return len(self.columns) if not parent.isValid() else 0
@@ -50,9 +72,13 @@ class MatchingTable(QAbstractTableModel):
         return super().headerData(section, orientation, role)
 
     def data(self, index, role):
-        if role == Qt.ItemDataRole.DisplayRole and index.isValid():
-            row = self.result.nuclei[index.row()]
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.UserRole) and index.isValid():
+            row = self.rows[index.row()]
             value = getattr(row, self.columns[index.column()][1])
+            if role == Qt.ItemDataRole.UserRole:
+                return value
+            if self.columns[index.column()][1].endswith("_nuclear_fraction"):
+                return f"{value:.2%}"
             if isinstance(value, float):
                 return f"{value:.6g}"
             return "—" if value is None else str(value)
@@ -69,6 +95,7 @@ class MatchingPanel(QWidget):
         self.summaries = {}
         self.visibility = {}
         self.opacity = {}
+        self.styles = {}
         for role in MATCHING_ROLES:
             layout = self._section(root, role, f"{role.title()} Masks")
             label = QLabel(f"{role.title()} Session")
@@ -86,6 +113,7 @@ class MatchingPanel(QWidget):
         self.show_inputs = QPushButton(icon("labels"), "Show Matching Inputs")
         visualization.addWidget(self.show_inputs)
         for role in MATCHING_ROLES:
+            self.styles[role] = appearance_control(visualization, role)
             visible = self.visibility[role] = QCheckBox(f"Show {role} masks")
             visualization.addWidget(visible)
             label = QLabel(f"{role.title()} opacity")
@@ -98,8 +126,12 @@ class MatchingPanel(QWidget):
             visualization.addWidget(opacity)
         self.class_colors = QCheckBox("Color nuclei by automatic class")
         visualization.addWidget(self.class_colors)
-        legend = self._note(visualization)
-        legend.setText("Automatic classes · Green MATCH · Yellow AMBIGUOUS · Red NO_MATCH")
+        visualization.addWidget(QLabel("Click to inspect"))
+        self.pick_target = QComboBox()
+        self.pick_target.setAccessibleName("Mask selection target")
+        self.pick_target.addItems(["Nuclear", "Cytoplasmic"])
+        visualization.addWidget(self.pick_target)
+        self.selection_status = self._note(root)
         automatic = self._section(root, "automatic", "Automatic Matching")
         self.minimum = self._fraction(automatic, "Minimum best overlap fraction")
         self.maximum = self._fraction(automatic, "Maximum second-best overlap fraction")
@@ -117,6 +149,8 @@ class MatchingPanel(QWidget):
         self.table.setAccessibleName("Automatic classifications by nuclear ID")
         self.table_model = MatchingTable(self.table)
         self.table.setModel(self.table_model)
+        self.table.setSortingEnabled(True)
+        self.table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self.table.verticalHeader().hide()
         results.addWidget(self.table)
         self.graphs = QPushButton("Show Matching Graphs")
@@ -163,7 +197,8 @@ class MatchingPanel(QWidget):
             self.class_colors.setChecked(False)
         for role in MATCHING_ROLES:
             visible, opacity = self.visibility[role], self.opacity[role]
-            with QSignalBlocker(visible), QSignalBlocker(opacity):
+            with QSignalBlocker(visible), QSignalBlocker(opacity), QSignalBlocker(self.styles[role]):
+                self.styles[role].setCurrentIndex(0)
                 visible.setChecked(True)
                 opacity.setValue(self._default_opacity)
 
@@ -188,7 +223,6 @@ class MatchingPanel(QWidget):
 class MatchingDisplay(QObject):
     """Present a captured pair without adopting the active session's layer ownership."""
 
-    _colors = ROLE_COLORS
 
     def __init__(self, viewer, state, panel, session_display, parent=None):
         super().__init__(parent)
@@ -203,12 +237,21 @@ class MatchingDisplay(QObject):
         self._active = False
         self._requested = False
         self._showing = False
-        self._colored_result = None
+        self._syncing = False
+        self._isolated_ids = None
+        self.renderer = MaskAppearance(viewer, state)
         self.inspection = MatchingInspection(self)
-        self._candidate_maps = {}
+        viewer.mouse_drag_callbacks.append(self._pick)
+        viewer.dims.events.order.connect(self.render)
+        viewer.dims.events.ndisplay.connect(self.render)
+        panel.table_model.sorted_rows.connect(self.render)
+        panel.table.selectionModel().currentRowChanged.connect(self._result_row)
+        for box in panel.styles.values():
+            box.currentIndexChanged.connect(self.render)
         panel.explorer_mode.currentIndexChanged.connect(self._explorer_changed)
-        panel.candidate_explorer.changed.connect(self._inspect_candidates)
-        panel.candidate_explorer.focus_requested.connect(lambda: self._inspect_candidates(center=True))
+        panel.candidate_explorer.changed.connect(self.render)
+        panel.candidate_explorer.focus_requested.connect(self._focus_candidate)
+        panel.candidate_explorer.navigated.connect(self._candidate_navigated)
         state.association_review_changed.connect(panel.candidate_explorer._selection_changed)
         self.execution = MatchingExecution(state, self)
         self.execution.changed.connect(self.refresh)
@@ -237,47 +280,159 @@ class MatchingDisplay(QObject):
         self._active = active
         if active:
             self.refresh()
-            self._inspect_candidates()
         else:
             self._stop_showing()
             self.panel.table_model.show_result(None)
+            self.panel.explorer.set_result(None, "Matching inactive.")
+            self.panel.candidate_explorer.set_result(None, self._pair.review)
+            self.panel.candidate_explorer.isolate.setChecked(False)
+            self.panel.selection_status.clear()
 
     def show(self):
         if self._active:
             self.refresh(request_visualization=True)
 
-    def _restore_candidate_maps(self):
-        for role, colors in self._candidate_maps.items():
-            if role in self.layers:
-                self.layers[role].colormap = colors
-        self._candidate_maps.clear()
+    def _result_row(self, current, previous):
+        if self._syncing:
+            return
+        if current.isValid() and self.panel.table_model.result is self._pair.current_result:
+            label = self.panel.table_model.rows[current.row()].nuclear_id
+            self.select_object("nuclear", label)
+            if self.panel.candidate_explorer.follow.isChecked() and "nuclear" in self.layers:
+                focus_population(self.viewer, self.state, self.layers["nuclear"], label)
+
+    def _pick(self, viewer, event):
+        if not self._active or event.button != 1 or event.modifiers:
+            return
+        role = self.panel.pick_target.currentText().lower()
+        layer = self.layers.get(role)
+        result = self._pair.current_result
+        if not result or layer is None or not layer.visible or not layer.opacity:
+            return
+        start = np.array(event.pos)
+        direction = event.view_direction
+        axes = tuple(event.dims_displayed)
+        ids = None if self._isolated_ids is None else self._isolated_ids[role]
+        value = pick_world_label(layer, event.position, axes, direction, visible_ids=ids)
+        if not value:
+            return
+        yield
+        while event.type == "mouse_move":
+            if np.abs(event.pos - start).sum() >= QApplication.startDragDistance():
+                return
+            yield
+        if (event.type == "mouse_release" and not event.modifiers and self._active
+                and self.layers.get(role) is layer and self._pair.current_result is result
+                and np.abs(event.pos - start).sum() < QApplication.startDragDistance()):
+            self.select_object(role, int(value))
+
+    def select_object(self, role, label):
+        if self._syncing or not self._active:
+            return
+        index = self.panel.explorer.index
+        if not index or index.result is not self._pair.current_result:
+            return
+        nuclear = role == "nuclear"
+        if label not in (index.nuclei if nuclear else index.objects):
+            return
+        switching = self.panel.explorer_mode.currentIndex() != int(nuclear)
+        was_isolated = (self.panel.candidate_explorer.isolate.isChecked() if not nuclear
+                        else bool(self.inspection.appearance))
+        self._syncing = True
+        try:
+            ui = self.panel.candidate_explorer if nuclear else self.panel.explorer
+            self.panel.explorer_mode.setCurrentIndex(int(nuclear))
+            if switching and nuclear:
+                ui.isolate.setChecked(was_isolated)
+            if nuclear and ui.classes.currentText() not in ("All classes", index.nuclei[label].auto_class):
+                ui.classes.setCurrentIndex(0)
+            if not any(row[0] == label for row in ui.objects.model().rows):
+                ui.multiple.setChecked(False)
+            pos = next(i for i, row in enumerate(ui.objects.model().rows) if row[0] == label)
+            ui.objects.selectRow(pos)
+            if nuclear:
+                ui._object_changed(ui.objects.currentIndex())
+            else:
+                ui._object_clicked(ui.objects.currentIndex())
+        finally:
+            self._syncing = False
+        if switching and not nuclear and was_isolated:
+            self.inspection.isolate()
+        else:
+            self.render()
 
     def _explorer_changed(self):
-        self.inspection.restore()
-        self._restore_candidate_maps()
-        self.refresh()
-        self._inspect_candidates()
+        self.inspection.reset()
+        if not self._syncing:
+            self.show()
+            self.render()
 
-    def _inspect_candidates(self, *, center=False):
+    def _candidate_navigated(self):
+        if self.panel.candidate_explorer.follow.isChecked():
+            self._focus_candidate()
+
+    def _focus_candidate(self):
         ui = self.panel.candidate_explorer
-        if not self._active or self.panel.explorer_mode.currentIndex() != 1:
+        if self._syncing or not self._active or self.panel.explorer_mode.currentIndex() != 1:
             return
-        if ui.result is None or ui.result is not self._pair.current_result or ui.nucleus is None:
-            self._restore_candidate_maps()
+        if ui.result is self._pair.current_result and ui.focus_id is not None:
+            if ui.focus_role not in self.layers:
+                self.show()
+            if ui.focus_role in self.layers:
+                focus_population(self.viewer, self.state, self.layers[ui.focus_role], ui.focus_id)
+
+    def render(self, *args):
+        if self._syncing or not self._active:
             return
-        self._show_pair(self._pair.capture())
-        if len(self.layers) != 2:
-            return
-        if not self._candidate_maps:
-            self._candidate_maps = {role: layer.colormap for role, layer in self.layers.items()}
-        selection = ui.selection()
-        cyto_ids = set(selection.ids or ui.by_nucleus[ui.nucleus])
-        if ui.focus_role == "cytoplasmic":
-            cyto_ids.add(ui.focus_id)
-        highlight_ids(self.layers["nuclear"], "nuclear", [ui.nucleus], ui.isolate.isChecked())
-        highlight_ids(self.layers["cytoplasmic"], "cytoplasmic", cyto_ids, ui.isolate.isChecked())
-        if center or ui.follow.isChecked():
-            focus_population(self.viewer, self.state, self.layers[ui.focus_role], ui.focus_id)
+        index = self.panel.explorer.index
+        focus = isolated = None
+        marks = {}
+        if index and index.result is self._pair.current_result:
+            if self.panel.explorer_mode.currentIndex():
+                ui = self.panel.candidate_explorer
+                if ui.result is index.result and ui.nucleus is not None:
+                    focus = ui.focus_role, ui.focus_id
+                    if ui.isolate.isChecked():
+                        ids = ui.selection().ids or ui.by_nucleus[ui.nucleus]
+                        isolated = {"nuclear": {ui.nucleus}, "cytoplasmic": set(ids)}
+            else:
+                ui = self.panel.explorer
+                s = ui.selection
+                if s:
+                    focus = s.focus_role, s.focus_id
+                    if self.inspection.appearance:
+                        ids = set(s.associated_ids)
+                        if ui.include.isChecked():
+                            ids.update(s.other_candidate_ids)
+                        isolated = {"nuclear": ids, "cytoplasmic": {s.cytoplasmic_id}}
+                ui.restore.setEnabled(bool(self.inspection.appearance))
+        else:
+            index = None
+        message = ""
+        if focus:
+            role, label = focus
+            marks = relationships(index, role, label)
+            if isolated is not None:
+                if role == "cytoplasmic" and not self.panel.explorer_mode.currentIndex() and not ui.include.isChecked():
+                    marks = {k: v for k, v in marks.items() if v != "candidate"}
+                if self.panel.explorer_mode.currentIndex() and role == "nuclear":
+                    marks = {k: v for k, v in marks.items() if v != "candidate" or k[1] in isolated[k[0]]}
+                for pop, obj in marks:
+                    isolated[pop].add(obj)
+            message = (f"Nucleus {label} · {index.nuclei[label].auto_class}" if role == "nuclear"
+                       else f"Cytoplasmic object {label} · {index.objects[label].accepted_count} accepted nuclei")
+        self._isolated_ids = isolated
+        self.panel.selection_status.setText(message)
+        table = self.panel.table
+        with QSignalBlocker(table.selectionModel()):
+            if focus and focus[0] == "nuclear" and focus[1] in self.panel.table_model.row_numbers:
+                table.selectRow(self.panel.table_model.row_numbers[focus[1]])
+            else:
+                table.setCurrentIndex(QModelIndex())
+                table.clearSelection()
+        if len(self.layers) == 2:
+            self.renderer.legend(message)
+            self.renderer.render(self.layers, self.panel.styles, index, self.panel.class_colors.isChecked(), marks, isolated)
 
     def _stop_showing(self):
         self._remove_layers()
@@ -301,10 +456,7 @@ class MatchingDisplay(QObject):
         self._pair.set_settings(settings)
 
     def _toggle_colors(self, enabled):
-        self.inspection.restore()
-        self._restore_candidate_maps()
         self.refresh(request_visualization=enabled)
-        self._inspect_candidates()
 
     def _select(self, role):
         self._pair.select(role, self.panel.selectors[role].currentData())
@@ -395,7 +547,7 @@ class MatchingDisplay(QObject):
         self._show_results(pair, result)
         explorer.set_result(result, self.panel.result_status.text())
         self.panel.candidate_explorer.set_result(result, self._pair.review)
-        self._apply_colors(result if self.panel.class_colors.isChecked() else None)
+        self.render()
         self.panel.compatibility.setText(message)
         self.panel.show_inputs.setEnabled(pair is not None and len(self.layers) != len(MATCHING_ROLES))
         for role in MATCHING_ROLES:
@@ -441,18 +593,6 @@ class MatchingDisplay(QObject):
         panel.result_status.setText(status)
         panel.summary.setText("\n".join(lines))
 
-    def _apply_colors(self, result):
-        layer = self.layers.get("nuclear")
-        if layer is None or self._candidate_maps or self.inspection.appearance or self._colored_result is result:
-            return
-        if result is None:
-            layer.colormap = CyclicLabelColormap(colors=[(0, 0, 0, 0), self._colors["nuclear"]])
-        else:
-            colors = {r.nuclear_id: COLORS[r.auto_class] for r in result.nuclei}
-            colors.update({None: (0, 0, 0, 0), 0: (0, 0, 0, 0)})
-            layer.colormap = DirectLabelColormap(color_dict=colors)
-        self._colored_result = result
-
     def _show_pair(self, pair):
         if not self._showing:
             if self.session_display.suspended:
@@ -493,6 +633,8 @@ class MatchingDisplay(QObject):
             with QSignalBlocker(control):
                 control.setValue(round(event.source.opacity * 100))
 
+        self.render()
+
     def _set_visible(self, role, visible):
         if role in self.layers:
             self.layers[role].visible = visible
@@ -504,13 +646,12 @@ class MatchingDisplay(QObject):
     def _removed(self, event):
         layer = event.value
         role = layer.metadata.get(MATCHING_LAYER)
-        if layer is self.inspection.highlight:
-            self.inspection.clear_highlight()
         if self.layers.get(role) is layer:
+            del self.layers[role]
+            self.renderer.clear()
             self.inspection.reset()
             layer.events.visible.disconnect(self._appearance_changed)
             layer.events.opacity.disconnect(self._appearance_changed)
-            del self.layers[role]
             if self._active and self._displayed is not None:
                 self.panel.visibility[role].setEnabled(False)
                 self.panel.opacity[role].setEnabled(False)
@@ -519,9 +660,8 @@ class MatchingDisplay(QObject):
             self._previous_layer = None
 
     def _remove_layers(self):
-        self._candidate_maps.clear()
         self.inspection.reset()
-        self._colored_result = None
+        self.renderer.clear()
         self._displayed = None
         for layer in tuple(self.layers.values()):
             self.viewer.layers.remove(layer)
@@ -534,3 +674,6 @@ class MatchingDisplay(QObject):
         for signal in self._state_signals:
             signal.disconnect(self.refresh)
         self.viewer.layers.events.removed.disconnect(self._removed)
+        self.viewer.mouse_drag_callbacks.remove(self._pick)
+        self.viewer.dims.events.order.disconnect(self.render)
+        self.viewer.dims.events.ndisplay.disconnect(self.render)

@@ -1,14 +1,10 @@
 """Temporary, read-only inspection of the two embedded matching layers."""
 import numpy as np
-from napari.utils.colormaps import CyclicLabelColormap, DirectLabelColormap
+from napari.utils.colormaps import CyclicLabelColormap
 
-from .automatic_matching import COLORS
+from .matching_appearance import ROLE_COLORS, lock_labels
 from .label_geometry import measured_bounds, selected_bounds
 from .matching_pair import MATCHING_LAYER
-from .mask_selection import INTERNAL_HIGHLIGHT_KEY, bounded_highlight
-
-
-ROLE_COLORS = {"nuclear": (.16, .8, 1., 1.), "cytoplasmic": (1., .52, .16, 1.)}
 
 
 def add_population(viewer, pair, role, name, visible, opacity):
@@ -20,16 +16,8 @@ def add_population(viewer, pair, role, name, visible, opacity):
         metadata={MATCHING_LAYER: role, "matching_pair": pair.population_identity,
                   "source_revision": source.owner, "measurement_revision": source.measurement_revision},
     )
-    layer.editable = False
+    lock_labels(layer)
     return layer
-
-
-def highlight_ids(layer, role, ids, isolated):
-    # Direct label lookup keeps the retained population as the layer's data.
-    background = "transparent" if isolated else ROLE_COLORS[role]
-    colors = {None: background, 0: "transparent"}
-    colors.update(dict.fromkeys(ids, "magenta" if role == "nuclear" else "yellow"))
-    layer.colormap = DirectLabelColormap(color_dict=colors)
 
 
 def focus_population(viewer, state, layer, label):
@@ -73,127 +61,56 @@ class MatchingInspection:
     def __init__(self, display):
         self.display = display
         self.ui = display.panel.explorer
-        self.highlight = self.focused_selection = None
         self.appearance = {}
-        self._shown = None
-        self.positions = {}
-        self.population = None
         self.ui.isolate.clicked.connect(self.isolate)
         self.ui.restore.clicked.connect(self.restore)
+        self.ui.include.toggled.connect(self._include_changed)
+        self.ui.selection_changed.connect(display.render)
         self.ui.focus.clicked.connect(self.focus)
-        self.ui.include.toggled.connect(self.update)
-        self.ui.selection_changed.connect(self.update)
-        self.ui.navigated.connect(lambda: self.focus(center=self.ui.follow.isChecked()))
+        self.ui.navigated.connect(self.navigate)
 
     def reset(self):
-        self.restore()
-        self.population = None
-        self.positions.clear()
-
-    def clear_highlight(self):
-        self.focused_selection = None
-        layer, self.highlight = self.highlight, None
-        if layer is not None and layer in self.display.viewer.layers:
-            self.display.viewer.layers.remove(layer)
-
-    def restore(self):
-        self.clear_highlight()
-        self._shown = None
         saved, self.appearance = self.appearance, {}
-        for layer, (colormap, visible, opacity) in saved.items():
-            layer.colormap = colormap
+        for layer, (visible, opacity) in saved.items():
             layer.visible = visible
             layer.opacity = opacity
         self.ui.restore.setEnabled(False)
 
-    def _ready(self):
-        selection = self.ui.selection
-        if not selection or not selection.is_current(self.display.state.matching_pair):
-            return False
-        if len(self.display.layers) != 2:
-            self.display.show()
-        return len(self.display.layers) == 2
+    def restore(self):
+        self.reset()
+        self.display.render()
 
     def isolate(self):
-        if not self._ready():
+        if not self.ui.selection:
             return
+        self.display.show()
         if not self.appearance:
-            self.appearance = {layer: (layer.colormap, layer.visible, layer.opacity)
-                               for layer in self.display.layers.values()}
-        self.update()
+            self.appearance = {layer: (layer.visible, layer.opacity) for layer in self.display.layers.values()}
+            for layer in self.appearance:
+                layer.visible = True
+                if layer.opacity == 0:
+                    layer.opacity = .6
+        self.display.render()
 
-    def update(self):
+    def _include_changed(self, enabled):
         selection = self.ui.selection
-        if self.highlight is not None and (selection != self.focused_selection or
-                (self.appearance and selection.focus_role == "nuclear"
-                 and selection.focus_id in selection.other_candidate_ids and not self.ui.include.isChecked())):
-            self.clear_highlight()
-        if not self.appearance:
-            return
-        if selection is None:
-            self.restore()
-            return
-        self.ui.restore.setEnabled(True)
-        shown = (selection.cytoplasmic_id, self.ui.include.isChecked())
-        if shown == self._shown:
-            return
-        self._shown = shown
-        nuclear = dict.fromkeys(selection.associated_ids, COLORS["MATCH"])
-        if self.ui.include.isChecked():
-            nuclear.update(dict.fromkeys(selection.other_candidate_ids, (1., 0., 1., 1.)))
-        maps = {"nuclear": nuclear,
-                "cytoplasmic": {selection.cytoplasmic_id: self.display._colors["cytoplasmic"]}}
-        for role, colors in maps.items():
-            layer = self.display.layers[role]
-            colors.update({None: (0., 0., 0., 0.), 0: (0., 0., 0., 0.)})
-            layer.colormap = DirectLabelColormap(color_dict=colors)
-            layer.visible = True
-            if layer.opacity == 0:
-                layer.opacity = .6
+        if (self.appearance and not enabled and selection and selection.focus_role == "nuclear"
+                and selection.focus_id in selection.other_candidate_ids):
+            self.ui.focus_parent()
+        self.display.render()
 
-    def focus(self, *, center=True):
-        if not self._ready():
+    def navigate(self):
+        if self.display._syncing:
             return
-        selection = self.ui.selection
-        role, label = selection.focus_role, selection.focus_id
-        layer = self.display.layers[role]
-        if self.appearance and role == "nuclear" and label in selection.other_candidate_ids:
+        s = self.ui.selection
+        if s and self.appearance and s.focus_role == "nuclear" and s.focus_id in s.other_candidate_ids:
             self.ui.include.setChecked(True)
-        if self.population != selection.population_identity:
-            self.positions.clear()
-            self.population = selection.population_identity
-        key = role, label
-        owner = layer.metadata["source_revision"]
-        properties = self.display.state.sessions[owner.session_id].filtering_result.get("properties")
-        if key not in self.positions:
-            self.positions[key] = focus_voxel(layer.data, label, properties)
-        point = self.positions[key]
-        if point is None:
-            return
-        viewer = self.display.viewer
-        if self.highlight is not None and selection == self.focused_selection:
-            if center:
-                center_on_voxel(viewer, layer, point)
-            return
-        self.clear_highlight()
-        bounds = measured_bounds(properties, label, layer.data.shape)
-        if bounds is not None:
-            box = tuple(slice(a, b) for a, b in zip(*bounds))
-            stats = selection.source().statistics
-            counts = stats.nuclear_voxels if role == "nuclear" else stats.cytoplasmic_voxels
-            if np.count_nonzero(layer.data[box] == label) != counts[label]:
-                bounds = None
-        crop, affine = bounded_highlight(layer, label, bounds)
-        crop.setflags(write=False)
-        active = viewer.layers.selection.active
-        self.highlight = viewer.add_labels(
-            crop, affine=affine, units=layer.units, name=f"Matching focus · {role} {label}", opacity=.7,
-            colormap={None: "transparent", 0: "transparent", 1: "#67ffff"},
-            metadata={INTERNAL_HIGHLIGHT_KEY: True},
-        )
-        self.highlight.editable = False
-        self.focused_selection = selection
-        if active in viewer.layers:
-            viewer.layers.selection.active = active
-        if center:
-            center_on_voxel(viewer, layer, point)
+        if self.ui.follow.isChecked():
+            self.focus()
+
+    def focus(self):
+        s = self.ui.selection
+        if s and s.is_current(self.display.state.matching_pair):
+            self.display.show()
+            if s.focus_role in self.display.layers:
+                focus_population(self.display.viewer, self.display.state, self.display.layers[s.focus_role], s.focus_id)

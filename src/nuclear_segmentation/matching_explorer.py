@@ -74,17 +74,19 @@ class AssociationIndex:
         self.result = result
         self.nuclei = {row.nuclear_id: row for row in result.nuclei}
         self.overlaps = defaultdict(list)
+        self.by_nucleus = defaultdict(list)
         accepted = defaultdict(list)
         stats = result.statistics
         for (nucleus, cyto), count in stats.intersections.items():
+            self.by_nucleus[nucleus].append(cyto)
             self.overlaps[cyto].append((nucleus, count))
             if self.nuclei[nucleus].accepted_cytoplasmic_id == cyto:
                 accepted[cyto].append(nucleus)
-        self.objects = {
-            cyto: CytoplasmicRow(cyto, len(ids), tuple(sorted(ids)), len(self.overlaps[cyto]),
-                                 stats.cytoplasmic_voxels[cyto] * stats.voxel_volume_um3)
-            for cyto, ids in accepted.items()
-        }
+        self.objects = {}
+        for cyto, size in stats.cytoplasmic_voxels.items():
+            ids = tuple(sorted(accepted[cyto]))
+            self.objects[cyto] = CytoplasmicRow(cyto, len(ids), ids, len(self.overlaps[cyto]),
+                                                size * stats.voxel_volume_um3)
 
     def candidates(self, cyto):
         stats = self.result.statistics
@@ -109,7 +111,7 @@ class InspectionTable(QAbstractTableModel):
     def replace(self, rows):
         column, order = self.order
         self.beginResetModel()
-        self.rows = sorted(rows, key=lambda r: r[column], reverse=order == Qt.SortOrder.DescendingOrder)
+        self.rows = sorted(rows, key=lambda r: (r[column] is None, r[column]), reverse=order == Qt.SortOrder.DescendingOrder)
         self.endResetModel()
 
     def sort(self, column, order):
@@ -131,9 +133,13 @@ class InspectionTable(QAbstractTableModel):
         return super().headerData(section, orientation, role)
 
     def data(self, index, role):
-        if role not in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole) or not index.isValid():
+        if role not in (Qt.ItemDataRole.UserRole, Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole) or not index.isValid():
             return
         value = self.rows[index.row()][index.column()]
+        if role == Qt.ItemDataRole.UserRole:
+            return value
+        if self.headers[index.column()] == "Fraction of nucleus" and role == Qt.ItemDataRole.DisplayRole:
+            return f"{value:.2%}"
         if isinstance(value, tuple):
             return ", ".join(map(str, value))
         if isinstance(value, bool):
@@ -185,6 +191,9 @@ class AssociationExplorer(QWidget):
         self.candidates = inspection_table(layout, "Overlapping nuclear candidates", (
             "Nucleus ID", "Automatic class", "Auto-linked cyto ID", "Intersection (voxels)",
             "Intersection (µm³)", "Fraction of nucleus", "Accepted here"))
+        self.candidates.setSortingEnabled(True)
+        self.candidates.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        self.candidates.model().sorted_rows.connect(self._restore_candidate)
         self.previous_nucleus = QPushButton("Previous Nucleus")
         self.next_nucleus = QPushButton("Next Nucleus")
         for control, delta in ((self.previous_nucleus, -1), (self.next_nucleus, 1)):
@@ -197,7 +206,7 @@ class AssociationExplorer(QWidget):
         self.focus = QPushButton("Focus Selected Object")
         self.review = QPushButton("Review in Proofreading")
         self.isolate = QPushButton("Isolate Associated Masks")
-        self.isolate.setToolTip("Accepted nuclei appear green and the selected cytoplasmic object appears orange.")
+        self.isolate.setToolTip("Show the selected cytoplasmic object and its accepted nuclei.")
         self.include = QCheckBox("Include other overlapping nuclei")
         self.restore = QPushButton("Show All Masks")
         for control in (self.focus, self.review, self.isolate, self.include, self.restore):
@@ -227,7 +236,7 @@ class AssociationExplorer(QWidget):
 
     def _filter(self):
         rows = self.index.objects.values() if self.index else ()
-        minimum = 2 if self.multiple.isChecked() else 1
+        minimum = 2 if self.multiple.isChecked() else 0
         self.objects.model().replace(r for r in rows if r.accepted_count >= minimum)
         self._restore_row()
 
@@ -260,6 +269,15 @@ class AssociationExplorer(QWidget):
             control.setEnabled(pos >= 0)
         self.restore.setEnabled(False)  # The display enables this during isolation.
 
+    def _restore_candidate(self):
+        if self.selection and self.selection.focus_role == "nuclear":
+            rows = self.candidates.model().rows
+            pos = next((i for i, row in enumerate(rows) if row.label_id == self.selection.focus_id), None)
+            if pos is not None:
+                with QSignalBlocker(self.candidates.selectionModel()):
+                    self.candidates.selectRow(pos)
+        self._candidate_controls()
+
     def _candidate_controls(self):
         row = self.candidates.currentIndex().row()
         self.previous_nucleus.setEnabled(row > 0)
@@ -275,11 +293,14 @@ class AssociationExplorer(QWidget):
             self._show_object(current.row())
             self.navigated.emit()
 
-    def _object_clicked(self, index):
+    def focus_parent(self):
         if self.selection and self.selection.focus_role == "nuclear":
             self.candidates.setCurrentIndex(QModelIndex())
             self.candidates.clearSelection()
             self._select("cytoplasmic", self.selection.cytoplasmic_id)
+
+    def _object_clicked(self, index):
+        self.focus_parent()
         if self.selection:
             self.navigated.emit()
 

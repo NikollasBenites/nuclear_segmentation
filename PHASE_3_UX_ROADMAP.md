@@ -25,3 +25,9 @@ An interface profile controls guidance and navigation. A scientific analysis pre
 ## Session access
 
 Place an accessible segmentation session selector near the top of the main workspace. Show the current session name and scientific role together. Switching sessions must preserve each session's independent inputs, results, review history and display state.
+
+## 3.5 · Association inspection and corrective tools
+
+Unify nuclear-first and cytoplasmic-first inspection in one Association Explorer. Let users filter by multiplicity while retaining direct access to objects with zero, one or several accepted associations. Provide contextual access to Split, Merge, Paint, Erase and Remove through the existing proofreading transactions.
+
+Maintain independent scientific classification and selection states across viewer and table navigation. Offer an optional minimum candidate overlap for display only. Changing it must preserve the computed associations, measurements and exports. Provide a wider, collapsible results-table workspace for side-by-side inspection.

@@ -11,7 +11,7 @@ from .matching_pair import MATCHING_LAYER
 INTERNAL_HIGHLIGHT_KEY = "nucytoseg_selection_highlight"
 
 
-def bounded_highlight(layer, selected, bounds=None):
+def bounded_highlight(layer, selected, bounds=None, *, padding=1):
     """Return a padded binary crop and its local-to-world transform."""
     data = layer.data[0] if layer.multiscale else layer.data
     if bounds is None:
@@ -20,8 +20,8 @@ def bounded_highlight(layer, selected, bounds=None):
         return
     minimum, maximum = bounds
     slices = tuple(slice(int(low), int(high)) for low, high in zip(minimum, maximum))
-    crop = np.pad((np.asarray(data[slices]) == selected).astype(np.uint8), 1)
-    start = minimum.astype(float) - 1
+    crop = np.pad((np.asarray(data[slices]) == selected).astype(np.uint8), padding)
+    start = minimum.astype(float) - padding
     origin = np.asarray(layer.data_to_world(start), dtype=float)
     ndim = data.ndim
     identity = np.eye(ndim)
@@ -36,6 +36,27 @@ def bounded_highlight(layer, selected, bounds=None):
     affine[:ndim, :ndim] = linear
     affine[:ndim, -1] = origin
     return crop, affine
+
+
+def pick_world_label(layer, position, axes, direction, *, visible_ids=None):
+    """Sample a calibrated optical section or the nearest label on a 3D camera ray."""
+    if len(axes) == 3 and (direction is None or not np.all(np.isfinite(direction)) or not np.any(direction)):
+        return None
+    value = layer.get_value(position, view_direction=direction, dims_displayed=list(axes), world=True)
+    if isinstance(value, tuple):
+        value = value[1]
+    if not value or visible_ids is None or value in visible_ids:
+        return value
+    if len(axes) == 3 and visible_ids:
+        # napari picks from the source array. A transparent ID can hide a visible
+        # ID farther along this ray during colormap-based isolation.
+        start, end = layer.get_ray_intersections(position, direction, list(axes), world=True)
+        if start is not None and end is not None:
+            steps = max(2, int(np.ceil(2 * np.linalg.norm(end - start))) + 1)
+            samples = np.rint(np.linspace(start, end, steps)).astype(int)
+            samples = np.clip(samples, 0, np.asarray(layer.data.shape) - 1)
+            return next((int(v) for v in layer.data[tuple(samples.T)] if v in visible_ids), None)
+    return None
 
 
 class MaskSelectionController(QObject):
@@ -151,13 +172,8 @@ class MaskSelectionController(QObject):
         if self.viewer.dims.ndisplay == 3 and event.view_direction is None:
             self.status_changed.emit("3D selection unavailable for this camera event")
             return
-        value = layer.get_value(
-            event.position,
-            view_direction=event.view_direction,
-            dims_displayed=list(event.dims_displayed),
-            world=True,
-        )
-        self.select_mask(layer, self._normalize_value(value))
+        value = pick_world_label(layer, event.position, event.dims_displayed, event.view_direction)
+        self.select_mask(layer, value)
 
     @staticmethod
     def _normalize_value(value):

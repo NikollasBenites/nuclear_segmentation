@@ -4,7 +4,9 @@ from qtpy.QtWidgets import QCheckBox, QSpinBox, QComboBox, QLabel, QLineEdit, QP
 
 from .association_review import STATES
 from .collapsible_section import CollapsibleSection
-from .matching_inspection import add_population, focus_population, highlight_ids
+from .matching_inspection import add_population, focus_population
+from .matching_appearance import LEGEND, MaskAppearance, appearance_control, relationships
+from .matching_explorer import AssociationIndex
 from .matching_pair import MATCHING_ROLES
 
 
@@ -15,6 +17,10 @@ class AssociationPanel(CollapsibleSection):
         self.state = window.project_state
         self.result = None
         self.active = False
+        self.renderer = MaskAppearance(window.embedding.viewer, self.state)
+        self.index = None
+        self.focus_role = "nuclear"
+        self.styles = {}
         self.layers = []
         self.previous_layer = None
         self.display_result = None
@@ -22,6 +28,9 @@ class AssociationPanel(CollapsibleSection):
         self.set_content_layout(form)
         self.message = QLabel()
         self.message.setWordWrap(True)
+        legend = QLabel(LEGEND)
+        legend.setWordWrap(True)
+        form.addWidget(legend)
         form.addWidget(self.message)
         def combo(title, values=()):
             form.addWidget(QLabel(title))
@@ -46,6 +55,8 @@ class AssociationPanel(CollapsibleSection):
         form.addWidget(self.follow)
         self.visibility, self.opacity = {}, {}
         for role in MATCHING_ROLES:
+            self.styles[role] = appearance_control(form, role)
+            self.styles[role].currentIndexChanged.connect(self._render)
             visible = self.visibility[role] = QCheckBox(f"Show {role} masks")
             visible.setChecked(True)
             form.addWidget(visible)
@@ -73,13 +84,15 @@ class AssociationPanel(CollapsibleSection):
         self.classes.currentIndexChanged.connect(self.populate)
         self.filter.currentIndexChanged.connect(self.populate)
         self.nuclei.currentIndexChanged.connect(self.show_object)
-        self.targets.currentTextChanged.connect(lambda: self._render(focus="cytoplasmic" if self.follow.isChecked() else None))
+        self.targets.currentTextChanged.connect(self._target_changed)
         for signal in (self.state.matching_result_changed, self.state.matching_selection_changed,
                        self.state.sessions_changed, self.state.inactive_session_validity_changed,
                        self.state.segmentation_result_changed, self.state.filtering_result_changed,
                        self.state.calibration_changed, self.state.changed):
             signal.connect(self.refresh)
         self.state.association_review_changed.connect(self.populate)
+        self.renderer.viewer.dims.events.order.connect(self._render)
+        self.renderer.viewer.dims.events.ndisplay.connect(self._render)
 
     @property
     def review(self):
@@ -89,6 +102,7 @@ class AssociationPanel(CollapsibleSection):
         current = self.state.matching_pair.current_result if self.active else None
         if current is not self.result or not self.nuclei.count():
             self.result = current
+            self.index = AssociationIndex(current) if current else None
             self.populate()
 
     def populate(self, *args):
@@ -109,7 +123,12 @@ class AssociationPanel(CollapsibleSection):
                                 and self.result and key[2] not in self.result.statistics.nuclear_voxels)
         self.show_object()
 
+    def _target_changed(self):
+        self.focus_role = "cytoplasmic"
+        self._render(focus=self.focus_role if self.follow.isChecked() else None)
+
     def show_object(self, *args):
+        self.focus_role = "nuclear"
         index = self.nuclei.currentIndex()
         self.previous.setEnabled(index > 0)
         self.next.setEnabled(0 <= index < self.nuclei.count() - 1)
@@ -178,6 +197,7 @@ class AssociationPanel(CollapsibleSection):
         if self.display_result is None:
             return
         self.display_result = None
+        self.renderer.clear()
         viewer = self.window.embedding.viewer
         for layer in self.layers:
             if layer in viewer.layers:
@@ -193,11 +213,14 @@ class AssociationPanel(CollapsibleSection):
             layer.visible = self.visibility[role].isChecked()
             layer.opacity = self.opacity[role].value() / 100
 
+        self._render()
+
     def inspect(self, target, isolate):
         self.set_expanded(True, emit=False)
         with QSignalBlocker(self.isolation):
             self.isolation.setChecked(isolate)
-        self._render(focus="cytoplasmic" if target else "nuclear")
+        self.focus_role = "cytoplasmic" if target else "nuclear"
+        self._render(focus=self.focus_role)
 
     def _render(self, *args, focus=None):
         if (not self.active or not self.expanded or self.window.geometry_panel.busy or self.result is None
@@ -222,7 +245,22 @@ class AssociationPanel(CollapsibleSection):
         if target not in self.result.associations:
             target = None
         nucleus = int(self.nuclei.currentText()) if self.nuclei.currentText() else None
-        for role, layer, label in zip(MATCHING_ROLES, self.layers, (nucleus, target), strict=True):
-            highlight_ids(layer, role, () if label is None else (label,), self.isolation.isChecked())
-            if focus == role and label is not None:
-                focus_population(viewer, self.state, layer, label)
+        marks = relationships(self.index, "nuclear", nucleus) if nucleus is not None else {}
+        if target is not None and self.focus_role == "cytoplasmic":
+            marks = relationships(self.index, "cytoplasmic", target)
+            if nucleus is not None and ("nuclear", nucleus) not in marks:
+                marks["nuclear", nucleus] = "selected"
+        elif target is not None and ("cytoplasmic", target) not in marks:
+            marks["cytoplasmic", target] = "selected"
+        isolated = None
+        if self.isolation.isChecked():
+            isolated = {role: {label for pop, label in marks if pop == role} for role in MATCHING_ROLES}
+        layers = dict(zip(MATCHING_ROLES, self.layers, strict=True))
+        message = f"Nucleus {nucleus} · {self.index.nuclei[nucleus].auto_class}" if nucleus else ""
+        if target is not None and self.focus_role == "cytoplasmic":
+            message += f"\nCytoplasmic object {target} · {self.index.objects[target].accepted_count} accepted nuclei"
+        self.renderer.legend(message)
+        self.renderer.render(layers, self.styles, self.index, True, marks, isolated)
+        label = target if focus == "cytoplasmic" else nucleus
+        if focus and label is not None:
+            focus_population(viewer, self.state, layers[focus], label)

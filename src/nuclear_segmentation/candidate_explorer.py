@@ -44,6 +44,7 @@ class MergeSelection(ResultSelection):
 class CandidateExplorer(QWidget):
     changed = Signal()
     focus_requested = Signal()
+    navigated = Signal()
 
     def __init__(self):
         super().__init__()
@@ -55,7 +56,10 @@ class CandidateExplorer(QWidget):
         self.classes = QComboBox()
         self.classes.addItems(["All classes", "MATCH", "AMBIGUOUS", "NO_MATCH"])
         form.addWidget(self.classes)
-        self.objects = inspection_table(form, "Nuclei with multiple cytoplasmic candidates",
+        self.multiple = QCheckBox("Only multiple candidates")
+        self.multiple.setChecked(True)
+        form.addWidget(self.multiple)
+        self.objects = inspection_table(form, "Retained nuclei",
                 ("Nucleus ID", "Automatic class", "Candidate count", "Candidate IDs"))
         self.objects.setSortingEnabled(True)
         self._navigation(form, self.objects, "Nucleus")
@@ -80,10 +84,11 @@ class CandidateExplorer(QWidget):
         for widget in (self.follow, self.focus, self.isolate, self.summary, self.review):
             form.addWidget(widget)
         self.review.setEnabled(False)
+        self.multiple.toggled.connect(self._filter)
         self.classes.currentIndexChanged.connect(self._filter)
         self.objects.model().sorted_rows.connect(self._restore_nucleus)
-        self.objects.selectionModel().currentRowChanged.connect(self._object_changed)
-        self.objects.clicked.connect(self._object_changed)
+        self.objects.selectionModel().currentRowChanged.connect(self._navigate_object)
+        self.objects.clicked.connect(self._navigate_object)
         self.candidates.selectionModel().currentRowChanged.connect(self._candidate_changed)
         self.candidates.clicked.connect(self._candidate_changed)
         self.candidates.selectionModel().selectionChanged.connect(self._selection_changed)
@@ -115,7 +120,7 @@ class CandidateExplorer(QWidget):
         rows = []
         for r in self.result.nuclei if self.result else ():
             ids = self.by_nucleus[r.nuclear_id]
-            if len(ids) >= 2 and self.classes.currentText() in ("All classes", r.auto_class):
+            if (not self.multiple.isChecked() or len(ids) >= 2) and self.classes.currentText() in ("All classes", r.auto_class):
                 rows.append((r.nuclear_id, r.auto_class, len(ids), tuple(sorted(ids))))
         self.objects.model().replace(rows)
         self._restore_nucleus()
@@ -126,6 +131,11 @@ class CandidateExplorer(QWidget):
         with QSignalBlocker(self.objects.selectionModel()):
             self.objects.selectRow(pos)
         self._object_changed(self.objects.currentIndex())
+
+    def _navigate_object(self, index):
+        if index.isValid():
+            self._object_changed(index)
+            self.navigated.emit()
 
     def _object_changed(self, index):
         self.focus_role = "nuclear"
@@ -166,6 +176,8 @@ class CandidateExplorer(QWidget):
     def _candidate_changed(self):
         self.focus_role = "cytoplasmic" if self.candidates.currentIndex().isValid() else "nuclear"
         self.changed.emit()
+        if self.candidates.currentIndex().isValid():
+            self.navigated.emit()
 
     @property
     def focus_id(self):
@@ -187,8 +199,12 @@ class CandidateExplorer(QWidget):
         if selection and selection.ids:
             message = selection.summary(self.decisions)
         elif selection:
-            message = "Select two or more candidate rows to review a possible merge."
+            count = len(self.by_nucleus[self.nucleus])
+            message = (f"Nucleus {self.nucleus} · {count} overlapping cytoplasmic "
+                       + ("candidate" if count == 1 else "candidates"))
+            if count >= 2:
+                message += ". Select two or more to review a possible merge."
         else:
-            message = "No nuclei with multiple cytoplasmic candidates in this view."
+            message = "No nuclei in this view."
         self.summary.setText(message)
         self.changed.emit()
