@@ -45,6 +45,7 @@ def test_legacy_equivalence_all_fields_and_multiple_links(inputs, auto_model):
     expected = {r['dapi_id']: r for r in auto_model.run_automatic()}
     for row in result.nuclei:
         old = expected[row.nuclear_id]
+        assert row.classification_reason == old["classification_reason"]
         assert row.auto_class == old["auto_class"]
         assert row.best_cytoplasmic_id == old["best_map2_id"]
         assert row.second_cytoplasmic_id == old["second_map2_id"]
@@ -214,6 +215,8 @@ def test_async_reclassification_failure_and_read_only_colors(window_pair, qapp, 
     panel.minimum.setText("nan")
     assert not panel.run.isEnabled() and "finite fractions" in panel.result_status.text()
     panel.minimum.setText("1e-25")
+    assert not panel.run.isEnabled()  # Total minimum still exceeds best.
+    panel.total_minimum.setText("0")
     assert panel.run.isEnabled() and context.pending_settings.match_min == 1e-25
     panel.minimum.setText("0.75")
     assert panel.table_model.rowCount() == 0 and "Outdated" in panel.result_status.text()

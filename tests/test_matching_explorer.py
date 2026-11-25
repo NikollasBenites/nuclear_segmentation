@@ -412,7 +412,7 @@ def test_targeted_picks_and_read_only_appearance(window_pair):
     click_mask(display, position)
     assert ui.nucleus == 13 and panel.explorer_mode.currentIndex() == 1
     assert panel.table.currentIndex().siblingAtColumn(0).data() == "13"
-    assert panel.selection_status.text() == "Nucleus 13 · MATCH"
+    assert panel.selection_status.text() == "Nucleus 13 · MATCH · OVERLAP_CRITERIA_MET"
     assert viewer.camera.center == center
     marks = display.renderer.marks
     assert marks["cytoplasmic", 23][1].name.startswith("Accepted")
@@ -430,7 +430,7 @@ def test_targeted_picks_and_read_only_appearance(window_pair):
     viewer.dims.set_point(0, point[0])
     click_mask(display, point)
     assert ui.nucleus == 11 and not ui.multiple.isChecked()
-    assert panel.selection_status.text().endswith("AMBIGUOUS")
+    assert panel.selection_status.text() == "Nucleus 11 · AMBIGUOUS · BEST_OR_SECOND_OUTSIDE_LIMITS"
     assert all(layer.name.split()[0] != "Accepted" for _, layer in marks.values())
     ui.isolate.setChecked(True)
     np.testing.assert_array_equal(nuclear.colormap.map(11), COLORS["AMBIGUOUS"])

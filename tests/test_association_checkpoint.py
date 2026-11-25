@@ -16,6 +16,7 @@ def test_reviewed_checkpoint_round_trip_and_qc(project, tmp_path):
     n,c = inspection_pair(window)
     panel = choose_in_panel(window,n,c)
     panel.minimum.setText(".71")
+    panel.total_minimum.setText(".25")
     result = run_job(state.matching_pair)
     review = state.matching_pair.review
     review.decide(result,2,"Matched",23,"different retained object")
@@ -33,7 +34,9 @@ def test_reviewed_checkpoint_round_trip_and_qc(project, tmp_path):
     assert not warnings
     pair = state.matching_pair
     current = pair.current_result
-    assert current.settings == result.settings
+    assert current.settings == result.settings and panel.total_minimum.text() == "0.25"
+    window.set_workflow("matching")
+    assert "BELOW_MINIMUM_OVERLAP · 1" in panel.summary.text()
     assert current.nuclei == result.nuclei and panel.minimum.text() == "0.71"
     assert pair.review.status(current,2) == "Matched"
     assert pair.review.records[pair.review.key(2)]["cytoplasmic_id"] == 23
@@ -71,10 +74,12 @@ def test_reviewed_qc_in_existing_window(project):
     window,app,_,_,_ = project
     n,c = inspection_pair(window)
     panel = choose_in_panel(window,n,c)
+    panel.total_minimum.setText(".25")
     result = run_job(window.project_state.matching_pair)
     window.show()
     panel.graphs.click()
     plots = window.context_panel.quality_control_page
+    assert "ZERO_OVERLAP 0" in plots.status.text() and "BELOW_MINIMUM_OVERLAP 1" in plots.status.text()
     plots.matching_kind.setCurrentText(REVIEW_PLOTS[1])
     window.project_state.matching_pair.review.decide(result,7,"Uncertain")
     window.project_state.association_review_changed.emit()

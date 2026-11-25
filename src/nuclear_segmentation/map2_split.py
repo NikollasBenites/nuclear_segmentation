@@ -37,7 +37,7 @@ class SplitMixin:
             from .automatic_matching import overlap_pairs,classify
             auto_rows,_=classify(self.volumes[0],volumes,float(np.prod(self.spacing)),
                 overlap_pairs(self.dapi,corrected),self.auto_settings['match_min'],
-                self.auto_settings['second_match_max'])
+                self.auto_settings['second_match_max'], self.auto_settings['minimum_total_overlap_fraction'])
             for row in auto_rows:
                 old=records.get(row['dapi_id'])
                 if old and old.get('source')=='automatic':
@@ -133,7 +133,8 @@ class SplitMixin:
         if settings:
             from .automatic_matching import overlap_pairs,classify
             auto_rows,_=classify(self.volumes[0],volumes,float(np.prod(self.spacing)),
-                                overlap_pairs(self.dapi,corrected),settings['match_min'],settings['second_match_max'])
+                                overlap_pairs(self.dapi,corrected),settings['match_min'],settings['second_match_max'],
+                                settings['minimum_total_overlap_fraction'])
             for row in auto_rows:
                 d=row['dapi_id'];old=records.get(d)
                 # Recalculate existing automatic decisions; preserve manual and unreviewed records.

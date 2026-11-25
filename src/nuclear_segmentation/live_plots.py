@@ -343,6 +343,8 @@ class ProjectLivePlots(LivePlots):
         if result is not None:
             message = (f"Automatic classifications before manual association review · "
                        f"{len(result.nuclei):,} retained nuclei · {len(result.associations):,} retained cytoplasmic objects.")
+            reasons = " · ".join(f"{reason} {count:,}" for reason, count in result.no_match_reason_counts.items())
+            message += f" Automatic NO_MATCH counts · {reasons}."
         elif pair.error:
             message = f"Automatic matching failed. {pair.error} Run automatic matching to retry."
         elif pair.job is not None:

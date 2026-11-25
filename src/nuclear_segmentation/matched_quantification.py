@@ -55,6 +55,7 @@ def metrics(result, outcomes, volume):
         eligible_nuclei=n,
         effective_sampling_mm3=volume,
         automatic_counts=dict(result.class_counts),
+        automatic_no_match_reasons=dict(result.no_match_reason_counts),
         manual_counts={s: counts[s] for s in (*STATES, "Requires Review")},
         automatic_matched_fraction=automatic / n if n else None,
         reviewed_matched_fraction=reviewed / n if n else None,
@@ -88,6 +89,7 @@ def export_snapshot(state):
             dict(
                 nuclear_id=row.nuclear_id,
                 automatic_class=row.auto_class,
+                automatic_reason=row.classification_reason,
                 automatic_target=auto,
                 automatic_multiple=bool(auto is not None and result.associations[auto].multiple),
                 review_status=status,
@@ -156,15 +158,17 @@ def write_package(destination, snapshot):
 
     table(
         "automatic_associations.csv",
-        [f.name for f in fields(NuclearOverlap)] + ["accepted_cytoplasmic_id"],
+        [f.name for f in fields(NuclearOverlap)] + ["accepted_cytoplasmic_id", "minimum_total_overlap_fraction"],
         (
-            dict(asdict(row), accepted_cytoplasmic_id=row.accepted_cytoplasmic_id)
+            dict(asdict(row), accepted_cytoplasmic_id=row.accepted_cytoplasmic_id,
+                 minimum_total_overlap_fraction=result.settings.minimum_total_overlap_fraction)
             for row in result.nuclei
         ),
     )
     columns = (
         "nuclear_id",
         "automatic_class",
+        "automatic_reason",
         "automatic_target",
         "automatic_multiple",
         "review_status",

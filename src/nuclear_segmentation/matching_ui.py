@@ -5,6 +5,7 @@ import numpy as np
 from qtpy.QtCore import QEvent
 from qtpy.QtWidgets import (QWidget,QVBoxLayout,QFormLayout,QLineEdit,QPushButton,QLabel,
     QSpinBox,QDoubleSpinBox,QComboBox,QCheckBox,QFileDialog,QMessageBox,QScrollArea,QDialog)
+from .automatic_matching import DEFAULT_MINIMUM_TOTAL, NO_MATCH_REASONS, thresholds
 from .matching import Matching
 from .runtime import validate_roi_geometry
 
@@ -26,6 +27,12 @@ class MatchingPanel(QWidget):
         self.split_preview=None;self.split_layer=None;self._split_visibility=[]
         self.multiple_layers=[];self._multiple_visibility=[]
         auto_form=QFormLayout();layout.addLayout(auto_form)
+        self.total_minimum = QDoubleSpinBox()
+        self.total_minimum.setRange(0, 1)
+        self.total_minimum.setDecimals(3)
+        self.total_minimum.setSingleStep(.01)
+        self.total_minimum.setValue(DEFAULT_MINIMUM_TOTAL)
+        auto_form.addRow('Minimum total DAPI overlap fraction', self.total_minimum)
         self.match_min=QDoubleSpinBox();self.match_min.setRange(.001,1);self.match_min.setDecimals(3);self.match_min.setSingleStep(.05);self.match_min.setValue(.5)
         self.second_max=QDoubleSpinBox();self.second_max.setRange(0,1);self.second_max.setDecimals(3);self.second_max.setSingleStep(.05);self.second_max.setValue(.2)
         auto_form.addRow('Minimum best DAPI overlap fraction',self.match_min)
@@ -156,7 +163,7 @@ class MatchingPanel(QWidget):
     def run_automatic(self):
         model=self.checked()
         self.cancel_split()
-        model.run_automatic(self.match_min.value(),self.second_max.value())
+        model.run_automatic(self.match_min.value(),self.second_max.value(),self.total_minimum.value())
         self.only.setChecked(False)
         self.dirty=True;self.select_dapi(self.dapi.value());self.update_qc()
         self.message.setText('All nuclei classified. Manual decisions preserved. Save matching to keep results.')
@@ -183,7 +190,13 @@ class MatchingPanel(QWidget):
         self.viewer.layers.selection.active=self.qc_layer
         setting=self.model.auto_settings
         counts={k:sum(r['auto_class']==k for r in rows) for k in COLORS}
-        self.auto_note.setText(f"Automatic counts: {counts}\nGreen MATCH; yellow AMBIGUOUS; red NO_MATCH.\nLast run: best ≥ {setting['match_min']:.3f}, runner-up ≤ {setting['second_match_max']:.3f}.\nQC and automatic plots show pre-review results.")
+        reasons = {k: sum(r['classification_reason'] == k for r in rows) for k in NO_MATCH_REASONS}
+        self.auto_note.setText(
+            f"Automatic counts: {counts}\nNO_MATCH reasons: {reasons}\n"
+            f"Green MATCH; yellow AMBIGUOUS; red NO_MATCH.\n"
+            f"Last run: total ≥ {setting['minimum_total_overlap_fraction']:.3f}, "
+            f"best ≥ {setting['match_min']:.3f}, runner-up ≤ {setting['second_match_max']:.3f}.\n"
+            "QC and automatic plots show pre-review results.")
 
         self.update_multiple()
 
@@ -297,8 +310,10 @@ class MatchingPanel(QWidget):
         self.sample.setText(model.sample_id);self.animal.setText(model.animal_id)
         self.aligned.setChecked(False);self.only.setChecked(False);self.dapi.setValue(0);self.map2.setValue(0)
         self.reveal.setChecked(False);self.dirty=False;self.refresh()
-        if model.auto_settings:
-            self.match_min.setValue(model.auto_settings['match_min']);self.second_max.setValue(model.auto_settings['second_match_max'])
+        settings = model.auto_settings or thresholds(minimum_total_overlap_fraction=model.default_total_overlap)
+        self.total_minimum.setValue(settings['minimum_total_overlap_fraction'])
+        self.match_min.setValue(settings['match_min'])
+        self.second_max.setValue(settings['second_match_max'])
         self.update_qc()
         self.message.setText('Check alignment across Z, then confirm above. Click Pick DAPI / Pick MAP2 to activate each layer.')
 
@@ -364,7 +379,9 @@ class MatchingPanel(QWidget):
         lines.append('Decision source: '+r.get('source','manual' if r else 'none'))
         auto=next((a for a in self.model.auto_rows if a['dapi_id']==label),None)
         if auto:
-            lines.append(f"Automatic: {auto['auto_class']}; best MAP2 {auto['best_map2_id']}; overlap {auto['best_dapi_fraction']:.1%}; runner-up {auto['second_dapi_fraction']:.1%}")
+            lines.append(f"Automatic {auto['auto_class']} ({auto['classification_reason']}) · "
+                         f"total {auto['total_dapi_fraction']:.1%} · best MAP2 {auto['best_map2_id']} · "
+                         f"best {auto['best_dapi_fraction']:.1%} · runner-up {auto['second_dapi_fraction']:.1%}")
         partner=self.map2.value()
         shared=table.loc[table.map2_id.eq(partner),'dapi_id'].tolist()
         if shared:lines.append('DAPI IDs linked to this MAP2: '+', '.join(map(str,shared)))

@@ -2,6 +2,7 @@
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from math import isfinite
 from types import MappingProxyType
 
 import numpy as np
@@ -10,25 +11,40 @@ import pandas as pd
 COLORS = {'MATCH': (0.,1.,0.,1.), 'AMBIGUOUS': (1.,1.,0.,1.), 'NO_MATCH': (1.,0.,0.,1.)}
 
 
+DEFAULT_MINIMUM_TOTAL = .05
+NO_MATCH_REASONS = ("ZERO_OVERLAP", "BELOW_MINIMUM_OVERLAP")
+# Before the total-overlap criterion each class had exactly one possible reason.
+LEGACY_REASONS = {"NO_MATCH": "ZERO_OVERLAP", "MATCH": "OVERLAP_CRITERIA_MET",
+                  "AMBIGUOUS": "BEST_OR_SECOND_OUTSIDE_LIMITS"}
+
+
 @dataclass(frozen=True)
 class MatchingSettings:
     match_min: float = .50
     second_max: float = .20
+    minimum_total_overlap_fraction: float = DEFAULT_MINIMUM_TOTAL
     method: str = field(default="voxel_overlap_v1", init=False)
     denominator: str = field(default="entire retained nuclear label", init=False)
     ranking: str = field(default="descending intersection voxels, then ascending cytoplasmic ID", init=False)
     centroid_or_proximity_used: bool = field(default=False, init=False)
 
     def __post_init__(self):
+        if not all(isfinite(v) for v in (self.match_min, self.second_max, self.minimum_total_overlap_fraction)):
+            raise ValueError("Matching fractions must be finite.")
         if not (0 < self.match_min <= 1 and 0 <= self.second_max <= 1):
             raise ValueError("Match fraction must be in (0,1]; runner-up maximum must be in [0,1].")
+        if not 0 <= self.minimum_total_overlap_fraction <= self.match_min:
+            raise ValueError("Minimum total overlap must be between zero and the minimum best overlap.")
+
+    def legacy_record(self):
+        return dict(match_min=self.match_min, second_match_max=self.second_max,
+                    minimum_total_overlap_fraction=self.minimum_total_overlap_fraction,
+                    method=self.method, denominator='entire DAPI label',
+                    tie_break='smallest MAP2 ID', centroid_or_proximity_used=False)
 
 
-def thresholds(match_min=.5, second_max=.2):
-    settings = MatchingSettings(float(match_min), float(second_max))
-    return dict(match_min=settings.match_min, second_match_max=settings.second_max,
-                method=settings.method, denominator='entire DAPI label',
-                tie_break='smallest MAP2 ID', centroid_or_proximity_used=False)
+def thresholds(match_min=.5, second_max=.2, minimum_total_overlap_fraction=DEFAULT_MINIMUM_TOTAL):
+    return MatchingSettings(float(match_min), float(second_max), float(minimum_total_overlap_fraction)).legacy_record()
 
 
 def _count_intersections(counts, nuclear, cytoplasmic):
@@ -80,6 +96,7 @@ def scan_overlaps(pair, progress):
 class NuclearOverlap:
     nuclear_id: int
     auto_class: str
+    classification_reason: str
     best_cytoplasmic_id: int | None
     second_cytoplasmic_id: int | None
     nuclear_volume_um3: float
@@ -109,41 +126,47 @@ def _classify_counts(nuclear, cytoplasmic, voxel_volume, intersections, settings
         second, runner_up = ranked[1] if len(ranked) > 1 else (None, 0)
         first_fraction = overlap / nuclear_size
         second_fraction = runner_up / nuclear_size
-        status = "NO_MATCH"
-        if overlap:
-            accepted = first_fraction >= settings.match_min and second_fraction <= settings.second_max
-            status = "MATCH" if accepted else "AMBIGUOUS"
+        total_fraction = sum(count for _, count in ranked) / nuclear_size
+        if total_fraction == 0:
+            status, reason = "NO_MATCH", "ZERO_OVERLAP"
+        elif total_fraction < settings.minimum_total_overlap_fraction:
+            status, reason = "NO_MATCH", "BELOW_MINIMUM_OVERLAP"
+        elif first_fraction >= settings.match_min and second_fraction <= settings.second_max:
+            status, reason = "MATCH", "OVERLAP_CRITERIA_MET"
+        else:
+            status, reason = "AMBIGUOUS", "BEST_OR_SECOND_OUTSIDE_LIMITS"
         cytoplasmic_size = cytoplasmic[best] if best is not None else 0
         combined_size = nuclear_size + cytoplasmic_size
         yield NuclearOverlap(
-            nuclear_id=int(nuclear_id), auto_class=status,
+            nuclear_id=int(nuclear_id), auto_class=status, classification_reason=reason,
             best_cytoplasmic_id=best, second_cytoplasmic_id=second,
             nuclear_volume_um3=nuclear_size * voxel_volume,
             best_cytoplasmic_volume_um3=cytoplasmic_size * voxel_volume if best is not None else None,
             overlap_voxels=overlap, overlap_volume_um3=overlap * voxel_volume,
             best_nuclear_fraction=first_fraction, second_nuclear_fraction=second_fraction,
-            total_nuclear_fraction=sum(count for _, count in ranked) / nuclear_size,
+            total_nuclear_fraction=total_fraction,
             cytoplasmic_candidate_count=len(ranked),
             iou=overlap / (combined_size - overlap), dice=2 * overlap / combined_size,
         )
 
 
-def classify(dapi_volumes, map2_volumes, voxel_volume, pairs, match_min=.5, second_max=.2):
+def classify(dapi_volumes, map2_volumes, voxel_volume, pairs, match_min=.5, second_max=.2,
+             minimum_total_overlap_fraction=DEFAULT_MINIMUM_TOTAL):
     """Legacy physical-volume API and DAPI/MAP2 output schema."""
-    legacy = thresholds(match_min, second_max)
+    settings = MatchingSettings(float(match_min), float(second_max), float(minimum_total_overlap_fraction))
     nuclear, cyto = ({i: int(round(v / voxel_volume)) for i, v in volumes.items()}
                      for volumes in (dapi_volumes, map2_volumes))
     rows = []
-    for r in _classify_counts(nuclear, cyto, voxel_volume, pairs,
-                              MatchingSettings(legacy["match_min"], legacy["second_match_max"])):
-        rows.append(dict(dapi_id=r.nuclear_id, auto_class=r.auto_class, best_map2_id=r.best_cytoplasmic_id,
+    for r in _classify_counts(nuclear, cyto, voxel_volume, pairs, settings):
+        rows.append(dict(dapi_id=r.nuclear_id, auto_class=r.auto_class, classification_reason=r.classification_reason,
+                         best_map2_id=r.best_cytoplasmic_id,
                          second_map2_id=r.second_cytoplasmic_id, dapi_volume_um3=float(dapi_volumes[r.nuclear_id]),
                          best_map2_volume_um3=map2_volumes.get(r.best_cytoplasmic_id),
                          overlap_voxels=r.overlap_voxels, overlap_volume_um3=r.overlap_volume_um3,
                          best_dapi_fraction=r.best_nuclear_fraction, second_dapi_fraction=r.second_nuclear_fraction,
                          total_dapi_fraction=r.total_nuclear_fraction, overlapping_map2_count=r.cytoplasmic_candidate_count,
                          iou=r.iou, dice=r.dice))
-    return rows, legacy
+    return rows, settings.legacy_record()
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +186,7 @@ class AutomaticMatchingResult:
     nuclei: tuple[NuclearOverlap, ...]
     associations: Mapping[int, CytoplasmicAssociations]
     class_counts: Mapping[str, int]
+    no_match_reason_counts: Mapping[str, int]
     multiple_objects: int
     nuclei_in_multiple: int
 
@@ -173,9 +197,11 @@ def classify_population(stats, settings, revisions):
     links = Counter(r.best_cytoplasmic_id for r in rows if r.auto_class == "MATCH")
     associations = {i: CytoplasmicAssociations(links[i]) for i in stats.cytoplasmic_voxels}
     counts = Counter(r.auto_class for r in rows)
+    reasons = Counter(r.classification_reason for r in rows if r.auto_class == "NO_MATCH")
     multiple = [n for n in links.values() if n > 1]
     return AutomaticMatchingResult(stats, revisions, settings, rows, MappingProxyType(associations),
                                    MappingProxyType({k: counts[k] for k in COLORS}),
+                                   MappingProxyType({k: reasons[k] for k in NO_MATCH_REASONS}),
                                    len(multiple), sum(multiple))
 
 

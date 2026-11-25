@@ -50,7 +50,17 @@ def test_manual_preservation_batch_undo_and_restore(auto_model,tmp_path):
     folder=model.save(tmp_path);saved=json.loads((folder/'dapi_matching.json').read_text())
     restored=Matching(*model.paths);restored.restore(saved)
     assert restored.records==model.records and restored.auto_rows==model.auto_rows
-    restored.run_automatic(.9,.1);assert restored.records[2]['source']=='manual'
+    legacy = copy.deepcopy(saved)
+    del legacy['default_total_overlap']
+    del legacy['automatic_settings']['minimum_total_overlap_fraction']
+    for row in legacy['automatic_results']:
+        del row['classification_reason']
+    restored.restore(legacy)
+    assert restored.auto_settings['minimum_total_overlap_fraction'] == 0
+    assert restored.auto_rows == model.auto_rows
+    restored.run_automatic(.9,.1)
+    assert restored.auto_settings['minimum_total_overlap_fraction'] == 0
+    assert restored.records[2]['source']=='manual'
     assert (folder/'automatic_matching.csv').exists() and (folder/'automatic_matching.pdf').exists()
     model.undo();assert model.records==original and model.auto_rows==[]
 
@@ -78,14 +88,18 @@ def test_qc_selection_and_export(auto_model,tmp_path,monkeypatch):
         assert set(np.unique(qc.data))=={0,2,1000000}
         panel.dapi.setValue(99);panel.best_candidate();assert panel.map2.value()==30
         panel.decide('Matched');assert auto_model.records[99]['source']=='manual'
+        panel.total_minimum.setValue(.45)
         panel.run_automatic();assert auto_model.records[99]['status']=='Matched'
+        assert 'BELOW_MINIMUM_OVERLAP' in panel.details.text()
+        assert "'ZERO_OVERLAP': 1" in panel.auto_note.text()
+        assert "'BELOW_MINIMUM_OVERLAP': 1" in panel.auto_note.text()
         panel.plot_automatic()
         monkeypatch.setattr(QFileDialog,'getExistingDirectory',lambda *a:str(tmp_path))
         panel.save()
         path=next(tmp_path.glob('dapi_matching_*/dapi_matching.json'))
         monkeypatch.setattr(QFileDialog,'getOpenFileName',lambda *a:(str(path),''))
         panel.open_saved();assert panel.qc_layer is not None and panel.model.auto_settings['match_min']==.5
-        assert not panel.aligned.isChecked()
+        assert not panel.aligned.isChecked() and panel.total_minimum.value() == .45
     finally:viewer.close()
 
 

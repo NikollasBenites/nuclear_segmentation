@@ -7,6 +7,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 import tifffile
+from .automatic_matching import DEFAULT_MINIMUM_TOTAL, LEGACY_REASONS, classify, overlap_pairs, thresholds
 from .manual_review import mask_signature
 from .core import read_voxel_spacing_um
 
@@ -43,6 +44,7 @@ class Matching(SplitMixin):
         if not self.volumes[0]:raise ValueError('DAPI segmentation must contain at least one nonzero label.')
         self.source_paths=self.paths[:]
         self.split_log=[];self.split_original=None
+        self.default_total_overlap = DEFAULT_MINIMUM_TOTAL
         self.auto_rows=[]; self.auto_settings=None; self._overlap_pairs=None
         self.records={};self.history=[];self.sample_id=Path(dapi_path).stem;self.animal_id=''
 
@@ -82,13 +84,14 @@ class Matching(SplitMixin):
         table['map2_id'] = table['map2_id'].astype('Int64')
         return table
 
-    def run_automatic(self, match_min=.5, second_max=.2):
-        from .automatic_matching import overlap_pairs, classify, thresholds
-        thresholds(match_min,second_max)
+    def run_automatic(self, match_min=.5, second_max=.2, minimum_total_overlap_fraction=None):
+        if minimum_total_overlap_fraction is None:
+            minimum_total_overlap_fraction = self.default_total_overlap
+        thresholds(match_min, second_max, minimum_total_overlap_fraction)
         if self._overlap_pairs is None:
             self._overlap_pairs=overlap_pairs(self.dapi,self.map2)
         rows,settings=classify(self.volumes[0],self.volumes[1],float(np.prod(self.spacing)),
-                               self._overlap_pairs,match_min,second_max)
+                               self._overlap_pairs,match_min,second_max,minimum_total_overlap_fraction)
         self.history.append(('__automatic_batch__',copy.deepcopy((self.records,self.auto_rows,self.auto_settings))))
         for row in rows:
             label=row['dapi_id'];old=self.records.get(label)
@@ -136,7 +139,8 @@ class Matching(SplitMixin):
     def save(self, parent, one_to_one=False, proportions=True):
         folder=Path(parent)/('dapi_matching_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
         folder.mkdir()
-        record=dict(schema_version=3,automatic_results=self.auto_rows,automatic_settings=self.auto_settings,paths=self.paths,mask_sha256=self.signatures,
+        record=dict(schema_version=3, default_total_overlap=self.default_total_overlap,
+                    automatic_results=self.auto_rows,automatic_settings=self.auto_settings,paths=self.paths,mask_sha256=self.signatures,
                     spacing_zyx_um=list(self.spacing),sample_id=self.sample_id,animal_id=self.animal_id,
                     records={str(k):v for k,v in self.records.items()},
                     alignment_confirmed=True,one_to_one_only=one_to_one,proportions=proportions)
@@ -150,6 +154,7 @@ class Matching(SplitMixin):
             from .automatic_matching import plot_automatic
             auto=pd.DataFrame(self.auto_rows)
             for col in ['best_map2_id','second_map2_id']:auto[col]=auto[col].astype('Int64')
+            auto['minimum_total_overlap_fraction'] = self.auto_settings['minimum_total_overlap_fraction']
             auto.to_csv(folder/'automatic_matching.csv',index=False)
             auto.groupby('auto_class')['dapi_volume_um3'].agg(['count','median','min','max']).to_csv(folder/'automatic_volume_summary.csv')
             counts=auto.auto_class.value_counts().reindex(['MATCH','AMBIGUOUS','NO_MATCH'],fill_value=0)
@@ -161,6 +166,20 @@ class Matching(SplitMixin):
     def restore(self, record, base_dir=None):
         if self.signatures!=record['mask_sha256'] or not np.allclose(self.spacing,record['spacing_zyx_um']):
             raise ValueError('Saved matching does not match these masks or their calibration.')
+        default_total = thresholds(minimum_total_overlap_fraction=record.get('default_total_overlap', 0.0))[
+            'minimum_total_overlap_fraction']
+        auto_settings = copy.deepcopy(record.get('automatic_settings'))
+        auto_rows = copy.deepcopy(record.get('automatic_results', []))
+        if auto_settings is not None:
+            total = auto_settings.setdefault('minimum_total_overlap_fraction', 0.0)
+            thresholds(auto_settings['match_min'], auto_settings['second_match_max'], total)
+        if auto_rows and auto_settings is None:
+            raise ValueError('Automatic results are missing their executed settings.')
+        for row in auto_rows:
+            if 'classification_reason' not in row:
+                if auto_settings['minimum_total_overlap_fraction'] != 0:
+                    raise ValueError('Automatic result is missing its classification reason.')
+                row['classification_reason'] = LEGACY_REASONS[row['auto_class']]
         self.restore_splits(record,base_dir)
         old=self.records;self.records={}
         try:
@@ -170,6 +189,7 @@ class Matching(SplitMixin):
                     self.records[int(label)]['source']=r.get('source','manual')
         except Exception:
             self.records=old;self.history=[];raise
-        self.auto_rows=record.get('automatic_results',[])
-        self.auto_settings=record.get('automatic_settings')
+        self.default_total_overlap = default_total
+        self.auto_rows = auto_rows
+        self.auto_settings = auto_settings
         self.history=[];self.sample_id=record.get('sample_id','');self.animal_id=record.get('animal_id','')

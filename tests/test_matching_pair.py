@@ -559,7 +559,7 @@ def test_empty_feedback_from_gui_filters_in_narrow_context(gui_filtered_pair):
         panel.run.click()
         _wait(app, lambda: not window.matching_display.execution.busy)
         result = state.matching_pair.current_result
-        assert result is not None and panel.table_model.columnCount() == 15
+        assert result is not None and panel.table_model.columnCount() == 16
         assert panel.table_model.rowCount() == int(not expected[0])
         assert ("Current empty result" in panel.result_status.text()) == expected[0]
         assert result.class_counts["NO_MATCH"] == int(not expected[0] and expected[1])

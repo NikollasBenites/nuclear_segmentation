@@ -60,6 +60,7 @@ class AssociationReview:
                      nuclear_id=label, cytoplasmic_id=target if status == "Matched" else None,
                      status=status, comment=comment, origin="manual", dependencies=self.identity(result),
                      timestamp=datetime.now(timezone.utc).isoformat(), automatic_class=row.auto_class,
+                     automatic_reason=row.classification_reason,
                      automatic_target=row.accepted_cytoplasmic_id, settings=asdict(result.settings))
         self.append(event)
 

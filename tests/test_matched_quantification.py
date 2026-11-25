@@ -40,7 +40,8 @@ def test_export_with_reviewed_sampling_geometry(window_pair, qapp, tmp_path):
     _wait(qapp, lambda: not controls._filter_timer.isActive())
     window.filtering.accept_roi()
     assert state.quantification_is_current and state.quantification_result["density_status"] == "valid"
-    choose_in_panel(window, nuclear, cyto)
+    panel = choose_in_panel(window, nuclear, cyto)
+    panel.total_minimum.setText("0.25")
     result = run_job(state.matching_pair)
     assert len(result.nuclei) >= 2
     target = next(iter(result.associations))
@@ -48,6 +49,7 @@ def test_export_with_reviewed_sampling_geometry(window_pair, qapp, tmp_path):
         state.matching_pair.review.decide(result, row.nuclear_id, "Matched", target, comment="inspected")
 
     review = state.matching_pair.review
+    review.decide(result, 11, "Uncertain", comment="Inspect small intersection")
     review.decide(result, result.nuclei[0].nuclear_id, "Uncertain")
     review.undo()
     state.association_review_changed.emit()
@@ -69,13 +71,28 @@ def test_export_with_reviewed_sampling_geometry(window_pair, qapp, tmp_path):
     assert (destination / "matched_quantification.json").exists(), panel.scientific_status.text()
     record = json.loads((destination / "matched_quantification.json").read_text())
     assert record["summary"] == summary
+    assert record["provenance"]["settings"]["minimum_total_overlap_fraction"] == .25
+    assert summary["automatic_no_match_reasons"] == {"ZERO_OVERLAP": 0, "BELOW_MINIMUM_OVERLAP": 1}
+    with (destination / "automatic_associations.csv").open() as stream:
+        automatic = {int(r["nuclear_id"]): r for r in csv.DictReader(stream)}
+    assert automatic[11]["auto_class"] == "NO_MATCH"
+    assert automatic[11]["classification_reason"] == "BELOW_MINIMUM_OVERLAP"
+    assert float(automatic[11]["minimum_total_overlap_fraction"]) == .25
+    assert automatic[11]["best_cytoplasmic_id"] == "99"
+    with (destination / "association_intersections.csv").open() as stream:
+        assert {"nuclear_id": "11", "cytoplasmic_id": "99", "intersection_voxels": "1"} in list(csv.DictReader(stream))
     history = record["provenance"]["review_history"]
     assert history[-1]["undone"] == history[-2]["event_index"]
     assert history[-2]["status"] == "Uncertain"
+    decision = next(event for event in history if event["nuclear_id"] == 11)
+    assert (decision["automatic_class"], decision["automatic_reason"]) == ("NO_MATCH", "BELOW_MINIMUM_OVERLAP")
+    assert decision["status"] == "Uncertain"
     assert record["provenance"]["roi_sha256"] == state.quantification_result["scientific_roi_sha256"]
     with (destination / "final_associations.csv").open() as stream:
         rows = list(csv.DictReader(stream))
     assert len(rows) == len(result.nuclei)
+    assert all(r["automatic_reason"] == automatic[int(r["nuclear_id"])]["classification_reason"] for r in rows)
+    assert next(r for r in rows if r["nuclear_id"] == "11")["review_status"] == "Uncertain"
     assert [r["final_target"] for r in rows[:2]] == [str(target)] * 2
     assert all(r["reviewed_multiple"] == "True" for r in rows[:2])
     assert (destination / "cytoplasmic_association_measurements.csv").exists()

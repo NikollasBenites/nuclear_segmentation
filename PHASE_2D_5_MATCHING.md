@@ -78,6 +78,8 @@ The integrated and standalone paths share the plane-wise intersection counter an
 
 For a nucleus with N voxels, rank each positive intersection by decreasing voxel count and break ties by increasing cytoplasmic ID. If the best intersection has I voxels and its cytoplasmic object has C voxels, the best fraction is I/N, IoU is I/(N+C−I) and Dice is 2I/(N+C). The second fraction uses the same N, with zero for an absent runner-up. The total fraction sums all intersection counts divided by N.
 
+Phase 2D.8 adds a configurable minimum total overlap. The following historical rules apply when it is zero.
+
 - **NO_MATCH** means zero intersection voxels. Both candidate IDs are null, and the overlap fractions, IoU and Dice are zero.
 - **MATCH** requires a positive intersection, a best fraction ≥ the minimum (default 0.50), and a second fraction ≤ the maximum (default 0.20).
 - **AMBIGUOUS** means a positive intersection failed either threshold. A tie can qualify as MATCH at settings that admit both fractions.

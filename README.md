@@ -383,22 +383,30 @@ used. It operates on the two pre-existing label volumes in the same grid.
 In **Open DAPI matching**, load both TIFF masks and confirm alignment. The
 original intensity TIFF is optional visual context. Set:
 
-- **Minimum best DAPI overlap fraction**: default `0.50`.
-- **Maximum runner-up DAPI fraction**: default `0.20`.
+- **Minimum total overlap fraction** defaults to `0.05` for new analyses.
+- **Minimum best DAPI overlap fraction** defaults to `0.50`.
+- **Maximum runner-up DAPI fraction** defaults to `0.20`.
 
 Click **Run automatic matching**. All loaded nuclei are classified in one run;
 individual confirmation is not required. For each DAPI ID, intersections with
 all MAP2 IDs are counted. The best and second-best MAP2 objects are ranked by
-intersection voxel count. Both fractions use the **entire DAPI mask** as their
-denominator, not MAP2 volume and not the sum of overlapping voxels.
+intersection voxel count. The total sums every positive intersection. All three
+fractions divide by the voxel count of the **entire DAPI mask**.
 
 | Automatic class | Rule | QC color |
 | --- | --- | --- |
-| MATCH | Best fraction >= 0.50 and runner-up <= 0.20 | Lime green |
-| AMBIGUOUS | Some overlap, but either condition above fails | Yellow |
-| NO_MATCH | No overlap with any MAP2 label | Red |
+| NO_MATCH | Zero intersection (`ZERO_OVERLAP`), or positive total below the configured minimum (`BELOW_MINIMUM_OVERLAP`) | Red |
+| MATCH | Total reaches the minimum, best reaches its minimum and runner-up is at or below its maximum | Lime green |
+| AMBIGUOUS | Total reaches the minimum and either best or runner-up falls outside its limit | Yellow |
 
-Thresholds are adjustable. Equal-overlap ties are ordered by smallest MAP2 ID;
+The 0.05 total minimum is a configurable starting value. Its biological suitability
+requires validation for the dataset and marker. The total minimum can range from
+zero to the minimum best fraction. Older projects and results use zero to reproduce
+their original classifications. Every positive intersection remains available for
+candidate inspection and geometry correction, including intersections below the
+minimum. A compatible manual decision survives reclassification.
+
+Equal-overlap ties are ordered by smallest MAP2 ID;
 with default settings a 50/50 split is ambiguous. IoU and Dice are exported for
 information only and do not determine the class. Distances and centroids are
 not used, preserving the console method. No ROI/guard or intensity filters are
@@ -427,7 +435,7 @@ records are recalculated if thresholds change and you run again. Editing a
 threshold alone does not update results; the panel displays the last used
 thresholds and export records those settings.
 
-For ambiguous objects, select the DAPI ID and click **Select best overlap
+For AMBIGUOUS or NO_MATCH objects with positive overlap, select the DAPI ID and click **Select best overlap
 candidate** to highlight the best available pair. Then use the existing manual
 buttons to confirm, reject, or mark it uncertain. Selecting a candidate alone
 does not create a link. Zero-overlap objects have no candidate. **Undo last
@@ -440,7 +448,7 @@ outputs, the export contains:
 
 - `automatic_matching.csv`: best/runner-up IDs, overlap voxels and µm³, best,
   runner-up and total DAPI overlap fractions, number of overlapping MAP2
-  objects, IoU/Dice, DAPI volume and automatic class.
+  objects, IoU/Dice, DAPI volume, automatic class, classification reason and executed total minimum.
 - `automatic_group_proportions.csv`: class counts and fractions.
 - `automatic_volume_summary.csv`: counts, medians and volume ranges by class.
 - `automatic_matching.png` and `.pdf`: automatic proportion/volume plots.

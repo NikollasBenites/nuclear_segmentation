@@ -32,7 +32,7 @@ class MatchingTable(QAbstractTableModel):
                ("Total fraction", "total_nuclear_fraction"), ("Candidates", "cytoplasmic_candidate_count"),
                ("Overlap (voxels)", "overlap_voxels"), ("Overlap (µm³)", "overlap_volume_um3"),
                ("Nucleus (µm³)", "nuclear_volume_um3"), ("Best cyto (µm³)", "best_cytoplasmic_volume_um3"),
-               ("IoU", "iou"), ("Dice", "dice"))
+               ("IoU", "iou"), ("Dice", "dice"), ("Automatic reason", "classification_reason"))
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -136,6 +136,7 @@ class MatchingPanel(QWidget):
         visualization.addWidget(self.pick_target)
         self.selection_status = self._note(root)
         automatic = self._section(root, "automatic", "Automatic Matching")
+        self.total_minimum = self._fraction(automatic, "Minimum total overlap fraction")
         self.minimum = self._fraction(automatic, "Minimum best overlap fraction")
         self.maximum = self._fraction(automatic, "Maximum second-best overlap fraction")
         self.defaults = QPushButton("Restore Defaults")
@@ -186,17 +187,19 @@ class MatchingPanel(QWidget):
 
     def reset_thresholds(self):
         settings = MatchingSettings()
+        self.total_minimum.setText(str(settings.minimum_total_overlap_fraction))
         self.minimum.setText(str(settings.match_min))
         self.maximum.setText(str(settings.second_max))
 
     def sync_thresholds(self, settings):
-        with QSignalBlocker(self.minimum), QSignalBlocker(self.maximum):
+        with QSignalBlocker(self.total_minimum), QSignalBlocker(self.minimum), QSignalBlocker(self.maximum):
+            self.total_minimum.setText(str(settings.minimum_total_overlap_fraction) if settings else "")
             self.minimum.setText(str(settings.match_min) if settings else "")
             self.maximum.setText(str(settings.second_max) if settings else "")
 
     def reset_appearance(self):
-        with QSignalBlocker(self.minimum), QSignalBlocker(self.maximum), QSignalBlocker(self.class_colors):
-            self.reset_thresholds()
+        self.sync_thresholds(MatchingSettings())
+        with QSignalBlocker(self.class_colors):
             self.class_colors.setChecked(False)
         for role in MATCHING_ROLES:
             visible, opacity = self.visibility[role], self.opacity[role]
@@ -266,6 +269,7 @@ class MatchingDisplay(QObject):
         self.execution = MatchingExecution(state, self)
         self.execution.changed.connect(self.refresh)
         self.execution.progress_changed.connect(self._progress)
+        panel.total_minimum.textChanged.connect(self._settings_changed)
         panel.minimum.textChanged.connect(self._settings_changed)
         panel.maximum.textChanged.connect(self._settings_changed)
         panel.run.clicked.connect(self.execution.start)
@@ -478,8 +482,11 @@ class MatchingDisplay(QObject):
                     marks = {k: v for k, v in marks.items() if v != "candidate" or k[1] in isolated[k[0]]}
                 for pop, obj in marks:
                     isolated[pop].add(obj)
-            message = (f"Nucleus {label} · {index.nuclei[label].auto_class}" if role == "nuclear"
-                       else f"Cytoplasmic object {label} · {index.objects[label].accepted_count} accepted nuclei")
+            if role == "nuclear":
+                row = index.nuclei[label]
+                message = f"Nucleus {label} · {row.auto_class} · {row.classification_reason}"
+            else:
+                message = f"Cytoplasmic object {label} · {index.objects[label].accepted_count} accepted nuclei"
         if focus:
             self.review_choices.pop(result_key(index.result), None)
             self._unavailable = ""
@@ -513,7 +520,8 @@ class MatchingDisplay(QObject):
 
     def _settings_changed(self):
         try:
-            settings = MatchingSettings(float(self.panel.minimum.text()), float(self.panel.maximum.text()))
+            settings = MatchingSettings(float(self.panel.minimum.text()), float(self.panel.maximum.text()),
+                                        float(self.panel.total_minimum.text()))
         except ValueError:
             settings = None
         self._pair.set_settings(settings)
@@ -676,11 +684,13 @@ class MatchingDisplay(QObject):
         lines = []
         if context.executed_settings is not None:
             settings = context.executed_settings
-            lines.append(f"Last completed settings · Best ≥ {settings.match_min}, second ≤ {settings.second_max}")
+            lines.append(f"Last completed settings · Best ≥ {settings.match_min}, second ≤ {settings.second_max}, "
+                         f"total ≥ {settings.minimum_total_overlap_fraction}")
         if context.job is not None:
             status = "Running automatic matching…"
         elif context.pending_settings is None:
-            status = "Enter finite fractions. Best must be greater than 0 and at most 1. Second must be between 0 and 1."
+            status = ("Enter finite fractions in [0, 1]. Best must be positive. "
+                      "Minimum total overlap must be at most the minimum best overlap.")
         elif context.error is not None:
             status = f"Calculation failed. {context.error} Run automatic matching to retry."
         elif result is not None:
@@ -690,6 +700,8 @@ class MatchingDisplay(QObject):
             for name, count in result.class_counts.items():
                 fraction = f"{count / total:.1%}" if total else "—"
                 lines.append(f"{name} · {count:,} ({fraction})")
+            for reason, count in result.no_match_reason_counts.items():
+                lines.append(f"  {reason} · {count:,}")
             lines.append(f"Multiple associations · {result.multiple_objects:,} cytoplasmic objects, "
                          f"{result.nuclei_in_multiple:,} nuclei")
             if not pair.cytoplasmic.retained_ids:

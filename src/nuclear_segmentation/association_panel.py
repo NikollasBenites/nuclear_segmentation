@@ -202,7 +202,8 @@ class AssociationPanel(CollapsibleSection):
             self.targets.addItems([str(c) for _,c in counts])
             record = self.review.records.get(self.review.key(label))
             status = self.review.status(self.result, label)
-            self.message.setText(f"Automatic {row.auto_class} · best {row.best_cytoplasmic_id} · manual {status}{absent}")
+            self.message.setText(f"Automatic {row.auto_class} ({row.classification_reason}) · "
+                                 f"best {row.best_cytoplasmic_id} · manual {status}{absent}")
             if record:
                 self.comment.setText(record["comment"])
                 if status != "Requires Review":
