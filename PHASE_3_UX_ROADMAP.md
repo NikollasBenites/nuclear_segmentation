@@ -1,33 +1,19 @@
 # Phase 3 UX roadmap
 
-These approved requirements describe planned work following the Phase 2 scientific workflows. They are design targets for future releases.
+## Phase 3A · Integrated scientific interface
 
-## 3.1 · Workflow progress and navigation
+| Milestone | Delivery |
+| --- | --- |
+| 3.0 | Central dark and light design system, technology evaluation and scientific state preservation. |
+| 3.1 | Layout A with a horizontal validity-aware workflow, active session selection, a single embedded napari viewer, contextual tools, resizable results, layout presets and reversible Focus Mode. |
+| 3.2 | Review & Proofreading with association inspection in either direction, geometry editing and manual decisions. Keep calibrated inspection, scientific validity and transaction ownership. |
+| 3.3 | Welcome, interchangeable Basic and Advanced interfaces and presentation-only objectives for the supported analyses. |
 
-Place a horizontal workflow progress bar above the embedded viewer. Both interface profiles show the same stage status, derived from current scientific validity. Segmentation and review reflect the selected session. Matching reflects the selected nuclear–cytoplasmic pair. Reopening a project, switching sessions or invalidating a result must update the displayed progress from project state.
+The implementation report records local regression gates and native validation tasks. Both profiles use the same scientific sessions, ROI/counting rules, outputs and history.
 
-## 3.2 · Basic and Advanced profiles
+## Phase 3B · Planned scientific workflows and project management
 
-Offer Basic and Advanced on the welcome screen and keep a profile selector available throughout the application. Basic guides the user with Previous and Continue controls. Scientific prerequisites unlock stages, and the user can explicitly skip optional steps. Advanced preserves free navigation and the current professional workspace.
-
-Both profiles use the same ProjectState, algorithms and results. Switching profiles preserves work, parameter values and scientific validity. Both provide access to stereology and nuclear density.
-
-## 3.3 · Orthogonal stereology workspace
-
-Add a contextual **Define Counting Volume** mode in ROI & Counting for both profiles. Synchronize XY, XZ and YZ views, with an optional calibrated 3D view. Show the actual effective ROI shape across planes, first and last tissue-plane boundaries, guard zones, physical thickness and the effective sampling range.
-
-Support dragging the plane boundaries and the explicit actions **Set Current Plane as First** and **Set Current Plane as Last**. Derive the visualization and effective sampling information from the existing counting and guard rules. Share rendering resources across views unless performance testing justifies multiple heavyweight viewers.
-
-## 3.4 · Analysis presets
-
-An interface profile controls guidance and navigation. A scientific analysis preset provides an explicit starting configuration for an analysis. Keep those choices independent. Candidate presets include nuclear segmentation, cytoplasmic segmentation, nuclear density and nuclear–cytoplasmic matching.
-
-## Session access
-
-Place an accessible segmentation session selector near the top of the main workspace. Show the current session name and scientific role together. Switching sessions must preserve each session's independent inputs, results, review history and display state.
-
-## 3.5 · Association inspection and corrective tools
-
-Unify nuclear-first and cytoplasmic-first inspection in one Association Explorer. Let users filter by multiplicity while retaining direct access to objects with zero, one or several accepted associations. Provide contextual access to Split, Merge, Paint, Erase and Remove through the existing proofreading transactions.
-
-Maintain independent scientific classification and selection states across viewer and table navigation. Offer an optional minimum candidate overlap for display only. Changing it must preserve the computed associations, measurements and exports. Provide a wider, collapsible results-table workspace for side-by-side inspection.
+- Orthogonal counting-volume workspace with synchronized XY, XZ and YZ views, optional calibrated 3D and editable tissue/guard boundaries.
+- Full scientific presets and separately validated quantification of cytoplasmic objects, marker-positive fractions, cytoplasmic volume fraction and marker intensity. Document the denominator, units, validated biological interpretation and required controls for each.
+- Project portability and management, scientific export profiles and expanded OME-Zarr support.
+- Multiscale mask editing and native syGlass integration require separate design and validation.

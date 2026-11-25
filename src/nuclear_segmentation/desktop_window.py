@@ -9,6 +9,7 @@ import logging
 from qtpy.QtCore import QSignalBlocker, QSize, Qt, QThread
 from qtpy.QtGui import QAction, QKeySequence
 from qtpy.QtWidgets import (
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QFileDialog,
@@ -25,6 +26,7 @@ from qtpy.QtWidgets import (
 
 from .collapsible_section import CollapsibleSection
 from .context_panel import ContextPanel
+from .design_system import THEMES, apply_theme
 from .crop_workspace import CropWorkspaceController
 from .image_import import TiffImportWorker, inspect_tiff
 from .image_display_panel import ImageDisplayPanel
@@ -308,7 +310,7 @@ class DesktopWindow(QMainWindow):
         self._create_status_widgets()
         self.set_workflow("project")
         self.statusBar().showMessage("NuCytoSeg ready — open an image to begin")
-        self._apply_theme()
+        self.set_theme(self.workspace_settings.settings.value("appearance/theme", "Dark"))
         if restore_workspace:
             self.restore_layout()
 
@@ -392,6 +394,12 @@ class DesktopWindow(QMainWindow):
         layout.addWidget(self.header_workflow)
         layout.addStretch(1)
 
+        self.theme_combo = QComboBox()
+        self.theme_combo.setAccessibleName("Application appearance")
+        self.theme_combo.setToolTip("Application appearance")
+        self.theme_combo.addItems(THEMES)
+        self.theme_combo.currentTextChanged.connect(self.set_theme)
+        layout.addWidget(self.theme_combo)
         self.parameters_button = QToolButton()
         self.parameters_button.setObjectName("headerActionButton")
         self.parameters_button.setDefaultAction(self.toggle_context_action)
@@ -1577,82 +1585,13 @@ class DesktopWindow(QMainWindow):
             self._focus_snapshot = None
             self.statusBar().showMessage("Workspace layout restored")
 
-    def _apply_theme(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow, #desktopRoot { background: #0d151e; }
-            QWidget { color: #dce7f1; font-size: 13px; }
-            QMenuBar, QMenu, QStatusBar { background: #121d29; color: #d9e3ee; }
-            QMenuBar { padding: 4px 6px; }
-            QMenuBar::item:selected, QMenu::item:selected { background: #263b50; }
-            #applicationHeader { background: #121d29; border-bottom: 1px solid #263748; }
-            #applicationName { font-size: 20px; font-weight: 700; color: #f4f9fc; }
-            #applicationSubtitle { font-size: 11px; color: #8296a9; }
-            #headerWorkflow { color: #66d9d0; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
-            #openImageButton { background: #17677a; color: #dffcff; border-radius: 7px; padding: 8px 13px; }
-            #openImageButton:disabled { background: #20313d; color: #708391; }
-            #workflowNavigation { background: #121d29; border-right: 1px solid #263748; }
-            #workflowRail, #workflowRail > QWidget > QWidget { background: #121d29; }
-            #navigationBrand, #panelTitle { font-size: 16px; font-weight: 700; color: #f2f7fb; }
-            #panelKicker { font-size: 10px; font-weight: 600; color: #8298aa; letter-spacing: 1px; }
-            QToolButton { background: transparent; border: 0; border-radius: 7px; padding: 7px; }
-            QToolButton:hover { background: #203343; }
-            QToolButton:checked { background: #15546b; color: #bff7f2; }
-            QToolButton:disabled { color: #526171; }
-            #workflowSubpage { padding: 5px 7px; text-align: left; }
-            #workflowSubpage:checked { background: #20394b; color: #bff7f2; }
-            #headerActionButton { background: #192a38; }
-            #contextContainer { background: #121d29; border-left: 1px solid #263748; }
-            #contextPanelHeader { border-bottom: 1px solid #263748; }
-            #contextContainer QScrollArea, #contextViewport { background: #121d29; }
-            #contextContainer QListWidget, #contextContainer QAbstractSpinBox {
-                background: #0f1923; border: 1px solid #314759; border-radius: 4px;
-            }
-            #contextContainer QListWidget::item:selected { background: #15546b; color: #f2fbfc; }
-            #contextContainer QComboBox QAbstractItemView {
-                background: #0f1923; color: #dce7f1;
-                selection-background-color: #15546b; selection-color: #f2fbfc;
-            }
-            QScrollArea QScrollBar:vertical { background: #142431; width: 12px; margin: 0; }
-            QScrollArea QScrollBar::handle:vertical { background: #466176; min-height: 24px; border-radius: 4px; }
-            QScrollArea QScrollBar::add-line:vertical, QScrollArea QScrollBar::sub-line:vertical { height: 0; }
-            #contextHeading { font-size: 17px; font-weight: 650; color: #f1f6fa; }
-            #selectedMaskPanel { background: #162735; border-top: 1px solid #263748; }
-            #selectedMaskId { color: #f2f8fb; font-size: 16px; font-weight: 700; }
-            #selectedMaskLayer { color: #94a9bb; font-size: 11px; }
-            #layerTree { background: #0f1923; border: 0; alternate-background-color: #151e29; }
-            #layerTree QHeaderView::section { background: #162432; color: #94a9bb; border: 0; padding: 7px; font-weight: 600; }
-            #layerTree::item { min-height: 34px; padding: 2px; }
-            #layerTree::item:hover { background: #1b3040; }
-            #layerTree::item:selected { background: #15546b; color: #f2fbfc; }
-            #contextSection { background: #1a2a38; border-radius: 7px; padding: 12px; font-weight: 600; }
-            #projectSection { background: #162735; border-radius: 7px; }
-            #collapsibleSectionHeader {
-                background: #1a3040; color: #eef7fa; border-radius: 6px;
-                padding: 8px 10px; font-weight: 700; text-align: left;
-            }
-            #collapsibleSectionHeader:hover { background: #214052; }
-            #collapsibleSectionContent QLabel { color: #c8d7e3; }
-            #contextSectionTitle { color: #75dcd4; font-weight: 700; }
-            #projectSection QLineEdit, #projectSection QSpinBox, #projectSection QComboBox {
-                background: #0f1923; border: 1px solid #314759; border-radius: 4px; padding: 4px;
-            }
-            #projectSection QPushButton { background: #17677a; border-radius: 5px; padding: 7px; }
-            #placeholderNote { color: #8fa1b3; padding: 10px 3px; }
-            #importLoadingDialog { background: #101c27; color: #e5edf3; }
-            #importLoadingDialog QLabel { color: #c4d1dc; }
-            #importLoadingDialog #loadingTitle {
-                color: #75dcd4; font-size: 16px; font-weight: 700;
-            }
-            #importLoadingDialog QProgressBar {
-                background: #0a141d; border: 1px solid #314759;
-                border-radius: 4px; min-height: 10px;
-            }
-            #importLoadingDialog QProgressBar::chunk { background: #218ba0; }
-            QSplitter::handle { background: #253342; width: 2px; }
-            QStatusBar { border-top: 1px solid #263748; font-size: 12px; min-height: 25px; }
-            """
-        )
+    def set_theme(self, name):
+        if name not in THEMES:
+            name = "Dark"
+        with QSignalBlocker(self.theme_combo):
+            self.theme_combo.setCurrentText(name)
+        self.workspace_settings.settings.setValue("appearance/theme", name)
+        apply_theme(self, name)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

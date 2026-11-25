@@ -147,6 +147,7 @@ class SegmentationPanel(QWidget):
         self.execution_log.hide()
         content.addWidget(self.execution_log)
         self.execute_button = QPushButton("Run Segmentation")
+        self.execute_button.setProperty("priority", "primary")
         self.execute_button.setEnabled(False)
         self.execute_button.setToolTip("Run the existing Cellpose pipeline on the current working image.")
         content.addWidget(self.execute_button)

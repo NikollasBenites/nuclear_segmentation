@@ -142,11 +142,7 @@ class ImageExportPanel(QWidget):
         self.scientific_options_section = options
         outer.addWidget(options)
         self.scientific_button = QPushButton("Export Scientific Results")
-        self.scientific_button.setStyleSheet("""
-            QPushButton { background: #8ae2d8; color: #102832; font-weight: bold;
-                          border-radius: 5px; padding: 8px; }
-            QPushButton:disabled { background: #253441; color: #9baab5; }
-        """)
+        self.scientific_button.setProperty("priority", "primary")
         self.scientific_button.setEnabled(False)
         outer.addWidget(self.scientific_button)
         self.scientific_progress = QProgressBar()

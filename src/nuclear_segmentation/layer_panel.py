@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from qtpy.QtCore import QSize, Qt, Signal
-from qtpy.QtGui import QColor, QStandardItem, QStandardItemModel
+from qtpy.QtGui import QStandardItem, QStandardItemModel
 from qtpy.QtWidgets import QAbstractItemView, QTreeView, QVBoxLayout, QWidget
 
 from .matching_pair import MATCHING_LAYER
@@ -91,7 +91,6 @@ class LayerTreeModel(QStandardItemModel):
             group_font = group.font()
             group_font.setBold(True)
             group.setFont(group_font)
-            group.setForeground(QColor("#9eb3c4"))
             type_cell = QStandardItem("")
             type_cell.setEditable(False)
             visibility_cell = QStandardItem("")
