@@ -169,6 +169,7 @@ class AssociationExplorer(QWidget):
         super().__init__()
         self.index = None
         self.selection = None
+        self.awaiting_choice = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.multiple = QCheckBox("Only multiple associations")
@@ -231,6 +232,7 @@ class AssociationExplorer(QWidget):
         if result is not None and self.index is not None and result is self.index.result:
             return
         self.index = AssociationIndex(result) if result is not None else None
+        self.awaiting_choice = False
         self.selection = None
         self._filter()
 
@@ -240,7 +242,21 @@ class AssociationExplorer(QWidget):
         self.objects.model().replace(r for r in rows if r.accepted_count >= minimum)
         self._restore_row()
 
+    def clear_inspection(self, unavailable):
+        self.awaiting_choice = unavailable
+        self.objects.selectionModel().clear()
+        self.selection = None
+        self.candidates.model().replace(())
+        self._controls(-1)
+        self._candidate_controls()
+        if unavailable:
+            self.status.setText("Previous selection unavailable. Select a cytoplasmic object.")
+        self.selection_changed.emit()
+
     def _restore_row(self):
+        if self.awaiting_choice:
+            self.clear_inspection(True)
+            return
         rows = self.objects.model().rows
         if rows:
             selected = self.selection.cytoplasmic_id if self.selection else None
@@ -305,6 +321,7 @@ class AssociationExplorer(QWidget):
             self.navigated.emit()
 
     def _show_object(self, pos):
+        self.awaiting_choice = False
         cyto = self.objects.model().rows[pos].label_id
         self._controls(pos)
         self.status.setText(f"Cytoplasmic ID {cyto} · {pos + 1} of {self.objects.model().rowCount()}")

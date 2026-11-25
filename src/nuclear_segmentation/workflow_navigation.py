@@ -8,6 +8,7 @@ from qtpy.QtWidgets import (
     QButtonGroup, QLabel, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
+from .collapsible_section import CollapsibleSection
 from .ui_icons import icon
 
 
@@ -123,6 +124,26 @@ class WorkflowNavigation(QWidget):
                 self._selected_subpages[workflow.key] = first
                 buttons[first].setChecked(True)
                 item_layout.addWidget(submenu)
+        self.legend = CollapsibleSection("association_legend", "Inspection legend")
+        legend_layout = QVBoxLayout()
+        self.legend.set_content_layout(legend_layout)
+        for color, description, title, glyph in (
+            ("#00ff00", "Green", "MATCH", "■"), ("#ffff00", "Yellow", "AMBIGUOUS", "■"),
+            ("#ff0000", "Red", "NO_MATCH", "■"), ("#ffffff", "White outline", "Selected object", "□"),
+            ("#00ffff", "Cyan outline", "Accepted association", "□"),
+            ("#be70ff", "Violet outline", "Other overlapping candidate", "□"),
+        ):
+            item = QLabel(f'<span style="color:{color}; background-color:#363636">{glyph}</span> {title}')
+            item.setAccessibleName(f"{description} · {title}")
+            item.setToolTip(item.accessibleName())
+            item.setWordWrap(True)
+            legend_layout.addWidget(item)
+        self.legend_selection = QLabel()
+        self.legend_selection.setWordWrap(True)
+        legend_layout.addWidget(self.legend_selection)
+        self._legend_context = None
+        layout.addWidget(self.legend)
+        self.legend.hide()
         item_layout.addStretch(1)
 
         self.collapse_button = QToolButton()
@@ -175,9 +196,20 @@ class WorkflowNavigation(QWidget):
         for key, submenu in self._submenus.items():
             submenu.setVisible(not self._collapsed and key == self.current_workflow)
 
+    def set_legend(self, workflow, message):
+        if workflow != self.current_workflow:
+            return
+        self._legend_context = workflow if message is not None else None
+        self.legend_selection.setText(message or "")
+        self.legend_selection.setVisible(bool(message))
+        self.legend.setVisible(message is not None and not self.collapsed)
+
     def set_workflow(self, key: str, *, emit: bool = False) -> None:
         if key not in self._buttons:
             key = "project"
+        if self._legend_context != key:
+            self._legend_context = None
+            self.legend.hide()
         self._buttons[key].setChecked(True)
         self._update_submenus()
         if emit:
@@ -187,6 +219,7 @@ class WorkflowNavigation(QWidget):
         collapsed = bool(collapsed)
         changed = self._collapsed != collapsed
         self._collapsed = collapsed
+        self.legend.setVisible(not collapsed and self._legend_context == self.current_workflow)
         self.brand.setText("NCS" if collapsed else "NuCytoSeg")
         for button in self._buttons.values():
             button.setToolButtonStyle(

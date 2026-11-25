@@ -3,7 +3,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from weakref import ref
 
-from qtpy.QtCore import QItemSelectionModel, QSignalBlocker, Signal
+from qtpy.QtCore import QModelIndex, QItemSelectionModel, QSignalBlocker, Signal
 from qtpy.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QLabel, QPushButton,
                             QVBoxLayout, QWidget)
 
@@ -49,6 +49,7 @@ class CandidateExplorer(QWidget):
     def __init__(self):
         super().__init__()
         self.result = self.nucleus = None
+        self.awaiting_choice = False
         self.by_nucleus = {}
         self.focus_role = "nuclear"
         form = QVBoxLayout(self)
@@ -104,6 +105,7 @@ class CandidateExplorer(QWidget):
     def set_result(self, result, review):
         if result is self.result:
             return
+        self.awaiting_choice = False
         self.result, self.decisions = result, review
         self.by_nucleus = defaultdict(dict)
         self.linked = defaultdict(list)
@@ -125,7 +127,17 @@ class CandidateExplorer(QWidget):
         self.objects.model().replace(rows)
         self._restore_nucleus()
 
+    def clear_inspection(self, unavailable):
+        self.awaiting_choice = unavailable
+        self.objects.selectionModel().clear()
+        self._object_changed(QModelIndex())
+        if unavailable:
+            self.summary.setText("Previous selection unavailable. Select a nucleus.")
+
     def _restore_nucleus(self):
+        if self.awaiting_choice:
+            self.clear_inspection(True)
+            return
         rows = self.objects.model().rows
         pos = next((i for i, r in enumerate(rows) if r[0] == self.nucleus), 0)
         with QSignalBlocker(self.objects.selectionModel()):
@@ -138,6 +150,8 @@ class CandidateExplorer(QWidget):
             self.navigated.emit()
 
     def _object_changed(self, index):
+        if index.isValid():
+            self.awaiting_choice = False
         self.focus_role = "nuclear"
         nucleus = self.objects.model().rows[index.row()][0] if index.isValid() else None
         if nucleus is not None and self.nucleus == nucleus:
@@ -161,15 +175,20 @@ class CandidateExplorer(QWidget):
         self._sorted_focus = self.focus_role, self.focus_id
 
     def _restore_candidates(self):
+        role, label = self._sorted_focus
+        self.restore_candidates(self._sorted_ids, label if role == "cytoplasmic" else None)
+
+    def restore_candidates(self, ids, focus):
         model = self.candidates.model()
         selection = self.candidates.selectionModel()
         select = QItemSelectionModel.SelectionFlag
-        self.focus_role, focus_id = self._sorted_focus
+        self.focus_role = "nuclear" if focus is None else "cytoplasmic"
         with QSignalBlocker(selection):
+            selection.clear()
             for i, row in enumerate(model.rows):
-                if row[0] in self._sorted_ids:
+                if row[0] in ids:
                     selection.select(model.index(i, 0), select.Select | select.Rows)
-                if self.focus_role == "cytoplasmic" and row[0] == focus_id:
+                if self.focus_role == "cytoplasmic" and row[0] == focus:
                     selection.setCurrentIndex(model.index(i, 0), select.NoUpdate)
         self._selection_changed()
 

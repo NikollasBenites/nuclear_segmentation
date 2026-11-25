@@ -9,6 +9,9 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QLabel, QLineEdit
 from .collapsible_section import CollapsibleSection
 from .geometry_edit import GeometryEdit, effective_masks, undo_stack
 from .guided_panel import GuidedPanel
+from .matching_navigation import SpatialView
+from .mask_selection import INTERNAL_HIGHLIGHT_KEY
+from .matching_appearance import lock_labels
 from .guided_split import OPERATION
 from .preview_history import PreviewStrokes, ProofreadingShortcuts
 from .ui_icons import icon
@@ -33,6 +36,12 @@ class GeometryPanel(CollapsibleSection):
             self.buttons[name] = control
             return control
 
+        self.handoff_context = QLabel()
+        self.handoff_context.setWordWrap(True)
+        self.handoff_context.hide()
+        layout.addWidget(self.handoff_context)
+        self.reference_layer = self.reference_selection = None
+        self.reference_target_role = None
         layout.addWidget(button("start", "Start Editing"))
         self.scientific_status = window.working_mask_status
         layout.addWidget(button("recalculate", "Recalculate Measurements"))
@@ -133,7 +142,7 @@ class GeometryPanel(CollapsibleSection):
         merge.addWidget(QLabel("Retained target ID"))
         merge.addWidget(self.merge_target)
         merge.addWidget(button("merge", "Preview Merge"))
-        self.merge_target.currentIndexChanged.connect(self.refresh)
+        self.merge_target.currentIndexChanged.connect(self._merge_target_changed)
         self.merge_list.currentRowChanged.connect(self.refresh)
         self.status = QLabel()
         self.status.setWordWrap(True)
@@ -147,9 +156,85 @@ class GeometryPanel(CollapsibleSection):
         self.scope.currentIndexChanged.connect(self._change_scope)
         self.state.filtering_result_changed.connect(self._sync_scope)
         window.mask_selection.selection_changed.connect(self._selection_changed)
+        self._reference_signals = (self.state.sessions_changed, self.state.active_session_changed,
+                                   self.state.inactive_session_validity_changed, self.state.filtering_result_changed,
+                                   self.state.segmentation_result_changed, self.state.matching_result_changed,
+                                   self.state.matching_selection_changed, self.state.calibration_changed)
+        for signal in self._reference_signals:
+            signal.connect(self._validate_reference)
         self._sync_scope()
 
+    def clear_handoff(self):
+        layer = self.reference_layer
+        self.reference_layer = self.reference_selection = None
+        self.handoff_context.hide()
+        if layer is not None and layer in self.viewer.layers:
+            self.viewer.layers.remove(layer)
+
+    def _validate_reference(self, *args):
+        selection = self.reference_selection
+        if selection and (not selection.is_current(self.state.matching_pair)
+                          or getattr(selection, f"{self.reference_target_role}_revision") != self.state.session_revision()):
+            self.clear_handoff()
+
+    def show_handoff(self, selection, reference_ids, target_ids, target_role="cytoplasmic", *, focused_reference=None):
+        if (not selection.is_current(self.state.matching_pair)
+                or getattr(selection, f"{target_role}_revision") != self.state.session_revision()):
+            raise ValueError("The selected masks no longer belong to the current editing session.")
+        self.clear_handoff()
+        pair = self.state.matching_pair.capture()
+        reference_role = "nuclear" if target_role == "cytoplasmic" else "cytoplasmic"
+        population = getattr(pair, reference_role)
+        source = self.state.sessions[population.owner.session_id]
+        ids = ", ".join(map(str, reference_ids)) or "none"
+        targets = ", ".join(map(str, target_ids))
+        self.handoff_context.setText(f"Geometry target · {self.state.active_session.display_name} "
+                                     f"({target_role}) · source IDs {targets}\n"
+                                     f"Reference · {source.display_name} ({reference_role}) · IDs {ids}")
+        if focused_reference is not None:
+            self.handoff_context.setText(self.handoff_context.text() +
+                                         f"\nInspected {reference_role} ID {focused_reference}")
+        self.handoff_context.show()
+        self.reference_selection = selection
+        self.reference_target_role = target_role
+        if reference_ids:
+            active = self.viewer.layers.selection.active
+            colors = {None: "transparent", 0: "transparent", **dict.fromkeys(reference_ids, "cyan")}
+            if focused_reference is not None:
+                colors[focused_reference] = "white"
+            layer = self.viewer.add_labels(
+                population.labels, name=f"{reference_role.title()} reference · {source.display_name}",
+                scale=pair.grid.spacing_zyx_um, translate=pair.grid.translation_zyx_um,
+                units=("µm",) * 3, opacity=.35, colormap=colors, blending="additive",
+                metadata={INTERNAL_HIGHLIGHT_KEY: True})
+            lock_labels(layer)
+            self.reference_layer = layer
+            if active in self.viewer.layers:
+                self.viewer.layers.selection.active = active
+
+    def inspect_handoff(self, selection, role, label, references):
+        """Carry a viewer/table inspection to the owned committed layer before editing."""
+        if not self.guided.idle() or not selection.is_current(self.state.matching_pair):
+            return
+        owner = getattr(selection, f"{role}_revision")
+        self.window._select_session(owner.session_id)
+        if self.state.session_revision() != owner or not selection.is_current(self.state.matching_pair):
+            return
+        self.window.mask_display.show("filtered")
+        layer = self.window.mask_display.layers.get("filtered")
+        if layer is None or layer.data is not self.state.filtering_result["filtered_masks"]:
+            self.window.filtering._create_layers(self.state.filtering_result)
+            self.window.mask_display.show("filtered")
+            layer = self.window.mask_display.layers["filtered"]
+        self.show_handoff(selection, references, (label,), role)
+        self.viewer.layers.selection.active = layer
+        self.window.viewer_toolbar.activate_tool("review")
+        self.window.mask_selection.restore_selection(layer, label)
+
     def dispose(self):
+        self.clear_handoff()
+        for signal in self._reference_signals:
+            signal.disconnect(self._validate_reference)
         self.shortcuts.dispose()
         self.viewer.dims.events.ndisplay.disconnect(self._dimensions)
         self.viewer.dims.events.order.disconnect(self._dimensions)
@@ -413,6 +498,15 @@ class GeometryPanel(CollapsibleSection):
             status = "Uncommitted changes"
         else:
             status = "No pending changes"
+        if self.edit.dedicated and self.edit.pending_source is None:
+            if self.edit.steps:
+                params = self.edit.steps[-1]["parameters"]
+                ids = params["child_ids"] if "child_ids" in params else [params["retained_id"]]
+                result_ids = ", ".join(map(str, ids))
+                status += f" Result IDs {result_ids}."
+                self.layer.name = f"{self.state.active_session.display_name} · Applied preview · IDs {result_ids}"
+            else:
+                self.layer.name = f"{self.state.active_session.display_name} · Source geometry"
         if self.edit.operation == "split":
             status = "Split preview · " + status
         if self.paused:
@@ -593,8 +687,13 @@ class GeometryPanel(CollapsibleSection):
         raw = window.segmentation.result_layer
         if raw is None:
             raise ValueError("Restore the segmentation layer before editing.")
-        self.window.association_panel.restore()
+        review_panel = self.window.association_panel
+        selection = review_panel.editing_target()
+        review_panel.restore()
         selected = self._prior_selection()
+        if selection:
+            context, role, selected, references = selection
+            self.show_handoff(context, references, (selected,), role)
         spacing = self.state.voxel_spacing_zyx_um
         oy, ox = self.state.working_offset_yx
         self.translate = (0, oy * spacing[1], ox * spacing[2])
@@ -645,6 +744,8 @@ class GeometryPanel(CollapsibleSection):
         self.refresh()
 
     def discard(self):
+        if self.edit.merge_selection is not None:
+            self.clear_handoff()
         self.guided.remove_reference()
         self.strokes.release_write_protection()
         self.layer.events.brush_size.disconnect(self._sync_size)
@@ -789,9 +890,12 @@ class GeometryPanel(CollapsibleSection):
         try:
             if not self.guided.idle() or selection is None or not selection.is_current(self.state.matching_pair):
                 raise ValueError("Finish active operations and select two or more current candidates in Matching.")
+            view = SpatialView.capture(self.viewer)
+            focused_id = ui.focus_id if ui.focus_role == "cytoplasmic" else None
             self.window._select_session(selection.cytoplasmic_revision.session_id)
+            view.restore(self.viewer)
             self.guided.require_current(selection)
-            self.window.set_workflow("proofreading")
+            self.window.set_workflow("proofreading", transfer_inspection=False)
             self.guided.require_current(selection)
             self.scope.setCurrentIndex(0)
             self.start()
@@ -800,6 +904,13 @@ class GeometryPanel(CollapsibleSection):
             self.edit.merge_selection = selection
             self._dimensions()
             self._fill_merge_selection(selection)
+            self.layer.colormap = {None: "#516474", 0: "transparent", **dict.fromkeys(selection.ids, "white")}
+            self.show_handoff(selection, (selection.nucleus,), selection.ids)
+            if focused_id in selection.ids:
+                self.window.mask_selection.restore_selection(self.layer, focused_id)
+            else:
+                self.window.mask_selection.clear_selection(self.layer)
+            view.restore(self.viewer)
             self.merge_section.set_expanded(True)
         except ValueError as error:
             if started:
@@ -807,11 +918,20 @@ class GeometryPanel(CollapsibleSection):
             ui.summary.setText(str(error))
             self.status.setText(str(error))
 
+    def _merge_target_changed(self):
+        retained = self.merge_target.currentData()
+        if (self.busy and self.edit.merge_selection is not None and retained is not None
+                and self.edit.pending_source is None and not self.edit.steps and self._owns_preview()):
+            self.window.mask_selection.restore_selection(self.layer, retained)
+        self.refresh()
+
     def _fill_merge_selection(self, selection):
-        for label in selection.ids:
-            self.merge_list.addItem(str(label))
-            self.merge_target.addItem(str(label), label)
-        self.merge_target.setCurrentIndex(-1)
+        self.layer.name = f"{self.state.active_session.display_name} · Merge source objects"
+        with QSignalBlocker(self.merge_target):
+            for label in selection.ids:
+                self.merge_list.addItem(str(label))
+                self.merge_target.addItem(str(label), label)
+            self.merge_target.setCurrentIndex(-1)
         self.status.setText(f"Nucleus {selection.nucleus} · Choose the ID to retain. "
                             + selection.summary(self.state.matching_pair.review))
         self.refresh()
@@ -853,6 +973,9 @@ class GeometryPanel(CollapsibleSection):
         self.layer.refresh()
         self._dimensions()
         self.refresh()
+        if self.edit.merge_selection:
+            self.window.mask_selection.restore_selection(self.layer, retained)
+            self.layer.name = f"{self.state.active_session.display_name} · Merge preview · result ID {retained}"
         message = f"Merge preview retains ID {retained}. Disconnected parts keep their gaps. Apply or cancel."
         if self.edit.merge_selection is not None:
             message += "\n" + self.edit.merge_selection.summary(self.state.matching_pair.review)

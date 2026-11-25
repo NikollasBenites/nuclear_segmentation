@@ -357,7 +357,7 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
         assert highlight not in viewer.layers
         assert not display.layers and not window.mask_display.suspended
         window.set_workflow("matching")
-        assert ui.selection.focus_role == "cytoplasmic" and not ui.restore.isEnabled()
+        assert ui.selection.focus_id == 13 and ui.restore.isEnabled()
         ui.isolate.click()
         ui.focus.click()
         highlight = focused_boundary()
@@ -557,7 +557,8 @@ def test_picking_disjoint_populations(window_pair):
         if role == "cytoplasmic":
             ui.restore.click()
     np.testing.assert_array_equal(display.layers["nuclear"].colormap.map(7), COLORS["NO_MATCH"])
-    assert "NO_MATCH" in display.viewer.canvas.overlays.text.text
+    assert "NO_MATCH" in window.navigation.legend_selection.text()
+    assert not display.viewer.canvas.overlays.text.visible
 
 
 def test_isolated_ray_skips_hidden_foreground(qapp):

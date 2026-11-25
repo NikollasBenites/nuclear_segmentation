@@ -1,6 +1,8 @@
 """Matching controls and read-only layers in the existing desktop viewer."""
 from __future__ import annotations
 
+from weakref import ref
+
 import numpy as np
 from qtpy.QtCore import QAbstractTableModel, QModelIndex, QObject, QSignalBlocker, Qt, Signal
 from qtpy.QtWidgets import (
@@ -11,8 +13,9 @@ from qtpy.QtWidgets import (
 from .automatic_matching import MatchingSettings
 from .matching_appearance import MaskAppearance, appearance_control, relationships
 from .candidate_explorer import CandidateExplorer
-from .matching_explorer import AssociationExplorer
+from .matching_explorer import AssociationExplorer, ResultSelection
 from .matching_inspection import MatchingInspection, add_population, focus_population
+from .matching_navigation import ExplorerPreferences, InspectionLocation, result_key, row_for, sources
 from .matching_execution import MatchingExecution
 from .collapsible_section import CollapsibleSection
 from .mask_selection import pick_world_label
@@ -224,6 +227,8 @@ class MatchingDisplay(QObject):
     """Present a captured pair without adopting the active session's layer ownership."""
 
 
+    legend_changed = Signal(object)
+
     def __init__(self, viewer, state, panel, session_display, parent=None):
         super().__init__(parent)
         self.viewer = viewer
@@ -233,6 +238,11 @@ class MatchingDisplay(QObject):
         self.layers = {}
         self._pair = state.matching_pair
         self._displayed = None
+        self._default_preferences = ExplorerPreferences.capture(panel)
+        self._preferences_key = None
+        self.locations = {}
+        self.review_choices = {}
+        self._unavailable = ""
         self._previous_layer = None
         self._active = False
         self._requested = False
@@ -277,6 +287,8 @@ class MatchingDisplay(QObject):
     def set_active(self, active):
         if self._active == active:
             return
+        if not active:
+            self._save_location()
         self._active = active
         if active:
             self.refresh()
@@ -287,6 +299,53 @@ class MatchingDisplay(QObject):
             self.panel.candidate_explorer.set_result(None, self._pair.review)
             self.panel.candidate_explorer.isolate.setChecked(False)
             self.panel.selection_status.clear()
+            self.legend_changed.emit(None)
+
+    def proofreading_target(self):
+        p = self.panel
+        index = p.explorer.index
+        if not self._active or not index or index.result is not self._pair.current_result:
+            return None
+        if p.explorer_mode.currentIndex():
+            ui = p.candidate_explorer
+            if ui.nucleus is None:
+                return None
+            role, label = ui.focus_role, ui.focus_id
+            refs = (ui.selection().ids or tuple(ui.by_nucleus[ui.nucleus])) if role == "nuclear" else (ui.nucleus,)
+        else:
+            selected = p.explorer.selection
+            if not selected:
+                return None
+            role, label = selected.focus_role, selected.focus_id
+            refs = (selected.cytoplasmic_id,) if role == "nuclear" else selected.associated_ids
+        selection = ResultSelection(ref(index.result), index.result.statistics.population_identity)
+        return selection, role, label, refs
+
+    def _save_location(self):
+        index = self.panel.explorer.index
+        if index is not None and not self._unavailable:
+            self.locations[result_key(index.result)] = InspectionLocation.capture(self)
+
+    def _pair_key(self):
+        return (self.state.session_revision().project_id, *(self._pair.session_id(role) for role in MATCHING_ROLES))
+
+    def location(self):
+        return self.locations.get(self._pair_key())
+
+    def review_nucleus(self, result):
+        loc = self.location()
+        choice = self.review_choices.get(result_key(result))
+        if choice is None and loc is not None:
+            choice = loc.revisions, loc.inspected_nucleus
+        if choice and choice[1] is not None:
+            if choice[0] != sources(result) or choice[1] not in result.statistics.nuclear_voxels:
+                return None, True
+            return choice[1], False
+        return None, False
+
+    def remember_review_nucleus(self, result, label):
+        if result is self._pair.current_result and label in result.statistics.nuclear_voxels:
+            self.review_choices[result_key(result)] = sources(result), label
 
     def show(self):
         if self._active:
@@ -421,8 +480,13 @@ class MatchingDisplay(QObject):
                     isolated[pop].add(obj)
             message = (f"Nucleus {label} · {index.nuclei[label].auto_class}" if role == "nuclear"
                        else f"Cytoplasmic object {label} · {index.objects[label].accepted_count} accepted nuclei")
+        if focus:
+            self.review_choices.pop(result_key(index.result), None)
+            self._unavailable = ""
+        message = message or self._unavailable
         self._isolated_ids = isolated
         self.panel.selection_status.setText(message)
+        self.legend_changed.emit(message if index or message else None)
         table = self.panel.table
         with QSignalBlocker(table.selectionModel()):
             if focus and focus[0] == "nuclear" and focus[1] in self.panel.table_model.row_numbers:
@@ -431,7 +495,6 @@ class MatchingDisplay(QObject):
                 table.setCurrentIndex(QModelIndex())
                 table.clearSelection()
         if len(self.layers) == 2:
-            self.renderer.legend(message)
             self.renderer.render(self.layers, self.panel.styles, index, self.panel.class_colors.isChecked(), marks, isolated)
 
     def _stop_showing(self):
@@ -504,6 +567,9 @@ class MatchingDisplay(QObject):
 
     def refresh(self, *args, request_visualization=False):
         if self._pair is not self.state.matching_pair:
+            self.locations.clear()
+            self.review_choices.clear()
+            self._unavailable = ""
             self._stop_showing()
             self.panel.explorer.set_result(None, "Run automatic matching to inspect associations.")
             self.panel.explorer.multiple.setChecked(True)
@@ -523,6 +589,16 @@ class MatchingDisplay(QObject):
                 self.panel.explorer.set_result(None, "Matching results unavailable.")
             return
         pair, checks = self._pair.inspect()
+        result = self._pair._result_for(pair)
+        explorer = self.panel.explorer
+        previous = explorer.index.result if explorer.index else None
+        changed = result is not previous
+        if changed and previous is not None:
+            self._save_location()
+            self.inspection.reset()
+        loc = self.location()
+        if not result:
+            self._unavailable = "Previous selection unavailable until matching results are current." if loc else ""
         for role in MATCHING_ROLES:
             self._refresh_selector(role, checks[role])
         if not self.state.dataset_ready:
@@ -540,19 +616,55 @@ class MatchingDisplay(QObject):
                 self._requested = True
             if self._requested:
                 self._show_pair(pair)
-        result = self._pair._result_for(pair)
-        explorer = self.panel.explorer
-        if explorer.index is not None and explorer.index.result is not result:
-            self.inspection.reset()
-        self._show_results(pair, result)
-        explorer.set_result(result, self.panel.result_status.text())
-        self.panel.candidate_explorer.set_result(result, self._pair.review)
+        self._syncing = True
+        try:
+            key = self._pair_key()
+            if key != self._preferences_key:
+                self._preferences_key = key
+                (loc.preferences if loc else self._default_preferences).apply(self.panel)
+                self.panel.candidate_explorer.isolate.setChecked(False)
+            self._show_results(pair, result)
+            explorer.set_result(result, self.panel.result_status.text())
+            self.panel.candidate_explorer.set_result(result, self._pair.review)
+            if changed and result:
+                self._unavailable = ""
+                if loc and not loc.restore(self, result):
+                    label = loc.nucleus if loc.preferences.mode else loc.parent
+                    if label is not None:
+                        role = "nuclear" if loc.preferences.mode else "cytoplasmic"
+                        self._unavailable = f"Previous {role} selection {label} unavailable for the current geometry or filters."
+        finally:
+            self._syncing = False
+        if changed and result:
+            self._restore_review_choice(result, loc)
         self.render()
+        if changed and result and loc:
+            loc.scroll(self.panel)
         self.panel.compatibility.setText(message)
         self.panel.show_inputs.setEnabled(pair is not None and len(self.layers) != len(MATCHING_ROLES))
         for role in MATCHING_ROLES:
             self.panel.visibility[role].setEnabled(role in self.layers)
             self.panel.opacity[role].setEnabled(role in self.layers)
+
+    def _restore_review_choice(self, result, loc):
+        explorer = self.panel.explorer
+        choice = self.review_choices.pop(result_key(result), None)
+        if choice and (choice[0] != sources(result) or choice[1] not in result.statistics.nuclear_voxels):
+            self._syncing = True
+            try:
+                self.panel.explorer_mode.setCurrentIndex(1)
+                self.panel.candidate_explorer.clear_inspection(True)
+            finally:
+                self._syncing = False
+            self.review_choices[result_key(result)] = choice
+            self._unavailable = f"Previous nuclear selection {choice[1]} unavailable for the current geometry."
+        elif choice:
+            pos = row_for(explorer.candidates, choice[1])
+            if not self.panel.explorer_mode.currentIndex() and explorer.selection and pos is not None:
+                explorer.candidates.selectRow(pos)
+            elif not loc or choice[1] != loc.inspected_nucleus or self._unavailable:
+                self.select_object("nuclear", choice[1])
+                self._candidate_navigated()
 
     def _show_results(self, pair, result):
         panel, context = self.panel, self._pair

@@ -10,8 +10,6 @@ from .mask_selection import INTERNAL_HIGHLIGHT_KEY, bounded_highlight
 
 ROLE_COLORS = {"nuclear": (.16, .8, 1., 1.), "cytoplasmic": (1., .52, .16, 1.)}
 STYLES = ("Filled masks", "Outlines only", "Filled masks with outlines")
-LEGEND = ("Automatic classification · Green MATCH · Yellow AMBIGUOUS · Red NO_MATCH\n"
-          "Boundaries · White selected · Cyan accepted · Violet other candidate")
 EDGE_COLORS = {"selected": "white", "accepted": "cyan", "candidate": "#be70ff"}
 
 
@@ -75,17 +73,12 @@ class MaskAppearance:
         self.marks = {}
         self.maps = {}
         self.colormaps = {}
-        self.saved_text = None
 
     def _remove(self, layer):
         if layer in self.viewer.layers:
             self.viewer.layers.remove(layer)
 
     def clear(self):
-        if self.saved_text is not None:
-            text = self.viewer.canvas.overlays.text
-            text.text, text.visible = self.saved_text
-            self.saved_text = None
         for _, layer in [*self.edges.values(), *self.marks.values()]:
             self._remove(layer)
         self.edges.clear()
@@ -104,13 +97,6 @@ class MaskAppearance:
         if active in self.viewer.layers:
             self.viewer.layers.selection.active = active
         return layer
-
-    def legend(self, message):
-        text = self.viewer.canvas.overlays.text
-        if self.saved_text is None:
-            self.saved_text = text.text, text.visible
-        text.text = LEGEND + ("\n" + message if message else "")
-        text.visible = True
 
     @staticmethod
     def _colors(role, index, ids, *, outline=False):

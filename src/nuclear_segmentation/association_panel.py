@@ -1,12 +1,15 @@
 """Proofreading controls for association decisions on retained scientific objects."""
+from weakref import ref
+
 from qtpy.QtCore import QSignalBlocker
 from qtpy.QtWidgets import QCheckBox, QSpinBox, QComboBox, QLabel, QLineEdit, QPushButton, QVBoxLayout
 
 from .association_review import STATES
 from .collapsible_section import CollapsibleSection
+from .matching_navigation import sources
 from .matching_inspection import add_population, focus_population
-from .matching_appearance import LEGEND, MaskAppearance, appearance_control, relationships
-from .matching_explorer import AssociationIndex
+from .matching_appearance import MaskAppearance, appearance_control, relationships
+from .matching_explorer import AssociationIndex, ResultSelection
 from .matching_pair import MATCHING_ROLES
 
 
@@ -20,6 +23,7 @@ class AssociationPanel(CollapsibleSection):
         self.renderer = MaskAppearance(window.embedding.viewer, self.state)
         self.index = None
         self.focus_role = "nuclear"
+        self.inspected_parent = None
         self.styles = {}
         self.layers = []
         self.previous_layer = None
@@ -28,10 +32,10 @@ class AssociationPanel(CollapsibleSection):
         self.set_content_layout(form)
         self.message = QLabel()
         self.message.setWordWrap(True)
-        legend = QLabel(LEGEND)
-        legend.setWordWrap(True)
-        form.addWidget(legend)
         form.addWidget(self.message)
+        self.editing_summary = QLabel()
+        self.editing_summary.setWordWrap(True)
+        form.addWidget(self.editing_summary)
         def combo(title, values=()):
             form.addWidget(QLabel(title))
             control = QComboBox()
@@ -81,9 +85,9 @@ class AssociationPanel(CollapsibleSection):
         button("Confirm automatic match", lambda: self.save(True))
         button("Record manual decision", lambda: self.save(False))
         button("Undo last decision", self.undo)
-        self.classes.currentIndexChanged.connect(self.populate)
-        self.filter.currentIndexChanged.connect(self.populate)
-        self.nuclei.currentIndexChanged.connect(self.show_object)
+        self.classes.currentIndexChanged.connect(self._filter_changed)
+        self.filter.currentIndexChanged.connect(self._filter_changed)
+        self.nuclei.currentIndexChanged.connect(self._choose_nucleus)
         self.targets.currentTextChanged.connect(self._target_changed)
         for signal in (self.state.matching_result_changed, self.state.matching_selection_changed,
                        self.state.sessions_changed, self.state.inactive_session_validity_changed,
@@ -103,12 +107,40 @@ class AssociationPanel(CollapsibleSection):
         if current is not self.result or not self.nuclei.count():
             self.result = current
             self.index = AssociationIndex(current) if current else None
-            self.populate()
+            self.populate(restore_selection=True)
 
-    def populate(self, *args):
+    def _filter_changed(self):
+        self.populate()
+        self._remember_nucleus()
+
+    def _choose_nucleus(self):
+        self.show_object()
+        self._remember_nucleus()
+
+    def _remember_nucleus(self):
+        if self.active and self.result and self.nuclei.currentText():
+            self.window.matching_display.remember_review_nucleus(self.result, int(self.nuclei.currentText()))
+
+    def populate(self, *args, restore_selection=False):
         if self.display_result is not self.result:
             self.restore()
         selected = self.nuclei.currentText()
+        unavailable = False
+        parent_only = None
+        loc = None
+        if restore_selection and self.result:
+            label, unavailable = self.window.matching_display.review_nucleus(self.result)
+            selected = str(label) if label is not None else ""
+            loc = self.window.matching_display.location()
+            if label is None and loc and not loc.preferences.mode:
+                parent_only = loc.parent
+            if label is not None:
+                row = self.index.nuclei[label]
+                with QSignalBlocker(self.classes), QSignalBlocker(self.filter):
+                    if self.classes.currentText() not in ("All", row.auto_class):
+                        self.classes.setCurrentIndex(0)
+                    if self.filter.currentText() not in ("All", self.review.status(self.result, label)):
+                        self.filter.setCurrentIndex(0)
         with QSignalBlocker(self.nuclei):
             self.nuclei.clear()
             for row in self.result.nuclei if self.result else ():
@@ -116,12 +148,31 @@ class AssociationPanel(CollapsibleSection):
                 if self.classes.currentText() in ("All", row.auto_class) and self.filter.currentText() in ("All", status):
                     self.nuclei.addItem(str(row.nuclear_id))
             index = self.nuclei.findText(selected)
-            if index >= 0:
+            if unavailable or parent_only is not None:
+                self.nuclei.setCurrentIndex(-1)
+            elif index >= 0:
                 self.nuclei.setCurrentIndex(index)
         pair = self.review.key(None)[:2]
         self.absent_count = sum(1 for key in self.review.records if key[:2] == pair
                                 and self.result and key[2] not in self.result.statistics.nuclear_voxels)
+        self.inspected_parent = (parent_only if parent_only is not None and loc.revisions == sources(self.result)
+                                 and parent_only in self.result.associations else None)
         self.show_object()
+        if loc and selected and not unavailable and loc.inspected_nucleus == int(selected):
+            target = loc.candidate_focus if loc.preferences.mode else loc.parent
+            if target in self.result.associations:
+                with QSignalBlocker(self.targets):
+                    self.targets.setCurrentText(str(target))
+                self._render()
+        if unavailable:
+            self.message.setText("Previous nuclear selection unavailable for the current geometry.")
+        elif parent_only is not None:
+            message = f"Cytoplasmic object {parent_only} · Select a nucleus for manual review."
+            if self.inspected_parent is None:
+                message = f"Previous cytoplasmic selection {parent_only} unavailable."
+            self.message.setText(message)
+            if self.display_result is not None:
+                self.window.navigation.set_legend("proofreading", message)
 
     def _target_changed(self):
         self.focus_role = "cytoplasmic"
@@ -130,6 +181,8 @@ class AssociationPanel(CollapsibleSection):
     def show_object(self, *args):
         self.focus_role = "nuclear"
         index = self.nuclei.currentIndex()
+        if index >= 0:
+            self.inspected_parent = None
         self.previous.setEnabled(index > 0)
         self.next.setEnabled(0 <= index < self.nuclei.count() - 1)
         with QSignalBlocker(self.targets):
@@ -157,6 +210,23 @@ class AssociationPanel(CollapsibleSection):
                     if record["cytoplasmic_id"] is not None:
                         self.targets.setCurrentText(str(record["cytoplasmic_id"]))
         self._render(focus="nuclear" if self.follow.isChecked() else None)
+
+    def editing_target(self):
+        """Resolve the reviewed IDs against the session that owns the new transaction."""
+        if self.display_result is None or self.result is not self.state.matching_pair.current_result:
+            return None
+        pair = self.state.matching_pair
+        role = self.state.active_session.scientific_role
+        if role not in MATCHING_ROLES or pair.session_id(role) != self.state.active_session_id:
+            return None
+        nucleus = int(self.nuclei.currentText()) if self.nuclei.currentText() else None
+        text = self.targets.currentText()
+        target = int(text) if text.isdecimal() and int(text) in self.result.associations else self.inspected_parent
+        label, reference = (nucleus, target) if role == "nuclear" else (target, nucleus)
+        if label is None:
+            return None
+        context = ResultSelection(ref(self.result), self.result.statistics.population_identity)
+        return context, role, label, (reference,) if reference is not None else ()
 
     def selection(self):
         if (not self.window._project_idle() or self.window._project_job is not None or self.result is None
@@ -194,6 +264,8 @@ class AssociationPanel(CollapsibleSection):
             self.restore()
 
     def restore(self, *args):
+        self.window.navigation.set_legend("proofreading", None)
+        self.editing_summary.clear()
         if self.display_result is None:
             return
         self.display_result = None
@@ -232,6 +304,7 @@ class AssociationPanel(CollapsibleSection):
             if self.window.mask_display.suspended:
                 return
             pair = self.state.matching_pair.capture()
+            self.window.geometry_panel.clear_handoff()
             self.previous_layer = viewer.layers.selection.active
             self.window.mask_display.suspend(keep_hidden=True)
             self.display_result = self.result
@@ -241,12 +314,12 @@ class AssociationPanel(CollapsibleSection):
         try:
             target = int(self.targets.currentText())
         except ValueError:
-            target = None
+            target = self.inspected_parent
         if target not in self.result.associations:
             target = None
         nucleus = int(self.nuclei.currentText()) if self.nuclei.currentText() else None
         marks = relationships(self.index, "nuclear", nucleus) if nucleus is not None else {}
-        if target is not None and self.focus_role == "cytoplasmic":
+        if target is not None and (self.focus_role == "cytoplasmic" or nucleus is None):
             marks = relationships(self.index, "cytoplasmic", target)
             if nucleus is not None and ("nuclear", nucleus) not in marks:
                 marks["nuclear", nucleus] = "selected"
@@ -257,9 +330,15 @@ class AssociationPanel(CollapsibleSection):
             isolated = {role: {label for pop, label in marks if pop == role} for role in MATCHING_ROLES}
         layers = dict(zip(MATCHING_ROLES, self.layers, strict=True))
         message = f"Nucleus {nucleus} · {self.index.nuclei[nucleus].auto_class}" if nucleus else ""
-        if target is not None and self.focus_role == "cytoplasmic":
+        if target is not None and (self.focus_role == "cytoplasmic" or nucleus is None):
             message += f"\nCytoplasmic object {target} · {self.index.objects[target].accepted_count} accepted nuclei"
-        self.renderer.legend(message)
+        session = self.state.active_session
+        owner_role = session.scientific_role
+        editing_id = nucleus if owner_role == "nuclear" else target
+        owned = owner_role in MATCHING_ROLES and self.state.matching_pair.session_id(owner_role) == session.session_id
+        object_text = f"ID {editing_id}" if owned and editing_id is not None else "no inspected editing target"
+        self.editing_summary.setText(f"Geometry editor · {session.display_name} ({owner_role}) · {object_text}")
+        self.window.navigation.set_legend("proofreading", message)
         self.renderer.render(layers, self.styles, self.index, True, marks, isolated)
         label = target if focus == "cytoplasmic" else nucleus
         if focus and label is not None:

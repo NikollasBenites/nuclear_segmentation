@@ -247,6 +247,7 @@ class DesktopWindow(QMainWindow):
         self.matching_display = MatchingDisplay(
             self.embedding.viewer, self.project_state, self.context_panel.matching_page, self.mask_display, self,
         )
+        self.matching_display.legend_changed.connect(lambda text: self.navigation.set_legend("matching", text))
         self.mask_display.status.connect(review_panel.set_visualization_status)
         self.mask_display.changed.connect(self._mark_project_dirty)
         self.mask_display.changed.connect(self._release_comparisons)
@@ -1437,19 +1438,25 @@ class DesktopWindow(QMainWindow):
             self.mask_display.sync(restore_selection=True)
             self._release_comparisons()
 
-    def set_workflow(self, key: str) -> None:
+    def set_workflow(self, key: str, *, transfer_inspection=True) -> None:
         if key == "matching" and self.geometry_panel.busy:
             return
+        target = self.matching_display.proofreading_target() if key == "proofreading" and transfer_inspection else None
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
         if key != "matching":
             self.matching_display.set_active(False)
+        if target:
+            self.geometry_panel.inspect_handoff(*target)
         self.association_panel.active = key == "proofreading"
         self.association_panel.refresh()
         if key != "proofreading":
+            self.geometry_panel.clear_handoff()
             self.geometry_panel.guided.clear_context()
-        self.matching_display.set_active(key == "matching")
         self.context_panel.set_workflow(key, self.navigation.current_subpage)
+        self.matching_display.set_active(key == "matching")
+        if target and self.matching_display.location():
+            self.matching_display.location().view.restore(self.embedding.viewer)
         self.context_title.setText(self.context_panel.workflow_title)
         self.graph_window.setVisible(self.isVisible() and key == "quality_control")
         label = self.context_panel.workflow_label

@@ -261,6 +261,7 @@ def test_handoff_rejects_invalid_result_and_conflicting_edit(window_pair):
     explorer = choose_in_panel(window, nuclear, cyto).explorer
     run_job(state.matching_pair)
     geometry = window.geometry_panel
+    window.matching_display.select_object("nuclear", 7)
     window.set_workflow("proofreading")
     geometry.start()
     geometry.guided.handoff()

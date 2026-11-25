@@ -84,6 +84,9 @@ class MatchingInspection:
         if not self.ui.selection:
             return
         self.display.show()
+        self.apply_isolation()
+
+    def apply_isolation(self):
         if not self.appearance:
             self.appearance = {layer: (layer.visible, layer.opacity) for layer in self.display.layers.values()}
             for layer in self.appearance:

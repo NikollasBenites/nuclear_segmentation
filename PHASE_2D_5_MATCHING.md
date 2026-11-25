@@ -232,7 +232,7 @@ The developer validated all nine Phase 2D.5.3 checks on native macOS at `7a6be0a
 
 Choose **Nuclear** or **Cytoplasmic** under **Click to inspect**, then click a mask. The corresponding explorer selects its row and reveals it if a filter excluded it. A click keeps the camera in place. Use **Focus Selected Object** to center the selected mask. Tables display overlap as a percentage of the complete nucleus and sort by its underlying numeric value.
 
-The viewer legend identifies the white selection boundary, cyan accepted partners and violet overlapping candidates. Boundaries follow the source calibration and crop offset. In 3D, translucent shells show the same relationships. Set each population to filled masks, outlines only or filled masks with outlines, and adjust visibility and opacity independently. Manual Association Review uses the same boundary and classification colors. Leaving inspection or invalidating the source clears its overlays.
+The legend below workflow navigation identifies the white selection boundary, cyan accepted partners and violet overlapping candidates. Boundaries follow the source calibration and crop offset. In 3D, translucent shells show the same relationships. Set each population to filled masks, outlines only or filled masks with outlines, and adjust visibility and opacity independently. Manual Association Review uses the same boundary and classification colors. Leaving inspection or invalidating the source clears its overlays.
 
 **Review in Proofreading** selects the inspected parent even when the candidate table has focus. It verifies the immutable association selection against the published result, current project, acquisition grid, source session revisions and retained populations. The existing session switch selects the cytoplasmic target. Proofreading opens at an occupied voxel of the parent with the retained mask selected. Geometry editing starts only when the user requests an edit or a watershed preview. A busy project, pending filter change, active editor or obsolete selection blocks the handoff.
 
@@ -308,3 +308,11 @@ Under **Multiple Associations**, choose which direction to inspect. The original
 By default, **Multiple Cytoplasmic Candidates** lists each retained nucleus with positive intersections with at least two retained cytoplasmic IDs, across all automatic classes. Clear **Only multiple candidates** to inspect every retained nucleus. Sort the tables or filter by class. Each candidate row reports its intersection voxel count, fraction of the complete nucleus, complete cytoplasmic volume in µm³ and other automatically linked nuclei. These figures come from the published sparse matching result. Several overlaps can be biologically plausible.
 
 Select candidate rows with the platform's multiple-selection gesture. The summary reports the sum of their complete volumes and the fraction of the complete nucleus covered by their disjoint label supports. It identifies other retained nuclei with a positive intersection or a current explicit matched decision on a selected target. Isolation and navigation are display operations. **Review Merge in Proofreading** transfers the selected IDs to the cytoplasmic session for explicit review.
+
+### Final Phase 2 desktop stabilization
+
+The developer completed native macOS validation of commit `fd86abe9d720ef7544eeb8b10ee15f64135da682`. The developer approved 9/9 GUI checks.
+
+Matching retains inspection IDs, filters, table ordering and scroll positions, isolation and the calibrated viewer position for each ordered session pair during the open project. Returning to a pair uses its current automatic result. An incompatible source revision or missing selected object requires a new selection. The collapsible inspection legend appears below workflow navigation in Matching and Manual Association Review.
+
+Proofreading handoffs identify the editing session and source IDs. Nuclear reference masks and seed overlays are read-only. Watershed shows the mapping from nuclear seeds to proposed cytoplasmic child IDs, and merge requires an explicit retained ID before preview.

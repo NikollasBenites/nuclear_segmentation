@@ -7,7 +7,8 @@ from .geometry_edit import editing_dtype, effective_masks, next_geometry_id
 from .guided_split import candidate_records, propose, qualifying
 from .label_geometry import measured_bounds
 from .mask_selection import INTERNAL_HIGHLIGHT_KEY
-from .matching_inspection import center_on_voxel, focus_voxel
+from .matching_navigation import SpatialView
+from .matching_appearance import lock_labels
 
 
 class ProposalWorker(QThread):
@@ -64,6 +65,7 @@ class GuidedPanel(CollapsibleSection):
 
     def clear_context(self):
         self.selection = None
+        self.remove_reference()
         self.candidates = []
         self.hide()
 
@@ -85,10 +87,12 @@ class GuidedPanel(CollapsibleSection):
                 raise ValueError("Finish the active operation before reviewing this parent.")
             if selection is None or not selection.is_current(self.state.matching_pair):
                 raise ValueError("Rerun Matching and select a current cytoplasmic parent.")
+            view = SpatialView.capture(self.geometry.viewer)
             self.window._select_session(selection.cytoplasmic_revision.session_id)
+            view.restore(self.geometry.viewer)
             self.require_current(selection)
             self.window.association_panel.set_expanded(False)
-            self.window.set_workflow("proofreading")
+            self.window.set_workflow("proofreading", transfer_inspection=False)
             self.require_current(selection)
             layer = self.window.mask_display.layers.get("filtered")
             if layer is None or layer.data is not self.state.filtering_result["filtered_masks"]:
@@ -96,12 +100,14 @@ class GuidedPanel(CollapsibleSection):
             self.window.mask_display.show("filtered")
             layer = self.window.mask_display.layers["filtered"]
             parent = selection.cytoplasmic_id
-            point = focus_voxel(layer.data, parent, self.state.filtering_result.get("properties"))
-            if point is None:
-                raise ValueError("Parent geometry is unavailable. Return to Matching and rerun.")
             self.window.viewer_toolbar.activate_tool("review")
             self.window.mask_selection.restore_selection(layer, parent)
-            center_on_voxel(self.geometry.viewer, layer, point)
+            ids = list(selection.associated_ids)
+            if selection.focus_role == "nuclear" and selection.focus_id not in ids:
+                ids.append(selection.focus_id)
+            self.geometry.show_handoff(selection, ids, (parent,), focused_reference=(
+                selection.focus_id if selection.focus_role == "nuclear" else None))
+            view.restore(self.geometry.viewer)
             self.selection = selection
             self.candidates = candidate_records(selection.source(), parent)
             source = self.state.sessions[selection.nuclear_revision.session_id]
@@ -190,15 +196,21 @@ class GuidedPanel(CollapsibleSection):
             self.reference = panel.viewer.add_labels(
                 proposal.reference, scale=panel.layer.scale, translate=origin, opacity=.65,
                 name="Nuclear reference · qualifying seeds", metadata={INTERNAL_HIGHLIGHT_KEY: True})
-            self.reference.editable = False
+            lock_labels(self.reference)
             self.show_seeds.setChecked(True)
             self.show_seeds.show()
             mapping = ", ".join(f"{seed} → {child}" for seed, child in
                                 zip(proposal.parameters["seed_ids"], proposal.parameters["child_ids"], strict=True))
             self.details.setText(self.details.text() + f"\nNucleus → proposed child: {mapping}")
+            panel.layer.name = f"{self.state.active_session.display_name} · Watershed preview"
             panel.return_preview()
             panel._dimensions()
             p = proposal.parameters
+            if worker.selection.focus_role == "nuclear" and worker.selection.focus_id in p["seed_ids"]:
+                child = p["child_ids"][p["seed_ids"].index(worker.selection.focus_id)]
+                panel.window.mask_selection.restore_selection(panel.layer, child)
+            elif p["residual_voxels"]:
+                panel.window.mask_selection.restore_selection(panel.layer, p["parent_id"])
             panel.status.setText(f"Read-only preview · Apply Watershed or Cancel Preview. Undo becomes available after Apply. "
                                 f"{len(p['child_ids'])} children. "
                                 f"{p['residual_components']} residual components, {p['residual_voxels']} voxels "
