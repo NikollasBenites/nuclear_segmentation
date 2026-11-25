@@ -186,6 +186,7 @@ class GeometryEdit:
         self.undo_floor = 0
         self.guided_context = None
         self.guided_proposal = None
+        self.merge_selection = None
         self.pending_source = None
         self.tracks_strokes = track_strokes
         self._excluded_ids = None
@@ -286,8 +287,8 @@ class GeometryEdit:
     def set_filtered(self, filtered):
         if filtered == self.filtered:
             return
-        if self.guided_context is not None:
-            raise ValueError("Finish the dedicated watershed transaction before editing other geometry.")
+        if self.dedicated:
+            raise ValueError("Finish the dedicated geometry transaction before editing other geometry.")
         if self.paused or self.operation != "paint/erase":
             raise ValueError("Resume ordinary brush editing before changing scope.")
         if not self.filter_current:
@@ -326,9 +327,13 @@ class GeometryEdit:
         delta = delta_between(reference, self.preview, "paint/erase", {}, self.scope)
         return delta if delta["indexes"].size else None
 
-    def _begin(self):
-        if self.guided_context is not None:
-            raise ValueError("Finish the dedicated watershed transaction before editing other geometry.")
+    @property
+    def dedicated(self):
+        return self.guided_context is not None or self.merge_selection is not None
+
+    def _begin(self, *, association_merge=False):
+        if self.dedicated and not association_merge:
+            raise ValueError("Finish the dedicated geometry transaction before editing other geometry.")
         if self.paused or self.operation != "paint/erase":
             raise ValueError("Apply or cancel the pending operation and resume editing first.")
         if self.filtered:
@@ -353,15 +358,26 @@ class GeometryEdit:
         ids = sorted(set(ids))
         if len(ids) < 2 or target not in ids:
             raise ValueError("Choose at least two objects and one of their IDs to retain.")
+        selection = self.merge_selection
+        if selection is not None:
+            self.require_guided_context(selection)
+            if tuple(ids) != selection.ids or self.steps or self.redo_steps or not self.is_pristine():
+                raise ValueError("Select the original candidate masks in a fresh merge transaction.")
         counts = {}
         for label in ids:
             self._object(label)
             counts[str(label)] = int(np.count_nonzero(self.preview == label))
-        self._begin()
+        self._begin(association_merge=selection is not None)
         self.pending_source = self.preview.copy()
         self.pending_source.setflags(write=False)
         self.operation = "merge"
         self.parameters = dict(ids=ids, retained_id=target, input_counts=counts, result_count=sum(counts.values()))
+        if selection is not None:
+            self.parameters.update(origin="association_review", nucleus_id=selection.nucleus,
+                                   project_id=str(selection.project_id), nuclear_session=selection.nuclear_revision.session_id,
+                                   nuclear_revision=selection.nuclear_revision.geometry_revision,
+                                   nuclear_input_revision=selection.nuclear_revision.input_revision,
+                                   cytoplasmic_input_revision=self.owner.input_revision)
         self.preview[np.isin(self.preview, ids)] = target
 
     def split(self, parent):
@@ -405,7 +421,7 @@ class GeometryEdit:
     def require_guided_context(self, selection):
         if (not selection.is_current(self.state.matching_pair) or self.owner != selection.cytoplasmic_revision
                 or self.owner != self.state.session_revision() or not self.selection_current):
-            raise ValueError("Watershed inputs changed. Discard the preview and review a current Matching result.")
+            raise ValueError("Matching inputs changed. Discard the preview and review a current Matching result.")
 
     def cancel_operation(self):
         if self.pending_source is None:
@@ -422,6 +438,8 @@ class GeometryEdit:
         source = self.pending_source
         if source is None:
             raise ValueError("There is no pending operation.")
+        if self.merge_selection is not None:
+            self.require_guided_context(self.merge_selection)
         step = delta_between(source, self.preview, self.operation, self.parameters, self.scope)
         if self.operation == OPERATION:
             self.require_guided_context(self.guided_context)
@@ -486,6 +504,10 @@ class GeometryEdit:
             self.require_guided_context(self.guided_context)
             if len(self.steps) != 1 or self.steps[0]["operation"] != OPERATION:
                 raise ValueError("Redo the watershed or discard this transaction.")
+        if self.merge_selection is not None:
+            self.require_guided_context(self.merge_selection)
+            if len(self.steps) != 1 or self.steps[0]["operation"] != "merge":
+                raise ValueError("Apply or redo the selected merge before saving.")
         steps = self.steps.copy()
         operation, parameters = self.operation, self.parameters
         reviewed = None
@@ -655,7 +677,15 @@ def validate_history(result, session):
                 or any(type(label) is not int or label <= 0 for label in previous)
                 or previous != sorted(set(previous)) or not set(previous).issubset(np.unique(masks))):
             raise ValueError("Invalid pre-edit retained IDs in geometry history.")
-        if record["operation"] in ("transaction", OPERATION):
+        guided_merge = record["operation"] == "merge" and record["parameters"].get("origin") == "association_review"
+        if guided_merge or record["operation"] in ("transaction", OPERATION):
+            if guided_merge:
+                p = record["parameters"]
+                if (record.get("editing_scope") != "filtered" or previous is None
+                        or not isinstance(p.get("nuclear_session"), str) or p["nuclear_session"] == record["session_id"]
+                        or type(p.get("nucleus_id")) is not int or p["nucleus_id"] <= 0
+                        or type(p.get("nuclear_revision")) is not int or p["nuclear_revision"] < 0):
+                    raise ValueError("Invalid association-guided merge provenance.")
             if record["operation"] == OPERATION:
                 p = record["parameters"]
                 if (record.get("editing_scope") != "filtered" or previous is None or p.get("parent_id") not in previous

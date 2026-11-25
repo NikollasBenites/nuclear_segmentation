@@ -14,15 +14,10 @@ from .automatic_matching import AutomaticMatchingResult
 
 
 @dataclass(frozen=True)
-class AssociationSelection:
+class ResultSelection:
     """Result-scoped handoff. Population identity contains the grid and both SessionRevisions."""
     source: ReferenceType[AutomaticMatchingResult]
     population_identity: tuple
-    cytoplasmic_id: int
-    associated_ids: tuple[int, ...]
-    other_candidate_ids: tuple[int, ...]
-    focus_role: str
-    focus_id: int
 
     @property
     def nuclear_revision(self):
@@ -36,15 +31,24 @@ class AssociationSelection:
     def project_id(self):
         return self.nuclear_revision.project_id
 
-    @property
-    def focus_revision(self):
-        return self.nuclear_revision if self.focus_role == "nuclear" else self.cytoplasmic_revision
-
     def is_current(self, pair):
         """IDs were captured from this immutable result. Recheck ownership at use time."""
         result = self.source()
         return (result is not None and pair.current_result is result
                 and self.population_identity == result.statistics.population_identity)
+
+
+@dataclass(frozen=True)
+class AssociationSelection(ResultSelection):
+    cytoplasmic_id: int
+    associated_ids: tuple[int, ...]
+    other_candidate_ids: tuple[int, ...]
+    focus_role: str
+    focus_id: int
+
+    @property
+    def focus_revision(self):
+        return self.nuclear_revision if self.focus_role == "nuclear" else self.cytoplasmic_revision
 
 
 class CytoplasmicRow(NamedTuple):
@@ -93,6 +97,7 @@ class AssociationIndex:
 
 class InspectionTable(QAbstractTableModel):
     """Sort native Python values and format only cells requested by Qt."""
+    sorting_rows = Signal()
     sorted_rows = Signal()
 
     def __init__(self, headers, parent):
@@ -109,6 +114,7 @@ class InspectionTable(QAbstractTableModel):
 
     def sort(self, column, order):
         if 0 <= column < len(self.headers):
+            self.sorting_rows.emit()
             self.order = column, order
             self.replace(self.rows)
             self.sorted_rows.emit()
@@ -137,7 +143,20 @@ class InspectionTable(QAbstractTableModel):
         return "—" if value is None else str(value)
 
 
+def inspection_table(layout, title, headers):
+    view = QTableView()
+    view.setAccessibleName(title)
+    view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    view.verticalHeader().hide()
+    view.setModel(InspectionTable(headers, view))
+    layout.addWidget(view)
+    return view
+
+
 class AssociationExplorer(QWidget):
+    navigated = Signal()
     selection_changed = Signal()
 
     def __init__(self):
@@ -152,25 +171,34 @@ class AssociationExplorer(QWidget):
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        self.objects = self._table(layout, "Automatically linked cytoplasmic objects", (
+        self.objects = inspection_table(layout, "Automatically linked cytoplasmic objects", (
             "Cyto ID", "Accepted nuclei", "Associated nuclear IDs", "Overlapping candidates", "Volume (µm³)"))
         self.objects.setSortingEnabled(True)
         self.objects.sortByColumn(1, Qt.SortOrder.DescendingOrder)
         nav = QHBoxLayout()
         layout.addLayout(nav)
-        self.previous = QPushButton("Previous")
-        self.next = QPushButton("Next")
+        self.previous = QPushButton("Previous Object")
+        self.next = QPushButton("Next Object")
         for button in (self.previous, self.next):
             nav.addWidget(button)
         layout.addWidget(QLabel("Overlapping nuclear candidates"))
-        self.candidates = self._table(layout, "Overlapping nuclear candidates", (
+        self.candidates = inspection_table(layout, "Overlapping nuclear candidates", (
             "Nucleus ID", "Automatic class", "Auto-linked cyto ID", "Intersection (voxels)",
             "Intersection (µm³)", "Fraction of nucleus", "Accepted here"))
+        self.previous_nucleus = QPushButton("Previous Nucleus")
+        self.next_nucleus = QPushButton("Next Nucleus")
+        for control, delta in ((self.previous_nucleus, -1), (self.next_nucleus, 1)):
+            layout.addWidget(control)
+            control.clicked.connect(lambda _, d=delta: self.candidates.selectRow(self.candidates.currentIndex().row() + d))
+        self.follow = QCheckBox("Follow selected object")
+        self.follow.setChecked(True)
+        layout.addWidget(self.follow)
+        self.selection_changed.connect(self._candidate_controls)
         self.focus = QPushButton("Focus Selected Object")
         self.review = QPushButton("Review in Proofreading")
         self.isolate = QPushButton("Isolate Associated Masks")
         self.isolate.setToolTip("Accepted nuclei appear green and the selected cytoplasmic object appears orange.")
-        self.include = QCheckBox("Include other overlapping nuclei (magenta)")
+        self.include = QCheckBox("Include other overlapping nuclei")
         self.restore = QPushButton("Show All Masks")
         for control in (self.focus, self.review, self.isolate, self.include, self.restore):
             layout.addWidget(control)
@@ -182,20 +210,9 @@ class AssociationExplorer(QWidget):
         self.candidates.selectionModel().currentRowChanged.connect(self._candidate_changed)
         self.previous.clicked.connect(lambda: self._navigate(-1))
         self.next.clicked.connect(lambda: self._navigate(1))
+        self._candidate_controls()
         self._controls(-1)
         self.status.setText("Run automatic matching to inspect associations.")
-
-    @staticmethod
-    def _table(layout, title, headers):
-        view = QTableView()
-        view.setAccessibleName(title)
-        view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        view.verticalHeader().hide()
-        view.setModel(InspectionTable(headers, view))
-        layout.addWidget(view)
-        return view
 
     def set_result(self, result, message):
         if result is None:
@@ -243,6 +260,11 @@ class AssociationExplorer(QWidget):
             control.setEnabled(pos >= 0)
         self.restore.setEnabled(False)  # The display enables this during isolation.
 
+    def _candidate_controls(self):
+        row = self.candidates.currentIndex().row()
+        self.previous_nucleus.setEnabled(row > 0)
+        self.next_nucleus.setEnabled(row + 1 < self.candidates.model().rowCount())
+
     def _navigate(self, delta):
         pos = self.objects.currentIndex().row() + delta
         if 0 <= pos < self.objects.model().rowCount():
@@ -251,12 +273,15 @@ class AssociationExplorer(QWidget):
     def _object_changed(self, current, previous):
         if current.isValid():
             self._show_object(current.row())
+            self.navigated.emit()
 
     def _object_clicked(self, index):
         if self.selection and self.selection.focus_role == "nuclear":
             self.candidates.setCurrentIndex(QModelIndex())
             self.candidates.clearSelection()
             self._select("cytoplasmic", self.selection.cytoplasmic_id)
+        if self.selection:
+            self.navigated.emit()
 
     def _show_object(self, pos):
         cyto = self.objects.model().rows[pos].label_id
@@ -271,6 +296,7 @@ class AssociationExplorer(QWidget):
     def _candidate_changed(self, current, previous):
         if current.isValid():
             self._select("nuclear", self.candidates.model().rows[current.row()].label_id)
+            self.navigated.emit()
 
     def _select(self, role, label):
         cyto = self.objects.model().rows[self.objects.currentIndex().row()].label_id

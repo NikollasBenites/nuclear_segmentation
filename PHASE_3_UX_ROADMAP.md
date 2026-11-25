@@ -21,3 +21,7 @@ Support dragging the plane boundaries and the explicit actions **Set Current Pla
 ## 3.4 · Analysis presets
 
 An interface profile controls guidance and navigation. A scientific analysis preset provides an explicit starting configuration for an analysis. Keep those choices independent. Candidate presets include nuclear segmentation, cytoplasmic segmentation, nuclear density and nuclear–cytoplasmic matching.
+
+## Session access
+
+Place an accessible segmentation session selector near the top of the main workspace. Show the current session name and scientific role together. Switching sessions must preserve each session's independent inputs, results, review history and display state.

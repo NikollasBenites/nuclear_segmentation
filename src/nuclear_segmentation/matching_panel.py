@@ -5,12 +5,13 @@ from napari.utils.colormaps import CyclicLabelColormap, DirectLabelColormap
 from qtpy.QtCore import QAbstractTableModel, QModelIndex, QObject, QSignalBlocker, Qt
 from qtpy.QtWidgets import (
     QCheckBox, QComboBox, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
-    QTableView, QVBoxLayout, QWidget,
+    QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
 from .automatic_matching import COLORS, MatchingSettings
+from .candidate_explorer import CandidateExplorer
 from .matching_explorer import AssociationExplorer
-from .matching_inspection import MatchingInspection
+from .matching_inspection import MatchingInspection, ROLE_COLORS, add_population, focus_population, highlight_ids
 from .matching_execution import MatchingExecution
 from .collapsible_section import CollapsibleSection
 from .matching_pair import MATCHING_LAYER, MATCHING_ROLES
@@ -95,7 +96,7 @@ class MatchingPanel(QWidget):
             label.setBuddy(opacity)
             visualization.addWidget(label)
             visualization.addWidget(opacity)
-        self.class_colors = QCheckBox("Color nuclei by automatic classification")
+        self.class_colors = QCheckBox("Color nuclei by automatic class")
         visualization.addWidget(self.class_colors)
         legend = self._note(visualization)
         legend.setText("Automatic classes · Green MATCH · Yellow AMBIGUOUS · Red NO_MATCH")
@@ -122,7 +123,16 @@ class MatchingPanel(QWidget):
         results.addWidget(self.graphs)
         associations = self._section(root, "associations", "Multiple Associations")
         self.explorer = AssociationExplorer()
-        associations.addWidget(self.explorer)
+        self.explorer_mode = QComboBox()
+        self.explorer_mode.setAccessibleName("Association explorer")
+        self.explorer_mode.addItems(["Multiple Associations", "Multiple Cytoplasmic Candidates"])
+        associations.addWidget(self.explorer_mode)
+        self.candidate_explorer = CandidateExplorer()
+        pages = QStackedWidget()
+        pages.addWidget(self.explorer)
+        pages.addWidget(self.candidate_explorer)
+        associations.addWidget(pages)
+        self.explorer_mode.currentIndexChanged.connect(pages.setCurrentIndex)
         self.defaults.clicked.connect(self.reset_thresholds)
         root.addStretch(1)
         self.reset_appearance()
@@ -178,7 +188,7 @@ class MatchingPanel(QWidget):
 class MatchingDisplay(QObject):
     """Present a captured pair without adopting the active session's layer ownership."""
 
-    _colors = {"nuclear": (0.16, 0.8, 1.0, 1.0), "cytoplasmic": (1.0, 0.52, 0.16, 1.0)}
+    _colors = ROLE_COLORS
 
     def __init__(self, viewer, state, panel, session_display, parent=None):
         super().__init__(parent)
@@ -195,6 +205,11 @@ class MatchingDisplay(QObject):
         self._showing = False
         self._colored_result = None
         self.inspection = MatchingInspection(self)
+        self._candidate_maps = {}
+        panel.explorer_mode.currentIndexChanged.connect(self._explorer_changed)
+        panel.candidate_explorer.changed.connect(self._inspect_candidates)
+        panel.candidate_explorer.focus_requested.connect(lambda: self._inspect_candidates(center=True))
+        state.association_review_changed.connect(panel.candidate_explorer._selection_changed)
         self.execution = MatchingExecution(state, self)
         self.execution.changed.connect(self.refresh)
         self.execution.progress_changed.connect(self._progress)
@@ -222,6 +237,7 @@ class MatchingDisplay(QObject):
         self._active = active
         if active:
             self.refresh()
+            self._inspect_candidates()
         else:
             self._stop_showing()
             self.panel.table_model.show_result(None)
@@ -229,6 +245,39 @@ class MatchingDisplay(QObject):
     def show(self):
         if self._active:
             self.refresh(request_visualization=True)
+
+    def _restore_candidate_maps(self):
+        for role, colors in self._candidate_maps.items():
+            if role in self.layers:
+                self.layers[role].colormap = colors
+        self._candidate_maps.clear()
+
+    def _explorer_changed(self):
+        self.inspection.restore()
+        self._restore_candidate_maps()
+        self.refresh()
+        self._inspect_candidates()
+
+    def _inspect_candidates(self, *, center=False):
+        ui = self.panel.candidate_explorer
+        if not self._active or self.panel.explorer_mode.currentIndex() != 1:
+            return
+        if ui.result is None or ui.result is not self._pair.current_result or ui.nucleus is None:
+            self._restore_candidate_maps()
+            return
+        self._show_pair(self._pair.capture())
+        if len(self.layers) != 2:
+            return
+        if not self._candidate_maps:
+            self._candidate_maps = {role: layer.colormap for role, layer in self.layers.items()}
+        selection = ui.selection()
+        cyto_ids = set(selection.ids or ui.by_nucleus[ui.nucleus])
+        if ui.focus_role == "cytoplasmic":
+            cyto_ids.add(ui.focus_id)
+        highlight_ids(self.layers["nuclear"], "nuclear", [ui.nucleus], ui.isolate.isChecked())
+        highlight_ids(self.layers["cytoplasmic"], "cytoplasmic", cyto_ids, ui.isolate.isChecked())
+        if center or ui.follow.isChecked():
+            focus_population(self.viewer, self.state, self.layers[ui.focus_role], ui.focus_id)
 
     def _stop_showing(self):
         self._remove_layers()
@@ -253,7 +302,9 @@ class MatchingDisplay(QObject):
 
     def _toggle_colors(self, enabled):
         self.inspection.restore()
+        self._restore_candidate_maps()
         self.refresh(request_visualization=enabled)
+        self._inspect_candidates()
 
     def _select(self, role):
         self._pair.select(role, self.panel.selectors[role].currentData())
@@ -312,6 +363,9 @@ class MatchingDisplay(QObject):
             self.panel.summary.clear()
             self.panel.result_status.clear()
         if not self._active:
+            candidates = self.panel.candidate_explorer
+            if candidates.result is not None and candidates.result is not self._pair.current_result:
+                candidates.set_result(None, self._pair.review)
             index = self.panel.explorer.index
             if index is not None and self._pair.current_result is not index.result:
                 self.panel.explorer.set_result(None, "Matching results unavailable.")
@@ -340,6 +394,7 @@ class MatchingDisplay(QObject):
             self.inspection.reset()
         self._show_results(pair, result)
         explorer.set_result(result, self.panel.result_status.text())
+        self.panel.candidate_explorer.set_result(result, self._pair.review)
         self._apply_colors(result if self.panel.class_colors.isChecked() else None)
         self.panel.compatibility.setText(message)
         self.panel.show_inputs.setEnabled(pair is not None and len(self.layers) != len(MATCHING_ROLES))
@@ -388,7 +443,7 @@ class MatchingDisplay(QObject):
 
     def _apply_colors(self, result):
         layer = self.layers.get("nuclear")
-        if layer is None or self.inspection.appearance or self._colored_result is result:
+        if layer is None or self._candidate_maps or self.inspection.appearance or self._colored_result is result:
             return
         if result is None:
             layer.colormap = CyclicLabelColormap(colors=[(0, 0, 0, 0), self._colors["nuclear"]])
@@ -418,19 +473,11 @@ class MatchingDisplay(QObject):
 
     def _add_layers(self, pair):
         for role in MATCHING_ROLES:
-            source = getattr(pair, role)
-            layer = self.viewer.add_labels(
-                source.labels, name=self._layer_name(role),
-                scale=pair.grid.spacing_zyx_um, translate=pair.grid.translation_zyx_um,
-                units=("µm", "µm", "µm"), blending="additive",
-                colormap=CyclicLabelColormap(colors=[(0, 0, 0, 0), self._colors[role]]),
-                opacity=self.panel.opacity[role].value() / 100,
-                visible=self.panel.visibility[role].isChecked(),
-                metadata={MATCHING_LAYER: role, "matching_pair": pair.population_identity,
-                          "source_revision": source.owner, "measurement_revision": source.measurement_revision},
-            )
-            layer.editable = False
+            layer = add_population(self.viewer, pair, role, self._layer_name(role),
+                                   self.panel.visibility[role].isChecked(), self.panel.opacity[role].value() / 100)
             self.layers[role] = layer
+            self.panel.visibility[role].setEnabled(True)
+            self.panel.opacity[role].setEnabled(True)
             layer.events.visible.connect(self._appearance_changed)
             layer.events.opacity.connect(self._appearance_changed)
         self._displayed = pair
@@ -472,6 +519,7 @@ class MatchingDisplay(QObject):
             self._previous_layer = None
 
     def _remove_layers(self):
+        self._candidate_maps.clear()
         self.inspection.reset()
         self._colored_result = None
         self._displayed = None
@@ -481,6 +529,8 @@ class MatchingDisplay(QObject):
     def dispose(self):
         self.set_active(False)
         self.panel.explorer.set_result(None, "Matching results unavailable.")
+        self.panel.candidate_explorer.set_result(None, self._pair.review)
+        self.state.association_review_changed.disconnect(self.panel.candidate_explorer._selection_changed)
         for signal in self._state_signals:
             signal.disconnect(self.refresh)
         self.viewer.layers.events.removed.disconnect(self._removed)

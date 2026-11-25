@@ -70,7 +70,7 @@ class GuidedPanel(CollapsibleSection):
     def require_current(self, selection):
         if (selection is None or not selection.is_current(self.state.matching_pair)
                 or selection.cytoplasmic_revision != self.state.session_revision()):
-            raise ValueError("Source context changed. Return to Matching, rerun and select the parent again.")
+            raise ValueError("Source context changed. Return to Matching, rerun and select the objects again.")
 
     def idle(self):
         return (self.window._project_job is None and self.window._project_idle()
@@ -87,6 +87,7 @@ class GuidedPanel(CollapsibleSection):
                 raise ValueError("Rerun Matching and select a current cytoplasmic parent.")
             self.window._select_session(selection.cytoplasmic_revision.session_id)
             self.require_current(selection)
+            self.window.association_panel.set_expanded(False)
             self.window.set_workflow("proofreading")
             self.require_current(selection)
             layer = self.window.mask_display.layers.get("filtered")
@@ -198,7 +199,8 @@ class GuidedPanel(CollapsibleSection):
             panel.return_preview()
             panel._dimensions()
             p = proposal.parameters
-            panel.status.setText(f"Read-only watershed preview · {len(p['child_ids'])} children. "
+            panel.status.setText(f"Read-only preview · Apply Watershed or Cancel Preview. Undo becomes available after Apply. "
+                                f"{len(p['child_ids'])} children. "
                                 f"{p['residual_components']} residual components, {p['residual_voxels']} voxels "
                                 f"({p['residual_volume_um3']:.6g} µm³)." +
                                 (" Inspect the preserved parent components." if p["residual_voxels"] else ""))

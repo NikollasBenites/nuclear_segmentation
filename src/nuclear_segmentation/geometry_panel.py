@@ -9,6 +9,7 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QLabel, QLineEdit
 from .collapsible_section import CollapsibleSection
 from .geometry_edit import GeometryEdit, effective_masks, undo_stack
 from .guided_panel import GuidedPanel
+from .guided_split import OPERATION
 from .preview_history import PreviewStrokes, ProofreadingShortcuts
 from .ui_icons import icon
 from .runtime import validate_roi_geometry
@@ -247,8 +248,13 @@ class GeometryPanel(CollapsibleSection):
         for name in ("apply_operation", "cancel_operation"):
             self.buttons[name].setVisible(self.busy and self.edit.pending_source is not None)
             self.buttons[name].setEnabled(bool(available))
+        watershed = self.busy and self.edit.operation == OPERATION
+        self.buttons["apply_operation"].setText("Apply Watershed" if watershed else "Apply Operation")
+        self.buttons["cancel_operation"].setText("Cancel Preview" if watershed else "Cancel Operation")
+        for name in ("undo_preview", "redo_preview"):
+            self.buttons[name].setVisible(not watershed)
         self.guided.refresh()
-        choosing = available and self.edit.guided_context is None and not self.paused and self.edit.operation == "paint/erase"
+        choosing = available and not self.edit.dedicated and not self.paused and self.edit.operation == "paint/erase"
         selected = (choosing and self.selected_id is not None and self.layer.visible
                     and self.viewer.layers.selection.active is self.layer)
         for name in ("remove", "split", "add_merge"):
@@ -256,13 +262,16 @@ class GeometryPanel(CollapsibleSection):
         self.transaction_controls.setVisible(self.busy)
         self.buttons["start"].setVisible(not self.busy)
         self.buttons["toggle_pause"].setText("Resume Editing" if self.paused else "Pause Editing")
-        self.buttons["toggle_pause"].setEnabled(bool(available))
+        self.buttons["toggle_pause"].setEnabled(bool(available and not self.edit.dedicated))
         self.buttons["return_preview"].setEnabled(bool(available))
-        self.buttons["commit"].setEnabled(bool(available and self.edit.pending_source is None))
+        self.buttons["commit"].setEnabled(bool(available and self.edit.pending_source is None
+                                              and (not self.edit.dedicated or self.edit.steps)))
         self.buttons["discard"].setEnabled(self.busy)
         self.buttons["remove_merge"].setEnabled(bool(choosing and self.merge_list.currentRow() >= 0))
         self.buttons["clear_merge"].setEnabled(bool(choosing and self.merge_list.count()))
-        self.merge_target.setEnabled(bool(choosing and self.merge_list.count() >= 2))
+        choosing_merge = (available and self.edit.merge_selection is not None and
+                          self.edit.pending_source is None and not self.edit.steps and not self.edit.redo_steps)
+        self.merge_target.setEnabled(bool((choosing or choosing_merge) and self.merge_list.count() >= 2))
         self.buttons["merge"].setEnabled(self.merge_target.isEnabled() and self.merge_target.currentIndex() >= 0)
         self.buttons["start"].setEnabled(current and not self.busy)
         self.buttons["undo"].setEnabled(current and not self.busy and bool(undo_stack(result.get("edit_history", ()))))
@@ -317,7 +326,8 @@ class GeometryPanel(CollapsibleSection):
         if not self.busy:
             label = self._prior_selection()
             self.selected_object.setText("None" if label is None else str(label))
-            self.status.setText("No active edit · " + self._scope_text())
+            self.status.setText("Committed geometry · Undo Last Saved Edit is available in History."
+                                if self.buttons["undo"].isEnabled() else "No active edit · " + self._scope_text())
 
     def _set_size(self, value):
         if self.busy and not self.paused:
@@ -390,7 +400,14 @@ class GeometryPanel(CollapsibleSection):
         self.refresh()
 
     def _history_status(self):
-        if self.edit.operation in ("remove", "merge"):
+        if self.edit.guided_context is not None and self.edit.pending_source is None:
+            status = ("Applied watershed · Undo or Save Geometry Changes." if self.edit.steps else
+                      "Watershed undone · Redo to restore the accepted proposal.")
+        elif self.edit.merge_selection is not None and self.edit.pending_source is None:
+            status = ("Applied merge · Undo or Save Geometry Changes." if self.edit.steps else
+                      "Merge undone · Redo to restore it." if self.edit.redo_steps else
+                      "Choose the ID to retain and preview the merge.")
+        elif self.edit.operation in ("remove", "merge"):
             status = f"{self.edit.operation.title()} preview · Uncommitted changes"
         elif self.strokes.changed_voxels:
             status = "Uncommitted changes"
@@ -467,6 +484,8 @@ class GeometryPanel(CollapsibleSection):
         self.strokes.clear()
         self.strokes.changed_voxels = self._pending_dirty
         self._finish_operation(selected)
+        if self.edit.merge_selection is not None:
+            self._fill_merge_selection(self.edit.merge_selection)
 
     def _finish_operation(self, selected):
         self.layer.refresh()
@@ -501,7 +520,7 @@ class GeometryPanel(CollapsibleSection):
         if self.busy:
             owned = self._owns_preview()
             if owned:
-                self.strokes.set_editable(self.edit.guided_context is None and not self.paused and self.layer.visible and self.viewer.dims.ndisplay == 2
+                self.strokes.set_editable(not self.edit.dedicated and not self.paused and self.layer.visible and self.viewer.dims.ndisplay == 2
                                          and self.brush_id is not None and self.edit.operation in ("split", "paint/erase"))
             else:
                 self.layer.editable = False
@@ -565,17 +584,17 @@ class GeometryPanel(CollapsibleSection):
         self.window.viewer_toolbar.activate_tool("review")
 
     def start(self, *, minimum_capacity=0):
-        self.window.association_panel.restore()
         window = self.window
         review = window.context_panel.mask_review_page
         if not window._project_idle() or review._filter_timer.isActive():
             raise ValueError("Wait for the active operation to finish.")
-        selected = self._prior_selection()
         edit = GeometryEdit(self.state, filtered=self.scope.currentData(), track_strokes=True,
                             minimum_capacity=minimum_capacity)
         raw = window.segmentation.result_layer
         if raw is None:
             raise ValueError("Restore the segmentation layer before editing.")
+        self.window.association_panel.restore()
+        selected = self._prior_selection()
         spacing = self.state.voxel_spacing_zyx_um
         oy, ox = self.state.working_offset_yx
         self.translate = (0, oy * spacing[1], ox * spacing[2])
@@ -665,6 +684,7 @@ class GeometryPanel(CollapsibleSection):
         self.window._update_project_actions()
         self.window.context_panel.mask_review_page._refresh_actions()
         self._sync_scope()
+        self.window.association_panel._render()
 
     def commit(self):
         self._require_finished_stroke()
@@ -762,6 +782,40 @@ class GeometryPanel(CollapsibleSection):
         self.refresh()
         self.status.setText(f"Paint part of parent {self.selected_id} as ID {new}. Erase to restore parent voxels. Apply or cancel the split.")
 
+    def handoff_merge(self):
+        ui = self.window.context_panel.matching_page.candidate_explorer
+        selection = ui.selection()
+        started = False
+        try:
+            if not self.guided.idle() or selection is None or not selection.is_current(self.state.matching_pair):
+                raise ValueError("Finish active operations and select two or more current candidates in Matching.")
+            self.window._select_session(selection.cytoplasmic_revision.session_id)
+            self.guided.require_current(selection)
+            self.window.set_workflow("proofreading")
+            self.guided.require_current(selection)
+            self.scope.setCurrentIndex(0)
+            self.start()
+            started = True
+            self.edit.require_guided_context(selection)
+            self.edit.merge_selection = selection
+            self._dimensions()
+            self._fill_merge_selection(selection)
+            self.merge_section.set_expanded(True)
+        except ValueError as error:
+            if started:
+                self.discard()
+            ui.summary.setText(str(error))
+            self.status.setText(str(error))
+
+    def _fill_merge_selection(self, selection):
+        for label in selection.ids:
+            self.merge_list.addItem(str(label))
+            self.merge_target.addItem(str(label), label)
+        self.merge_target.setCurrentIndex(-1)
+        self.status.setText(f"Nucleus {selection.nucleus} · Choose the ID to retain. "
+                            + selection.summary(self.state.matching_pair.review))
+        self.refresh()
+
     def add_merge(self):
         self._require_preview()
         label = self.selected_id
@@ -799,7 +853,10 @@ class GeometryPanel(CollapsibleSection):
         self.layer.refresh()
         self._dimensions()
         self.refresh()
-        self.status.setText(f"Merge preview retains ID {retained}. Apply or cancel.")
+        message = f"Merge preview retains ID {retained}. Disconnected parts keep their gaps. Apply or cancel."
+        if self.edit.merge_selection is not None:
+            message += "\n" + self.edit.merge_selection.summary(self.state.matching_pair.review)
+        self.status.setText(message)
 
     def show_before(self):
         self.window.segmentation.ensure_comparison("before")

@@ -89,7 +89,7 @@ class PreviewStrokes:
         setitem = layer.data_setitem
 
         def paint(slice_key, mask, new_label, dims_to_paint, refresh=True, region_data=None):
-            if edit.guided_context is not None or edit.paused or not self.owns_preview():
+            if edit.dedicated or edit.paused or not self.owns_preview():
                 return
             extra_axes = tuple(i for i in range(layer.ndim) if i not in dims_to_paint)
             if edit.operation == "split":
@@ -113,7 +113,7 @@ class PreviewStrokes:
                 paint_region(slice_key, clipped, new_label, dims_to_paint, refresh, region_data)
 
         def write(indices, value, refresh=True):
-            if edit.guided_context is not None or edit.paused or not self.owns_preview():
+            if edit.dedicated or edit.paused or not self.owns_preview():
                 return
             coords = tuple(np.broadcast_arrays(*indices))
             values = np.asarray(value)

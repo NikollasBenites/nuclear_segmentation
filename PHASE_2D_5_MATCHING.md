@@ -298,3 +298,11 @@ The Matching category in Quality Control compares automatic outcomes and explici
 The checkpoint worker also checks signatures of the saved effective source volumes. Files with incompatible current populations keep manual history for inspection. A failed or interrupted classification requires rerunning. Older writers can omit the new optional association block on resave.
 
 Linux gate: 409 distinct tests and 13 subtests passed across runs. The initial round-trip regression caught duplicate undo replay during validation. Validation now uses a separate history instance. The corrected checkpoint, matching and native-project group passed 60 tests, and all five final association tests passed, including rendered QC updates. Native platform validation is pending.
+
+### Phase 2D.7 association inspection
+
+Under **Multiple Associations**, choose which direction to inspect. The original explorer starts with cytoplasmic objects that have multiple accepted nuclei. **Previous Object** and **Next Object** change the parent. **Previous Nucleus** and **Next Nucleus** inspect the parent's overlapping nuclei. **Follow selected object** starts enabled and moves the current viewer to an occupied, calibrated position. Turning it off keeps the camera in place while the highlight changes.
+
+**Multiple Cytoplasmic Candidates** lists each retained nucleus with positive intersections with at least two retained cytoplasmic IDs, across all automatic classes. Sort the tables or filter by class. Each candidate row reports its intersection voxel count, fraction of the complete nucleus, complete cytoplasmic volume in µm³ and other automatically linked nuclei. These figures come from the published sparse matching result. Several overlaps can be biologically plausible.
+
+Select candidate rows with the platform's multiple-selection gesture. The summary reports the sum of their complete volumes and the fraction of the complete nucleus covered by their disjoint label supports. It identifies other retained nuclei with a positive intersection or a current explicit matched decision on a selected target. Isolation and navigation are display operations. **Review Merge in Proofreading** transfers the selected IDs to the cytoplasmic session for explicit review.

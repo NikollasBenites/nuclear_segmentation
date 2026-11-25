@@ -106,6 +106,10 @@ def test_readonly_preview_apply_commit_history_and_recalculation(window_pair, qa
     assert p["seed_ids"] == [2, 7, 11, 13] and p["residual_voxels"] == 0
     assert not geometry.layer.editable and not guided.reference.editable
     parent_support = original["masks"] == 99
+    assert geometry.buttons["apply_operation"].text() == "Apply Watershed"
+    assert geometry.buttons["cancel_operation"].text() == "Cancel Preview"
+    assert all(geometry.buttons[name].isHidden() for name in ("undo_preview", "redo_preview"))
+    assert not geometry.buttons["commit"].isEnabled()
     snapshot = edit.preview.copy()
     edit.preview[parent_support] = 0
     with pytest.raises(ValueError, match="modified"):
@@ -116,6 +120,7 @@ def test_readonly_preview_apply_commit_history_and_recalculation(window_pair, qa
     assert cyto.segmentation_result is original
     generate(guided, qapp)
     geometry.apply_operation()
+    assert geometry.buttons["undo_preview"].isEnabled() and "Applied watershed" in geometry.status.text()
     steps = geometry.edit.steps
     with pytest.raises(ValueError, match="dedicated"):
         replay_sequence(geometry.edit.base, steps + steps, geometry.edit.retained_ids, geometry.edit.preview.dtype)
@@ -124,9 +129,11 @@ def test_readonly_preview_apply_commit_history_and_recalculation(window_pair, qa
     assert not geometry.layer.editable
     geometry.undo_preview()
     np.testing.assert_array_equal(geometry.edit.preview, original["masks"])
+    assert geometry.buttons["redo_preview"].isEnabled() and not geometry.buttons["commit"].isEnabled()
     geometry.redo_preview()
     np.testing.assert_array_equal(geometry.edit.preview, snapshot)
     geometry.commit()
+    assert geometry.buttons["undo"].isEnabled() and "Committed geometry" in geometry.status.text()
     committed = cyto.segmentation_result
     record = committed["edit_history"][-1]
     assert record["operation"] == OPERATION and record["removed_ids"] == [99]

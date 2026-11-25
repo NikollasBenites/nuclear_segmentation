@@ -277,6 +277,7 @@ class DesktopWindow(QMainWindow):
         review_panel.proofreading_page.layout().insertWidget(1, self.association_panel)
         self.project_state.association_review_changed.connect(self._mark_project_dirty)
         self.project_state.matching_result_changed.connect(self._mark_project_dirty)
+        self.context_panel.matching_page.candidate_explorer.review.clicked.connect(self.geometry_panel.handoff_merge)
         self.context_panel.matching_page.explorer.review.clicked.connect(self.geometry_panel.guided.handoff)
         self.mask_context_menu = MaskContextMenu(self)
         self.mask_selection.selection_changed.connect(self._mask_selection_changed)
@@ -1441,6 +1442,8 @@ class DesktopWindow(QMainWindow):
             return
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
+        if key != "matching":
+            self.matching_display.set_active(False)
         self.association_panel.active = key == "proofreading"
         self.association_panel.refresh()
         if key != "proofreading":
@@ -1692,6 +1695,8 @@ class DesktopWindow(QMainWindow):
             self._finish_loading_dialog()
             self.save_layout()
             self.embedding.viewer.dims.events.current_step.disconnect(self._update_z_status)
+            self.association_panel.active = False
+            self.association_panel.refresh()
             self.geometry_panel.dispose()
             self.mask_context_menu.dispose()
             self.matching_display.dispose()

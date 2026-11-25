@@ -1,10 +1,43 @@
 """Temporary, read-only inspection of the two embedded matching layers."""
 import numpy as np
-from napari.utils.colormaps import DirectLabelColormap
+from napari.utils.colormaps import CyclicLabelColormap, DirectLabelColormap
 
 from .automatic_matching import COLORS
 from .label_geometry import measured_bounds, selected_bounds
+from .matching_pair import MATCHING_LAYER
 from .mask_selection import INTERNAL_HIGHLIGHT_KEY, bounded_highlight
+
+
+ROLE_COLORS = {"nuclear": (.16, .8, 1., 1.), "cytoplasmic": (1., .52, .16, 1.)}
+
+
+def add_population(viewer, pair, role, name, visible, opacity):
+    source = getattr(pair, role)
+    layer = viewer.add_labels(
+        source.labels, name=name, scale=pair.grid.spacing_zyx_um, translate=pair.grid.translation_zyx_um,
+        units=("µm", "µm", "µm"), blending="additive", visible=visible, opacity=opacity,
+        colormap=CyclicLabelColormap(colors=[(0, 0, 0, 0), ROLE_COLORS[role]]),
+        metadata={MATCHING_LAYER: role, "matching_pair": pair.population_identity,
+                  "source_revision": source.owner, "measurement_revision": source.measurement_revision},
+    )
+    layer.editable = False
+    return layer
+
+
+def highlight_ids(layer, role, ids, isolated):
+    # Direct label lookup keeps the retained population as the layer's data.
+    background = "transparent" if isolated else ROLE_COLORS[role]
+    colors = {None: background, 0: "transparent"}
+    colors.update(dict.fromkeys(ids, "magenta" if role == "nuclear" else "yellow"))
+    layer.colormap = DirectLabelColormap(color_dict=colors)
+
+
+def focus_population(viewer, state, layer, label):
+    owner = layer.metadata["source_revision"]
+    properties = state.sessions[owner.session_id].filtering_result.get("properties")
+    point = focus_voxel(layer.data, label, properties)
+    if point is not None:
+        center_on_voxel(viewer, layer, point)
 
 
 def _point_in_bounds(data, label, low, high):
@@ -50,6 +83,7 @@ class MatchingInspection:
         self.ui.focus.clicked.connect(self.focus)
         self.ui.include.toggled.connect(self.update)
         self.ui.selection_changed.connect(self.update)
+        self.ui.navigated.connect(lambda: self.focus(center=self.ui.follow.isChecked()))
 
     def reset(self):
         self.restore()
@@ -117,7 +151,7 @@ class MatchingInspection:
             if layer.opacity == 0:
                 layer.opacity = .6
 
-    def focus(self):
+    def focus(self, *, center=True):
         if not self._ready():
             return
         selection = self.ui.selection
@@ -137,6 +171,10 @@ class MatchingInspection:
         if point is None:
             return
         viewer = self.display.viewer
+        if self.highlight is not None and selection == self.focused_selection:
+            if center:
+                center_on_voxel(viewer, layer, point)
+            return
         self.clear_highlight()
         bounds = measured_bounds(properties, label, layer.data.shape)
         if bounds is not None:
@@ -157,4 +195,5 @@ class MatchingInspection:
         self.focused_selection = selection
         if active in viewer.layers:
             viewer.layers.selection.active = active
-        center_on_voxel(viewer, layer, point)
+        if center:
+            center_on_voxel(viewer, layer, point)

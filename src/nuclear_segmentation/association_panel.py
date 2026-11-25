@@ -1,12 +1,11 @@
 """Proofreading controls for association decisions on retained scientific objects."""
 from qtpy.QtCore import QSignalBlocker
-from qtpy.QtWidgets import QComboBox, QLabel, QLineEdit, QPushButton, QVBoxLayout
+from qtpy.QtWidgets import QCheckBox, QSpinBox, QComboBox, QLabel, QLineEdit, QPushButton, QVBoxLayout
 
 from .association_review import STATES
 from .collapsible_section import CollapsibleSection
-from .label_geometry import selected_bounds
-from .matching_inspection import center_on_voxel, focus_voxel
-from .matching_pair import MATCHING_LAYER
+from .matching_inspection import add_population, focus_population, highlight_ids
+from .matching_pair import MATCHING_ROLES
 
 
 class AssociationPanel(CollapsibleSection):
@@ -17,7 +16,8 @@ class AssociationPanel(CollapsibleSection):
         self.result = None
         self.active = False
         self.layers = []
-        self.isolated = False
+        self.previous_layer = None
+        self.display_result = None
         form = QVBoxLayout()
         self.set_content_layout(form)
         self.message = QLabel()
@@ -37,14 +37,32 @@ class AssociationPanel(CollapsibleSection):
         self.classes = combo("Automatic classification", ["All", "MATCH", "AMBIGUOUS", "NO_MATCH"])
         self.filter = combo("Review status", ["All", *STATES, "Requires Review"])
         self.nuclei = combo("Nuclear object")
-        button("Previous nucleus", lambda: self.nuclei.setCurrentIndex(max(0, self.nuclei.currentIndex()-1)))
-        button("Next nucleus", lambda: self.nuclei.setCurrentIndex(min(self.nuclei.count()-1, self.nuclei.currentIndex()+1)))
+        self.previous = button("Previous nucleus", lambda: self.nuclei.setCurrentIndex(max(0, self.nuclei.currentIndex()-1)))
+        self.next = button("Next nucleus", lambda: self.nuclei.setCurrentIndex(min(self.nuclei.count()-1, self.nuclei.currentIndex()+1)))
         self.targets = combo("Cytoplasmic candidate or retained ID")
         self.targets.setEditable(True)
-        button("Focus nucleus", lambda: self.inspect(False, False))
-        button("Focus target", lambda: self.inspect(True, False))
-        button("Isolate nucleus and target", lambda: self.inspect(False, True))
-        button("Restore masks", self.restore)
+        self.follow = QCheckBox("Follow selected object")
+        self.follow.setChecked(True)
+        form.addWidget(self.follow)
+        self.visibility, self.opacity = {}, {}
+        for role in MATCHING_ROLES:
+            visible = self.visibility[role] = QCheckBox(f"Show {role} masks")
+            visible.setChecked(True)
+            form.addWidget(visible)
+            opacity = self.opacity[role] = QSpinBox()
+            opacity.setRange(0, 100)
+            opacity.setValue(60)
+            opacity.setPrefix(f"{role.title()} opacity ")
+            opacity.setSuffix("%")
+            form.addWidget(opacity)
+            visible.toggled.connect(self._appearance)
+            opacity.valueChanged.connect(self._appearance)
+        button("Focus nucleus", lambda: self.inspect(False, self.isolation.isChecked()))
+        button("Focus target", lambda: self.inspect(True, self.isolation.isChecked()))
+        self.isolation = QCheckBox("Isolate selected nucleus and target")
+        form.addWidget(self.isolation)
+        self.isolation.toggled.connect(self._render)
+        self.expanded_changed.connect(self._expanded_changed)
         self.decision = combo("Manual decision", STATES)
         self.comment = QLineEdit()
         self.comment.setPlaceholderText("Reviewer comment")
@@ -55,7 +73,7 @@ class AssociationPanel(CollapsibleSection):
         self.classes.currentIndexChanged.connect(self.populate)
         self.filter.currentIndexChanged.connect(self.populate)
         self.nuclei.currentIndexChanged.connect(self.show_object)
-        self.targets.currentTextChanged.connect(self.restore)
+        self.targets.currentTextChanged.connect(lambda: self._render(focus="cytoplasmic" if self.follow.isChecked() else None))
         for signal in (self.state.matching_result_changed, self.state.matching_selection_changed,
                        self.state.sessions_changed, self.state.inactive_session_validity_changed,
                        self.state.segmentation_result_changed, self.state.filtering_result_changed,
@@ -74,7 +92,8 @@ class AssociationPanel(CollapsibleSection):
             self.populate()
 
     def populate(self, *args):
-        self.restore()
+        if self.display_result is not self.result:
+            self.restore()
         selected = self.nuclei.currentText()
         with QSignalBlocker(self.nuclei):
             self.nuclei.clear()
@@ -91,29 +110,34 @@ class AssociationPanel(CollapsibleSection):
         self.show_object()
 
     def show_object(self, *args):
-        self.restore()
-        self.targets.clear()
-        self.comment.clear()
-        self.decision.setCurrentIndex(0)
-        absent = (f" · {self.absent_count} historical decisions on absent nuclei require review"
-                  if getattr(self, "absent_count", 0) else "")
-        if not self.nuclei.currentText():
-            self.message.setText(("No nuclei in this view." + absent) if self.result else "Run automatic matching for a measured pair.")
-            return
-        label = int(self.nuclei.currentText())
-        row = next(r for r in self.result.nuclei if r.nuclear_id == label)
-        counts = sorted(((count, c) for (n,c),count in self.result.statistics.intersections.items() if n == label),
-                        key=lambda item: (-item[0], item[1]))
-        self.targets.addItems([str(c) for _,c in counts])
-        record = self.review.records.get(self.review.key(label))
-        status = self.review.status(self.result, label)
-        self.message.setText(f"Automatic {row.auto_class} · best {row.best_cytoplasmic_id} · manual {status}{absent}")
-        if record:
-            self.comment.setText(record["comment"])
-            if status != "Requires Review":
-                self.decision.setCurrentText(status)
-                if record["cytoplasmic_id"] is not None:
-                    self.targets.setCurrentText(str(record["cytoplasmic_id"]))
+        index = self.nuclei.currentIndex()
+        self.previous.setEnabled(index > 0)
+        self.next.setEnabled(0 <= index < self.nuclei.count() - 1)
+        with QSignalBlocker(self.targets):
+            self.targets.clear()
+            self.comment.clear()
+            self.decision.setCurrentIndex(0)
+            absent = (f" · {self.absent_count} historical decisions on absent nuclei require review"
+                      if getattr(self, "absent_count", 0) else "")
+            if not self.nuclei.currentText():
+                self.message.setText(("No nuclei in this view." + absent) if self.result else "Run automatic matching for a measured pair.")
+                self._render()
+                return
+            label = int(self.nuclei.currentText())
+            row = next(r for r in self.result.nuclei if r.nuclear_id == label)
+            counts = sorted(((count, c) for (n,c),count in self.result.statistics.intersections.items() if n == label),
+                            key=lambda item: (-item[0], item[1]))
+            self.targets.addItems([str(c) for _,c in counts])
+            record = self.review.records.get(self.review.key(label))
+            status = self.review.status(self.result, label)
+            self.message.setText(f"Automatic {row.auto_class} · best {row.best_cytoplasmic_id} · manual {status}{absent}")
+            if record:
+                self.comment.setText(record["comment"])
+                if status != "Requires Review":
+                    self.decision.setCurrentText(status)
+                    if record["cytoplasmic_id"] is not None:
+                        self.targets.setCurrentText(str(record["cytoplasmic_id"]))
+        self._render(focus="nuclear" if self.follow.isChecked() else None)
 
     def selection(self):
         if (not self.window._project_idle() or self.window._project_job is not None or self.result is None
@@ -144,45 +168,61 @@ class AssociationPanel(CollapsibleSection):
         except ValueError as error:
             self.message.setText(str(error))
 
+    def _expanded_changed(self, _, expanded):
+        if expanded:
+            self._render(focus="nuclear" if self.follow.isChecked() else None)
+        else:
+            self.restore()
+
     def restore(self, *args):
+        if self.display_result is None:
+            return
+        self.display_result = None
         viewer = self.window.embedding.viewer
         for layer in self.layers:
             if layer in viewer.layers:
                 viewer.layers.remove(layer)
         self.layers.clear()
-        if self.isolated:
-            self.isolated = False
-            self.window.mask_display.resume()
+        self.window.mask_display.resume()
+        if self.previous_layer in viewer.layers and self.previous_layer.visible:
+            viewer.layers.selection.active = self.previous_layer
+        self.previous_layer = None
+
+    def _appearance(self):
+        for role, layer in zip(MATCHING_ROLES, self.layers):
+            layer.visible = self.visibility[role].isChecked()
+            layer.opacity = self.opacity[role].value() / 100
 
     def inspect(self, target, isolate):
-        self.restore()
-        try:
-            label = self.selection()
-            pair = self.state.matching_pair.capture()
-            viewer = self.window.embedding.viewer
-            roles = [("nuclear", label)]
-            if target or isolate and self.targets.currentText():
-                cyto = int(self.targets.currentText())
-                if cyto not in self.result.associations:
-                    raise ValueError("Enter a retained cytoplasmic ID.")
-                roles.append(("cytoplasmic", cyto))
-            if isolate:
-                self.window.mask_display.suspend(keep_hidden=True)
-                self.isolated = True
-            for role, object_id in roles:
-                data = getattr(pair, role).labels
-                low, high = selected_bounds(data, object_id)
-                box = tuple(slice(a,b) for a,b in zip(low, high))
-                support = (data[box] == object_id).astype("uint8")
-                origin = low * pair.grid.spacing_zyx_um + pair.grid.translation_zyx_um
-                layer = viewer.add_labels(support, name=f"Review · {role} {object_id}", translate=origin,
-                                          scale=pair.grid.spacing_zyx_um, metadata={MATCHING_LAYER:role},
-                                          colormap={None:"transparent", 0:"transparent",
-                                                    1:"cyan" if role == "nuclear" else "orange"})
-                layer.editable = False
-                self.layers.append(layer)
-                if role == ("cytoplasmic" if target else "nuclear"):
-                    center_on_voxel(viewer, layer, focus_voxel(support, 1, None))
-        except ValueError as error:
+        self.set_expanded(True, emit=False)
+        with QSignalBlocker(self.isolation):
+            self.isolation.setChecked(isolate)
+        self._render(focus="cytoplasmic" if target else "nuclear")
+
+    def _render(self, *args, focus=None):
+        if (not self.active or not self.expanded or self.window.geometry_panel.busy or self.result is None
+                or self.result is not self.state.matching_pair.current_result):
             self.restore()
-            self.message.setText(str(error))
+            return
+        viewer = self.window.embedding.viewer
+        if self.display_result is None:
+            if self.window.mask_display.suspended:
+                return
+            pair = self.state.matching_pair.capture()
+            self.previous_layer = viewer.layers.selection.active
+            self.window.mask_display.suspend(keep_hidden=True)
+            self.display_result = self.result
+            for role in MATCHING_ROLES:
+                self.layers.append(add_population(viewer, pair, role, f"Review · {role} masks",
+                                                  self.visibility[role].isChecked(), self.opacity[role].value() / 100))
+        try:
+            target = int(self.targets.currentText())
+        except ValueError:
+            target = None
+        if target not in self.result.associations:
+            target = None
+        nucleus = int(self.nuclei.currentText()) if self.nuclei.currentText() else None
+        for role, layer, label in zip(MATCHING_ROLES, self.layers, (nucleus, target), strict=True):
+            highlight_ids(layer, role, () if label is None else (label,), self.isolation.isChecked())
+            if focus == role and label is not None:
+                focus_population(viewer, self.state, layer, label)
