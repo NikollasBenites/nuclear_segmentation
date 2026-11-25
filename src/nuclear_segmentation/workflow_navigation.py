@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from qtpy.QtCore import QSize, Qt, Signal
 from qtpy.QtWidgets import (
-    QButtonGroup, QLabel, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
+    QButtonGroup, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .collapsible_section import CollapsibleSection
@@ -44,7 +44,7 @@ WORKFLOWS = (
 
 
 class WorkflowNavigation(QWidget):
-    """Collapsible navigation that remains usable as an icon-only rail."""
+    """Viewer sidebar with a separately mounted workflow bar and context subpages."""
 
     workflow_changed = Signal(str)
     collapsed_changed = Signal(bool)
@@ -58,50 +58,48 @@ class WorkflowNavigation(QWidget):
         self._subpage_buttons = {}
         self._selected_subpages = {}
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 10, 8, 10)
-        layout.setSpacing(5)
-
-        self.brand = QLabel("NuCytoSeg")
+        layout.setContentsMargins(4, 4, 4, 4)
+        self.brand = QLabel("Viewer")
         self.brand.setObjectName("navigationBrand")
         layout.addWidget(self.brand)
+        self.tools_scroll = QScrollArea()
+        self.tools_scroll.setWidgetResizable(True)
+        self.tools_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.tools_body = QWidget()
+        self.tools = QVBoxLayout(self.tools_body)
+        self.tools.setContentsMargins(0, 0, 0, 0)
+        self.tools_scroll.setWidget(self.tools_body)
+        layout.addWidget(self.tools_scroll, 1)
 
-        rail = QScrollArea()
-        rail.setObjectName("workflowRail")
-        rail.setFrameShape(QScrollArea.Shape.NoFrame)
-        rail.setWidgetResizable(True)
-        rail.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        rail.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        items = QWidget()
-        item_layout = QVBoxLayout(items)
-        item_layout.setContentsMargins(0, 0, 0, 0)
-        item_layout.setSpacing(5)
-        rail.setWidget(items)
-        layout.addWidget(rail, 1)
-
+        self.stage_bar = QWidget()
+        self.stage_bar.setAccessibleName("Scientific workflow")
+        stages = QHBoxLayout(self.stage_bar)
+        stages.setContentsMargins(6, 3, 6, 3)
+        stages.setSpacing(3)
+        self.subpages = QWidget()
+        branches = QVBoxLayout(self.subpages)
+        branches.setContentsMargins(4, 0, 4, 0)
+        self._current = "project"
         self.group = QButtonGroup(self)
-        self.group.setExclusive(True)
         for workflow in WORKFLOWS:
+            if workflow.key == "proofreading":
+                continue
             button = QToolButton()
             button.setObjectName(f"workflow_{workflow.key}")
-            button.setIcon(icon(workflow.icon_name))
-            button.setIconSize(QSize(28, 28))
-            button.setText(workflow.label)
-            button.setToolTip(workflow.label)
+            title = "Review & Proofreading" if workflow.key == "matching" else workflow.label
+            button.setAccessibleName(title)
+            button.setText(title.replace("&", "&&"))
             button.setCheckable(True)
-            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            button.setMinimumHeight(40)
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            button.clicked.connect(
-                lambda checked=False, key=workflow.key: self.set_workflow(key, emit=True)
-            )
+            button.clicked.connect(lambda checked=False, key=workflow.key: self.workflow_changed.emit(key))
             self.group.addButton(button)
             self._buttons[workflow.key] = button
-            item_layout.addWidget(button)
+            stages.addWidget(button, 2 if workflow.key == "matching" else 1)
             if workflow.subpages:
                 submenu = QWidget()
                 sublayout = QVBoxLayout(submenu)
-                sublayout.setContentsMargins(12, 0, 0, 0)
+                sublayout.setContentsMargins(0, 0, 0, 0)
                 sublayout.setSpacing(2)
                 group = QButtonGroup(submenu)
                 buttons = {}
@@ -123,7 +121,7 @@ class WorkflowNavigation(QWidget):
                 self._subpage_buttons[workflow.key] = buttons
                 self._selected_subpages[workflow.key] = first
                 buttons[first].setChecked(True)
-                item_layout.addWidget(submenu)
+                branches.addWidget(submenu)
         self.legend = CollapsibleSection("association_legend", "Inspection legend")
         legend_layout = QVBoxLayout()
         self.legend.set_content_layout(legend_layout)
@@ -142,9 +140,9 @@ class WorkflowNavigation(QWidget):
         self.legend_selection.setWordWrap(True)
         legend_layout.addWidget(self.legend_selection)
         self._legend_context = None
-        layout.addWidget(self.legend)
+        self.tools.addWidget(self.legend)
         self.legend.hide()
-        item_layout.addStretch(1)
+
 
         self.collapse_button = QToolButton()
         self.collapse_button.setObjectName("collapseNavigation")
@@ -163,11 +161,7 @@ class WorkflowNavigation(QWidget):
 
     @property
     def current_workflow(self) -> str:
-        checked = self.group.checkedButton()
-        for key, button in self._buttons.items():
-            if button is checked:
-                return key
-        return "project"
+        return self._current
 
     @property
     def current_subpage(self) -> str | None:
@@ -194,7 +188,7 @@ class WorkflowNavigation(QWidget):
 
     def _update_submenus(self) -> None:
         for key, submenu in self._submenus.items():
-            submenu.setVisible(not self._collapsed and key == self.current_workflow)
+            submenu.setVisible(key == self.current_workflow)
 
     def set_legend(self, workflow, message):
         if workflow != self.current_workflow:
@@ -205,12 +199,13 @@ class WorkflowNavigation(QWidget):
         self.legend.setVisible(message is not None and not self.collapsed)
 
     def set_workflow(self, key: str, *, emit: bool = False) -> None:
-        if key not in self._buttons:
+        if key not in self._buttons and key != "proofreading":
             key = "project"
         if self._legend_context != key:
             self._legend_context = None
             self.legend.hide()
-        self._buttons[key].setChecked(True)
+        self._current = key
+        self._buttons["matching" if key == "proofreading" else key].setChecked(True)
         self._update_submenus()
         if emit:
             self.workflow_changed.emit(key)
@@ -220,29 +215,24 @@ class WorkflowNavigation(QWidget):
         changed = self._collapsed != collapsed
         self._collapsed = collapsed
         self.legend.setVisible(not collapsed and self._legend_context == self.current_workflow)
-        self.brand.setText("NCS" if collapsed else "NuCytoSeg")
-        for button in self._buttons.values():
-            button.setToolButtonStyle(
-                Qt.ToolButtonStyle.ToolButtonIconOnly
-                if collapsed
-                else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-            )
+        self.tools_scroll.setVisible(not collapsed)
+        self.brand.setVisible(not collapsed)
         self.collapse_button.setIcon(icon("expand" if collapsed else "collapse"))
-        self.collapse_button.setText("" if collapsed else "Collapse")
-        self.collapse_button.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonIconOnly
-            if collapsed
-            else Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        )
-        self.collapse_button.setToolTip(
-            "Expand workflow navigation" if collapsed else "Collapse workflow navigation"
-        )
+        self.collapse_button.setText("" if collapsed else "Collapse viewer tools")
+        self.collapse_button.setAccessibleName("Expand viewer tools" if collapsed else "Collapse viewer tools")
+        self.collapse_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         if collapsed:
-            self.setFixedWidth(64)
+            self.setFixedWidth(44)
         else:
-            self.setMinimumWidth(200)
-            self.setMaximumWidth(320)
-            self.resize(210, self.height())
-        self._update_submenus()
+            self.setMinimumWidth(160)
+            self.setMaximumWidth(480)
         if changed:
             self.collapsed_changed.emit(collapsed)
+
+    def set_statuses(self, statuses):
+        for key, button in self._buttons.items():
+            title = button.accessibleName()
+            status = statuses[key]
+            button.setText(title.replace("&", "&&") + "\n" + status)
+            button.setToolTip(f"{title} · {status}")
+            button.setAccessibleDescription(status)

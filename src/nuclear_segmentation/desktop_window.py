@@ -6,7 +6,7 @@ from functools import partial
 from pathlib import Path
 import logging
 
-from qtpy.QtCore import QSignalBlocker, QSize, Qt, QThread
+from qtpy.QtCore import QSignalBlocker, QSize, Qt, QThread, QTimer
 from qtpy.QtGui import QAction, QKeySequence
 from qtpy.QtWidgets import (
     QComboBox,
@@ -52,6 +52,8 @@ from .segmentation_execution import SegmentationController
 from .filtering_workspace import FilteringController
 from .viewer_toolbar import ViewerToolbar
 from .geometry_panel import GeometryPanel
+from .results_workspace import GraphWindow, ResultsWorkspace
+from .workflow_progress import statuses
 from .workflow_navigation import WorkflowNavigation
 from .ui_icons import icon
 from .workspace_settings import (
@@ -114,15 +116,14 @@ class DesktopWindow(QMainWindow):
         viewer_layout = QHBoxLayout(viewer_workspace)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
         viewer_layout.setSpacing(0)
-        viewer_layout.addWidget(self.viewer_toolbar)
         viewer_layout.addWidget(self.embedding, 1)
         self.context_panel = ContextPanel(self.project_state)
         self._default_session_settings = self.context_panel.segmentation_page.pending_config()
-        self.graph_window = QDialog(self)
+        self.graph_window = GraphWindow(self)
         self.graph_window.setWindowTitle("NuCytoSeg — Quality Control")
         self.graph_window.resize(780, 620)
-        QVBoxLayout(self.graph_window).addWidget(self.context_panel.quality_control_page)
-        self.context_panel.show_graphs_button.clicked.connect(self.graph_window.show)
+        QVBoxLayout(self.graph_window)
+        self.context_panel.show_graphs_button.clicked.connect(lambda: self.results.detach_graph())
         self.context_panel.matching_page.graphs.clicked.connect(self._show_matching_graphs)
         self.context_container = self._build_context_container()
         self.mask_selection = MaskSelectionController(self.embedding.viewer, self)
@@ -229,7 +230,7 @@ class DesktopWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
-        self.splitter.setSizes([210, 890, 340])
+        self.splitter.setSizes([255, 835, 350])
         self.navigation.workflow_changed.connect(self.set_workflow)
         self.embedding.status_changed.connect(self.statusBar().showMessage)
         self.viewer_toolbar.status_changed.connect(self.statusBar().showMessage)
@@ -293,6 +294,7 @@ class DesktopWindow(QMainWindow):
         state = self.project_state
         state.active_session_about_to_change.connect(self._capture_session_controls)
         state.active_session_changed.connect(self._display_active_session)
+        state.changed.connect(self._update_session_title)
         state.sessions_changed.connect(self._update_session_title)
         state.active_session_changed.connect(self._update_session_title)
         self.context_panel.project_page.availability_changed.connect(
@@ -304,10 +306,34 @@ class DesktopWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         root_layout.addWidget(self._build_application_header())
-        root_layout.addWidget(self.splitter, 1)
+        root_layout.addWidget(self.navigation.stage_bar)
+        self.results = ResultsWorkspace(self)
+        self.vertical_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.vertical_splitter.addWidget(self.splitter)
+        self.vertical_splitter.addWidget(self.results)
+        self.vertical_splitter.setChildrenCollapsible(False)
+        self.vertical_splitter.setStretchFactor(0, 1)
+        self.results_height = 210
+        self.results.hide()
+        root_layout.addWidget(self.vertical_splitter, 1)
         self.setCentralWidget(root)
         self._create_menus()
         self._create_status_widgets()
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setSingleShot(True)
+        self._progress_timer.timeout.connect(self._refresh_progress)
+        # Changes to validity and running operations refresh the navigator in place.
+        for signal in (state.changed, state.sessions_changed, state.active_session_changed,
+                       state.filtering_result_changed, state.segmentation_result_changed,
+                       state.quantification_result_changed, state.calibration_changed,
+                       state.normalization_changed, state.z_correction_changed,
+                       state.matching_result_changed, state.matching_selection_changed,
+                       state.inactive_session_validity_changed, state.import_status_changed,
+                       self.matching_display.execution.changed, self.segmentation.status_changed,
+                       self.filtering.status_changed, self.image_export.status_changed,
+                       self.normalization.status_changed, self.z_correction.status_changed,
+                       self.crop_workspace.status_changed):
+            signal.connect(self._refresh_progress)
         self.set_workflow("project")
         self.statusBar().showMessage("NuCytoSeg ready — open an image to begin")
         self.set_theme(self.workspace_settings.settings.value("appearance/theme", "Dark"))
@@ -316,8 +342,7 @@ class DesktopWindow(QMainWindow):
 
     def _show_matching_graphs(self):
         self.context_panel.quality_control_page.category.setCurrentText("Matching")
-        self.graph_window.show()
-        self.graph_window.raise_()
+        self.results.detach_graph()
 
     def _build_context_container(self) -> QWidget:
         container = QWidget()
@@ -332,9 +357,6 @@ class DesktopWindow(QMainWindow):
         header_layout.setContentsMargins(16, 12, 10, 8)
         titles = QVBoxLayout()
         titles.setSpacing(2)
-        kicker = QLabel("CONTEXT PANEL")
-        kicker.setObjectName("panelKicker")
-        titles.addWidget(kicker)
         self.context_title = QLabel()
         self.context_title.setObjectName("panelTitle")
         self.context_title.setWordWrap(True)
@@ -348,7 +370,20 @@ class DesktopWindow(QMainWindow):
         self.context_collapse_button.clicked.connect(self.hide_context_panel)
         header_layout.addWidget(self.context_collapse_button)
         layout.addWidget(header)
+        self.review_mode = QComboBox()
+        self.review_mode.setAccessibleName("Review and proofreading mode")
+        self.review_mode.addItems(["Associations", "Geometry Editing"])
+        self.review_mode.activated.connect(lambda i: self.set_workflow("proofreading" if i else "matching"))
+        layout.addWidget(self.review_mode)
+        layout.addWidget(self.navigation.subpages)
         layout.addWidget(self.context_panel, 1)
+        tools = self.navigation.tools
+        self.tool_section = CollapsibleSection("viewer_tools", "Viewer tools")
+        tool_layout = QVBoxLayout()
+        tool_layout.setContentsMargins(2, 2, 2, 2)
+        tool_layout.addWidget(self.viewer_toolbar)
+        self.tool_section.set_content_layout(tool_layout)
+        tools.insertWidget(0, self.tool_section)
         self.layers_section = CollapsibleSection("layers", "Layers")
         self.layer_panel = LayerPanel(self.embedding.viewer)
         layers_layout = QVBoxLayout()
@@ -359,41 +394,54 @@ class DesktopWindow(QMainWindow):
         layers_layout.addWidget(self.working_mask_status)
         layers_layout.addWidget(self.layer_panel)
         self.layers_section.set_content_layout(layers_layout)
-        layout.addWidget(self.layers_section, 1)
-        self.layers_section.expanded_changed.connect(
-            lambda _, expanded: layout.setStretchFactor(self.layers_section, int(expanded))
-        )
+        tools.insertWidget(1, self.layers_section, 1)
         self.image_display_panel = ImageDisplayPanel(
             self.embedding.viewer, self.project_state
         )
-        layout.addWidget(self.image_display_panel)
+        tools.insertWidget(2, self.image_display_panel)
         self.selected_mask_panel = SelectedMaskPanel()
-        layout.addWidget(self.selected_mask_panel)
+        self.pair_appearance = next(section for section in self.context_panel.matching_page.findChildren(CollapsibleSection)
+                                    if section.key == "visualization")
+        self.pair_appearance.header.setText("Association display")
+        self.pair_appearance.set_expanded(False)
+        tools.insertWidget(3, self.pair_appearance)
+        tools.addWidget(self.selected_mask_panel)
+        tools.addStretch(1)
         return container
 
     def _build_application_header(self) -> QWidget:
         header = QWidget()
         header.setObjectName("applicationHeader")
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(18, 10, 14, 10)
-        layout.setSpacing(12)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(6)
 
         brand = QVBoxLayout()
         brand.setSpacing(0)
         name = QLabel("NuCytoSeg")
         name.setObjectName("applicationName")
-        subtitle = QLabel("3D microscopy segmentation and quantitative analysis")
+        subtitle = self.header_project = QLabel("No project open")
+        subtitle.setTextFormat(Qt.TextFormat.PlainText)
+        subtitle.setMaximumWidth(200)
         subtitle.setObjectName("applicationSubtitle")
         brand.addWidget(name)
         brand.addWidget(subtitle)
         layout.addLayout(brand)
-        layout.addSpacing(20)
+
 
         self.header_workflow = QLabel("PROJECT")
         self.header_workflow.setObjectName("headerWorkflow")
-        layout.addWidget(self.header_workflow)
+        self.header_workflow.hide()
+        self.header_workflow.setParent(header)
         layout.addStretch(1)
 
+        self.session_selector = QComboBox()
+        self.session_selector.setAccessibleName("Active segmentation session and scientific role")
+        self.session_selector.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.session_selector.setMinimumContentsLength(12)
+        self.session_selector.setMaximumWidth(240)
+        self.session_selector.activated.connect(self._activate_header_session)
+        layout.addWidget(self.session_selector)
         self.theme_combo = QComboBox()
         self.theme_combo.setAccessibleName("Application appearance")
         self.theme_combo.setToolTip("Application appearance")
@@ -408,8 +456,8 @@ class DesktopWindow(QMainWindow):
 
         for action, icon_name, tooltip in (
             (self.focus_action, "focus", "Toggle Focus Mode"),
-            (self.restore_layout_action, "restore", "Restore previous layout"),
-            (self.reset_layout_action, "reset", "Reset workspace layout"),
+            (self.toggle_navigation_action, "sliders", "Show or hide viewer tools"),
+            (self.toggle_results_action, "bars", "Show or hide results"),
         ):
             action.setIcon(icon(icon_name))
             button = QToolButton()
@@ -455,7 +503,7 @@ class DesktopWindow(QMainWindow):
         self.quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         self.quit_action.triggered.connect(self.close)
 
-        self.toggle_navigation_action = QAction("Workflow Navigation", self)
+        self.toggle_navigation_action = QAction("Viewer tools", self)
         self.toggle_navigation_action.setCheckable(True)
         self.toggle_navigation_action.setChecked(True)
         self.toggle_navigation_action.setShortcut("Ctrl+Shift+L")
@@ -466,6 +514,11 @@ class DesktopWindow(QMainWindow):
         self.toggle_context_action.setChecked(True)
         self.toggle_context_action.setShortcut("Ctrl+Shift+R")
         self.toggle_context_action.toggled.connect(self._toggle_context)
+
+        self.toggle_results_action = QAction("Results", self)
+        self.toggle_results_action.setCheckable(True)
+        self.toggle_results_action.setShortcut("Ctrl+Shift+B")
+        self.toggle_results_action.toggled.connect(self._toggle_results)
 
         self.about_action = QAction("About NuCytoSeg", self)
         self.about_action.triggered.connect(
@@ -499,8 +552,14 @@ class DesktopWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("View")
         view_menu.addAction(self.toggle_navigation_action)
         view_menu.addAction(self.toggle_context_action)
+        view_menu.addAction(self.toggle_results_action)
         self.workspace_menu = self.menuBar().addMenu("Workspace")
         self.workspace_menu.addAction(self.focus_action)
+        for name in ("Default Workspace", "Image Focus", "Proofreading Workspace", "Data Inspection"):
+            self.workspace_menu.addAction(name, partial(self.set_configuration, name))
+        self.workspace_menu.addSeparator()
+        self.workspace_menu.addAction("Save Custom Layout", self.save_custom_layout)
+        self.workspace_menu.addAction("Restore Custom Layout", self.restore_custom_layout)
         self.workspace_menu.addAction(self.restore_layout_action)
         self.workspace_menu.addAction(self.reset_layout_action)
         self.menuBar().addMenu("Tools")
@@ -624,6 +683,10 @@ class DesktopWindow(QMainWindow):
         title = path.name if path else ("Unsaved project" if self.project_state.dataset_ready else "No native project directory")
         label.setText(title + (" · Unsaved changes" if path and self.project_dirty else ""))
         label.setToolTip(str(path or ""))
+        if hasattr(self, "header_project"):
+            project = path.name if path else (self.project_state.dataset.source_filename if self.project_state.dataset_ready else "No project open")
+            self.header_project.setText(self.header_project.fontMetrics().elidedText(project, Qt.TextElideMode.ElideMiddle, 195))
+            self.header_project.setToolTip(project)
 
     def _project_idle(self):
         if self.geometry_panel.guided.worker is not None:
@@ -901,8 +964,21 @@ class DesktopWindow(QMainWindow):
         finally:
             state.restoring_project = False
 
-    def _update_session_title(self):
+    def _activate_header_session(self, index):
+        session_id = self.session_selector.itemData(index)
+        if session_id is not None:
+            self._select_session(session_id)
+            self._update_session_title()
+
+    def _update_session_title(self, *args):
         state = self.project_state
+        with QSignalBlocker(self.session_selector):
+            self.session_selector.clear()
+            for session in state.sessions.values():
+                self.session_selector.addItem(f"{session.display_name} · {session.scientific_role}", session.session_id)
+            self.session_selector.setCurrentIndex(self.session_selector.findData(state.active_session_id))
+            self.session_selector.setToolTip(self.session_selector.currentText())
+            self.session_selector.setEnabled(state.dataset_ready)
         name = state.active_session.display_name
         label = self.active_session_title
         text = f"Session · {name}"
@@ -1145,6 +1221,7 @@ class DesktopWindow(QMainWindow):
         self.open_image_action.setEnabled(False)
         self.context_panel.project_page.set_loading(True)
         self._update_project_actions()
+        self._refresh_progress()
         thread.start()
 
     def _show_lif_loading_dialog(self) -> None:
@@ -1200,6 +1277,7 @@ class DesktopWindow(QMainWindow):
     def _import_finished(self) -> None:
         self._import_thread = None
         self._import_worker = None
+        self._refresh_progress()
         self.open_image_action.setEnabled(True)
         self.context_panel.project_page.set_loading(False)
         self._update_project_actions()
@@ -1465,14 +1543,30 @@ class DesktopWindow(QMainWindow):
         self.matching_display.set_active(key == "matching")
         if target and self.matching_display.location():
             self.matching_display.location().view.restore(self.embedding.viewer)
-        self.context_title.setText(self.context_panel.workflow_title)
-        self.graph_window.setVisible(self.isVisible() and key == "quality_control")
+        reviewing = key in {"matching", "proofreading"}
+        self.review_mode.setVisible(reviewing)
+        self.review_mode.setCurrentIndex(int(key == "proofreading"))
+        self.pair_appearance.setVisible(key == "matching")
+        self.context_title.setText("Review & Proofreading" if reviewing else self.context_panel.workflow_title)
+        if self.graph_window.isVisible() and key not in {"quality_control", "matching"}:
+            self.graph_window.close()
+        first_visit = key not in self.results.last_tab
+        self.results.set_stage(key)
+        if key == "quality_control" or (key == "matching" and first_visit):
+            self.toggle_results_action.setChecked(True)
+        self._refresh_progress()
         label = self.context_panel.workflow_label
         if hasattr(self, "workflow_status"):
             self.workflow_status.setText(f"Workflow: {label}")
         if hasattr(self, "header_workflow"):
             self.header_workflow.setText(label.upper())
         self.statusBar().showMessage(f"{label} workspace selected")
+
+    def _refresh_progress(self, *args):
+        values = statuses(self)
+        self.navigation.set_statuses(values)
+        if "Running" in values.values():
+            self._progress_timer.start(350)
 
     def _show_mask_review(self) -> None:
         self.set_workflow("mask_review")
@@ -1487,6 +1581,41 @@ class DesktopWindow(QMainWindow):
     def hide_context_panel(self) -> None:
         self.toggle_context_action.setChecked(False)
 
+    def _toggle_results(self, visible):
+        if not visible and self.results.height() > 0:
+            self.results_height = self.results.height()
+        self.results.setVisible(visible)
+        if visible:
+            height = min(self.results_height, max(80, self.vertical_splitter.height() - 180))
+            self.vertical_splitter.setSizes([self.vertical_splitter.height() - height, height])
+
+    def set_configuration(self, name):
+        self.focus_action.setChecked(False)
+        show_left, show_right, height = {
+            "Default Workspace": (True, True, 0), "Image Focus": (False, False, 0),
+            "Proofreading Workspace": (True, True, 180), "Data Inspection": (False, True, 330),
+        }[name]
+        self.navigation.set_collapsed(False)
+        self.toggle_navigation_action.setChecked(show_left)
+        self.toggle_context_action.setChecked(show_right)
+        self.splitter.setSizes([235, max(320, self.width() - 590), 350])
+        self.toggle_results_action.setChecked(bool(height))
+        if height:
+            self.results_height = height
+            self._toggle_results(True)
+
+    def save_custom_layout(self):
+        self.workspace_settings.write(self._focus_snapshot or self.workspace_snapshot(), "custom")
+        self.statusBar().showMessage("Custom layout saved", 4000)
+
+    def restore_custom_layout(self):
+        snapshot = self.workspace_settings.read("custom")
+        if snapshot:
+            self.focus_action.setChecked(False)
+            self.apply_snapshot(snapshot)
+        else:
+            self.statusBar().showMessage("Save a custom layout first.", 4000)
+
     def workspace_snapshot(self) -> WorkspaceSnapshot:
         return WorkspaceSnapshot(
             geometry=self.saveGeometry(),
@@ -1495,6 +1624,9 @@ class DesktopWindow(QMainWindow):
             navigation_collapsed=self.navigation.collapsed,
             navigation_visible=self.toggle_navigation_action.isChecked(),
             context_visible=self.toggle_context_action.isChecked(),
+            results_visible=self.toggle_results_action.isChecked(),
+            results_height=self.results_height if self.results.isHidden() else self.results.height(),
+            results_tab=self.results.tabText(self.results.currentIndex()),
             workflow=self.navigation.current_workflow,
             workflow_subpages=self.navigation.subpage_selections(),
             proofreading_sections=tuple((section.key, section.expanded) for section in
@@ -1520,12 +1652,20 @@ class DesktopWindow(QMainWindow):
             self.splitter.setSizes(list(snapshot.splitter_sizes))
         self.navigation.restore_subpages(snapshot.workflow_subpages)
         self.set_workflow(snapshot.workflow)
+        self._restore_results(snapshot)
         self.context_panel.project_page.set_section_states(snapshot.project_sections)
         states = dict(snapshot.proofreading_sections)
         for section in self.context_panel.mask_review_page.proofreading_page.findChildren(CollapsibleSection):
             if section.key in states:
                 section.set_expanded(states[section.key], emit=False)
         return restored
+
+    def _restore_results(self, snapshot):
+        self.toggle_results_action.setChecked(snapshot.results_visible)
+        self.results_height = max(80, snapshot.results_height)
+        if snapshot.results_visible:
+            self._toggle_results(True)
+        self.results.set_stage(self.navigation.current_workflow, snapshot.results_tab)
 
     def save_layout(self) -> None:
         if not self._focus_mode:
@@ -1550,12 +1690,13 @@ class DesktopWindow(QMainWindow):
         if self._focus_mode:
             self.focus_action.setChecked(False)
         self.workspace_settings.clear()
+        self.toggle_results_action.setChecked(False)
         self.showNormal()
         self.resize(1440, 900)
         self.navigation.set_collapsed(False)
         self.toggle_navigation_action.setChecked(True)
         self.toggle_context_action.setChecked(True)
-        self.splitter.setSizes([210, 890, 340])
+        self.splitter.setSizes([255, 835, 350])
         self.set_workflow("project")
         self.context_panel.project_page.set_section_states(
             {key: True for key in self.context_panel.project_page.sections}
@@ -1570,7 +1711,8 @@ class DesktopWindow(QMainWindow):
             self._focus_snapshot = self.workspace_snapshot()
             self._focus_mode = True
             self.navigation.set_collapsed(True)
-            self.toggle_navigation_action.setChecked(True)
+            self.toggle_navigation_action.setChecked(False)
+            self.toggle_results_action.setChecked(False)
             self.toggle_context_action.setChecked(False)
             self.statusBar().showMessage("Focus Mode active — press Ctrl+Shift+F to exit")
         else:
@@ -1581,7 +1723,7 @@ class DesktopWindow(QMainWindow):
                 self.toggle_navigation_action.setChecked(snapshot.navigation_visible)
                 self.toggle_context_action.setChecked(snapshot.context_visible)
                 self.splitter.setSizes(list(snapshot.splitter_sizes))
-                self.set_workflow(snapshot.workflow)
+                self._restore_results(snapshot)
             self._focus_snapshot = None
             self.statusBar().showMessage("Workspace layout restored")
 
@@ -1595,8 +1737,7 @@ class DesktopWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if self.navigation.current_workflow == "quality_control":
-            self.graph_window.show()
+
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

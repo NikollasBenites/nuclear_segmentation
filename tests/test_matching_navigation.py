@@ -25,6 +25,8 @@ def test_round_trip_merge_selection_and_rail(window_pair, qapp):
     viewer.scene.camera.zoom = 2.75
     viewer.scene.camera.center = (0., 2., 3.)
     qapp.processEvents()
+    window.results.setCurrentWidget(window.results.pages["candidates"])
+    qapp.processEvents()
     table = candidates.candidates
     table.horizontalScrollBar().setValue(table.horizontalScrollBar().maximum())
     table.verticalScrollBar().setValue(table.verticalScrollBar().maximum())
@@ -45,8 +47,8 @@ def test_round_trip_merge_selection_and_rail(window_pair, qapp):
     assert window.width() == 1024 and window.height() == 680
     rail = nav.findChild(QScrollArea)
     assert rail.horizontalScrollBar().maximum() == 0
-    assert nav.legend.geometry().top() >= rail.geometry().bottom()
-    assert nav.rect().contains(nav.legend.geometry())
+    rail.ensureWidgetVisible(nav.legend.header)
+    assert rail.viewport().rect().contains(nav.legend.header.mapTo(rail.viewport(), nav.legend.header.rect().center()))
     table.verticalScrollBar().setValue(scroll[0])
     table.horizontalScrollBar().setValue(scroll[1])
     window.set_workflow("proofreading")

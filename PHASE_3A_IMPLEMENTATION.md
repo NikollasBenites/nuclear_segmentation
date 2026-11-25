@@ -26,3 +26,13 @@ The broad run passed 445 tests and 13 subtests. The isolated launcher worker pas
 ## 3.0 · Design system
 
 The desktop window applies named semantic colors, native point-sized typography, section headers, control states and keyboard focus through `design_system.py`. The appearance preference lives in QSettings. Switching applies a palette and stylesheet in place. The design-system gate covers both themes, unchanged rendered pixels, camera and parameters, desktop controls at both supported sizes and the Phase 2D.8 classification cases.
+
+## 3.1 · Scientific workspace
+
+`desktop_window.py` owns a horizontal panel splitter inside a vertical results splitter. `workflow_navigation.py` mounts the stage bar above them and the selected subpages in the parameter panel. The active session selector calls the existing guarded session-switch handler. `workflow_progress.py` reads the active session's validity flags and the selected pair's current result. Visiting a page cannot complete a scientific stage.
+
+`results_workspace.py` hosts the original sorted association tables, candidate views and their selection models. Measurements use a read-only Qt adapter over the published DataFrame and its object index. Sampling reads the quantification controller's formatted values, history uses the geometry history model and logs share the controller's text documents. QC reparents the same plot widget when detached. Panel collapse hides the live widgets. QSettings snapshots add optional results visibility, height and tab fields, with defaults for Phase 2 layouts. Native scientific checkpoints require no layout migration.
+
+The approved placement changes required updating desktop layout assertions for the horizontal bar, sidebar ownership, QC docking and visible candidates tab. Scientific assertions for classification, calibrated highlights, camera, sorting and transaction history remain in the regression gate.
+
+The 3.0 gate passed 45 tests. At 3.1, 83 of 84 passed in the workspace/matching/checkpoint group on the first run. The remaining case attempted to scroll the now-hidden Candidates tab. Opening that tab before scrolling restored its intended contract, and all five matching navigation cases passed together. The three result-workspace tests plus import and segmentation workers passed together (24 tests). The protected brush canvas and toolbar cases passed together (2 tests). The appearance/canvas comparison also passed under QT_SCALE_FACTOR=1.5.

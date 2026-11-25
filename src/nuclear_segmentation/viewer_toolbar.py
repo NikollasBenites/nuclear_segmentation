@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from qtpy.QtCore import QSize, Signal
-from qtpy.QtWidgets import QButtonGroup, QToolButton, QVBoxLayout, QWidget
+from qtpy.QtWidgets import QButtonGroup, QToolButton, QGridLayout, QWidget
 
 from .matching_pair import MATCHING_LAYER
 from .ui_icons import icon
@@ -19,8 +19,7 @@ class ViewerToolbar(QWidget):
         super().__init__(parent)
         self.viewer = viewer
         self.setObjectName("viewerToolbar")
-        self.setFixedWidth(56)
-        layout = QVBoxLayout(self)
+        layout = QGridLayout(self)
         layout.setContentsMargins(5, 8, 5, 8)
         layout.setSpacing(5)
         self.buttons: dict[str, QToolButton] = {}
@@ -42,7 +41,8 @@ class ViewerToolbar(QWidget):
             button.setIcon(icon(icon_name))
             button.setIconSize(QSize(25, 25))
             button.setToolTip(tooltip)
-            button.setFixedSize(44, 44)
+            button.setFixedSize(32, 32)
+            button.setAccessibleName(tooltip)
             if is_tool:
                 button.setCheckable(True)
                 self.tool_group.addButton(button)
@@ -56,8 +56,8 @@ class ViewerToolbar(QWidget):
             else:
                 button.clicked.connect(lambda: self.set_ndisplay(3))
             self.buttons[key] = button
-            layout.addWidget(button)
-        layout.addStretch(1)
+            position = len(self.buttons) - 1
+            layout.addWidget(button, position // 4, position % 4)
         self._observed_layer = None
         viewer.layers.selection.events.active.connect(self._active_layer_changed)
         self.buttons["pan_zoom"].setChecked(True)
@@ -106,6 +106,8 @@ class ViewerToolbar(QWidget):
         for key in ("review", "pick"):
             self.buttons[key].setEnabled(labels)
         for key in ("paint", "erase"):
+            editing = labels and (layer.metadata.get("nucytoseg_edit_preview") or layer.metadata.get("nucytoseg_demo"))
+            self.buttons[key].setVisible(bool(editing))
             self.buttons[key].setEnabled(labels and layer.editable and layer.visible)
 
     def set_ndisplay(self, dimensions: int) -> bool:

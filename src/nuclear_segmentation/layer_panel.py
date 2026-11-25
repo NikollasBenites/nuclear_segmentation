@@ -223,6 +223,8 @@ class LayerPanel(QWidget):
         self.model = LayerTreeModel(viewer, self)
         self.tree.setModel(self.model)
         self.tree.expandAll()
+        self.tree.setColumnHidden(1, True)
+        self.tree.setIndentation(12)
         self.tree.header().setStretchLastSection(False)
         header = self.tree.header()
         header.setSectionResizeMode(0, header.ResizeMode.Stretch)

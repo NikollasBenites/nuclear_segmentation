@@ -21,6 +21,9 @@ class WorkspaceSnapshot:
     navigation_visible: bool
     context_visible: bool
     workflow: str
+    results_visible: bool = False
+    results_height: int = 210
+    results_tab: str = ""
     project_sections: tuple[tuple[str, bool], ...] = ()
     workflow_subpages: tuple[tuple[str, str], ...] = ()
     proofreading_sections: tuple[tuple[str, bool], ...] = ()
@@ -78,6 +81,9 @@ class WorkspaceSettings:
                 self._key(slot, "context_visible"), True, type=bool
             ),
             workflow=workflow,
+            results_visible=self.settings.value(self._key(slot, "results_visible"), False, type=bool),
+            results_height=self.settings.value(self._key(slot, "results_height"), 210, type=int),
+            results_tab=str(self.settings.value(self._key(slot, "results_tab"), "")),
             project_sections=self._sections(slot, "project_sections"),
             proofreading_sections=self._sections(slot, "proofreading_sections"),
             workflow_subpages=tuple(
@@ -94,6 +100,9 @@ class WorkspaceSettings:
             "navigation_visible": snapshot.navigation_visible,
             "context_visible": snapshot.context_visible,
             "workflow": snapshot.workflow,
+            "results_visible": snapshot.results_visible,
+            "results_height": snapshot.results_height,
+            "results_tab": snapshot.results_tab,
             "project_sections": json.dumps(dict(snapshot.project_sections)),
             "proofreading_sections": json.dumps(dict(snapshot.proofreading_sections)),
             "workflow_subpages": json.dumps(dict(snapshot.workflow_subpages)),

@@ -106,8 +106,8 @@ def test_hierarchical_navigation_at_supported_sizes(window, size):
     assert window.context_title.text() == "Preprocessing Parameters"
     assert context.heading.text() == "Segmentation Input Normalization"
     navigation.collapse_button.click()
-    assert navigation.collapsed and navigation.width() == 64
-    assert all(not submenu.isVisible() for submenu in navigation._submenus.values())
+    assert navigation.collapsed and navigation.width() == 44
+    assert navigation.stage_bar.isVisible() and navigation._submenus["preprocessing"].isVisible()
     navigation._buttons["mask_review"].click()
     assert navigation.current_subpage == "roi_counting"
     navigation.collapse_button.click()
@@ -219,6 +219,8 @@ def test_quality_control_uses_one_persistent_plot_widget(window, qapp):
     QTest.qWait(350)
     assert window.context_panel.heading.text() == "Quality Control"
     assert plots.isVisible()
+    assert window.results.currentWidget() is window.results.graph_page
+    window.context_panel.show_graphs_button.click()
     assert graphs.isVisible() and graphs.parent() is window
     assert "no current segmentation" in plots.status.text().lower()
     canvas, toolbar = plots.canvas, plots.toolbar
@@ -245,13 +247,11 @@ def test_quality_control_uses_one_persistent_plot_widget(window, qapp):
 
 def test_panel_collapse_expansion_and_context_visibility(window, qapp):
     window.navigation.set_collapsed(True)
-    assert window.navigation.width() == 64
-    assert all(
-        button.toolButtonStyle() == Qt.ToolButtonStyle.ToolButtonIconOnly
-        for button in window.navigation._buttons.values()
-    )
+    assert window.navigation.width() == 44
+    assert window.navigation.stage_bar.isVisible()
+    assert not window.viewer_toolbar.isVisible()
     window.navigation.set_collapsed(False)
-    assert window.navigation.width() == 210
+    assert window.viewer_toolbar.isVisible()
     window.hide_context_panel()
     qapp.processEvents()
     assert not window.context_container.isVisible()
@@ -266,7 +266,7 @@ def test_panel_collapse_expansion_and_context_visibility(window, qapp):
     assert window.parameters_button.text() == "Hide Parameters"
 
 
-def test_layers_collapse_reuses_panel_and_gives_parameters_more_space(window, qapp):
+def test_layers_collapse_reuses_left_panel_independently_of_parameters(window, qapp):
     window.resize(1440, 1050)
     viewer = window.embedding.viewer
     layers = tuple(viewer.layers)
@@ -284,7 +284,7 @@ def test_layers_collapse_reuses_panel_and_gives_parameters_more_space(window, qa
     assert not window.layers_section.expanded
     assert not layer_panel.isVisible()
     assert window.selected_mask_panel.isVisible()
-    assert window.context_panel.height() > parameters_height
+    assert window.context_panel.height() == parameters_height
     assert display.expanded == display_state
     window.set_workflow("export")
     assert not window.layers_section.expanded
@@ -307,7 +307,8 @@ def test_focus_mode_restores_unsaved_normal_layout(window, qapp):
     qapp.processEvents()
     assert window.navigation.collapsed
     assert not window.context_container.isVisible()
-    assert window.viewer_toolbar.isVisible()
+    assert window.embedding.isVisible() and window.navigation.stage_bar.isVisible()
+    assert not window.navigation.isVisible() and not window.results.isVisible()
     window.focus_action.setChecked(False)
     qapp.processEvents()
     assert not window.navigation.collapsed
@@ -641,7 +642,7 @@ def test_review_3d_ray_picking_nearest_rotation_spacing_and_persistence(window):
     window.set_workflow("export")
     assert window.selected_mask_panel.isVisible()
     assert window.selected_mask_panel.mask_id_label.text() == "Mask ID: 22"
-    sidebar_layout = window.context_container.layout()
+    sidebar_layout = window.navigation.tools
     assert sidebar_layout.indexOf(window.selected_mask_panel) > sidebar_layout.indexOf(
         window.layers_section
     )
@@ -709,7 +710,7 @@ def test_proofreading_page_and_old_layout_migration(window):
     from dataclasses import replace
     navigation, ctx = window.navigation, window.context_panel
     assert list(navigation._buttons) == ["project", "preprocessing", "segmentation", "mask_review",
-                                         "proofreading", "matching", "quantification", "quality_control", "export"]
+                                         "matching", "quantification", "quality_control", "export"]
     window.set_workflow("proofreading")
     assert ctx.stack.currentWidget().widget() is ctx.mask_review_page.proofreading_page
     assert window.geometry_panel.isVisible()
