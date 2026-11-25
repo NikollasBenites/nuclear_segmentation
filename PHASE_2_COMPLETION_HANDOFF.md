@@ -43,7 +43,7 @@ Linux verification used PyQt6 6.11.0, napari 0.10.0 and an Xorg OpenGL display. 
 | 2D.5.6 | 409 tests and 13 subtests. The corrected checkpoint loader passed the native/project and matching regressions and all focused association tests. |
 | 2D.6 | 413 distinct tests and 13 subtests passed. The broad run passed 408 tests and 13 subtests, all four live-plot tests passed, and the launcher worker passed. |
 
-The legacy launcher and live-plot tests ran in separate processes. An intermediate Linux run reported a short viewport at the minimum window size. The targeted layout group and final broad run both passed. Include this size in native validation. Native macOS and Windows validation of the new phases remains outstanding. No unresolved scientific implementation blocker was found. Watershed refinement is read-only. Historical decisions on absent objects remain audit records. Dense crops can approach full-volume working memory. Checkpoint validation scans retained geometry and hashes source masks, so large projects may take longer to open. Scientific IDs beyond spreadsheet precision should be imported explicitly as integers or strings.
+The legacy launcher and live-plot tests ran in separate processes. An intermediate Linux run reported a short viewport at the minimum window size. The targeted layout group and final broad run both passed. Include this size in native validation. The developer subsequently approved all 19 native macOS baseline checks at `879c8f3` (6/6 for 2D.5.4, 4/4 for 2D.5.5, 4/4 for 2D.5.6 and 5/5 for 2D.6). Windows validation remains outstanding. No unresolved scientific implementation blocker was found. Watershed refinement is read-only. Historical decisions on absent objects remain audit records. Dense crops can approach full-volume working memory. Checkpoint validation scans retained geometry and hashes source masks, so large projects may take longer to open. Scientific IDs beyond spreadsheet precision should be imported explicitly as integers or strings.
 
 ## Consolidated native macOS validation
 
@@ -57,6 +57,12 @@ Use a copy of a calibrated real acquisition with a nonzero crop offset, anisotro
 6. Open QC and compare automatic/reviewed counts, changed decisions, uncertainty, completion, multiple associations, histograms and ECDFs. Repeat with partial review, no links and empty retained populations. Change a decision with QC previously open and check the updated graph.
 7. Accept the nuclear ROI. Compare eligible IDs, guard settings, directional counting and effective volume with nuclear Quantification. Independently divide the two matched counts by the effective mm³. Verify two nuclei on one target count twice in nuclear density and once as a multiple cytoplasmic object.
 8. Export matched outputs alone and with existing scientific outputs. Join the two measurement tables using role/session and exact ID. Compare the JSON provenance, final nullable targets and both sets of flags with the GUI. Invalidate a source and verify export recovery after recalculation.
+
+### Native follow-up for the histogram controls
+
+Linux regression verification passed 20 distinct tests across matching plots, reviewed QC and live plots, including the embedded Qt/napari canvas under Xorg. Native macOS validation of the histogram controls is pending.
+
+Open the automatic and reviewed nuclear volume distributions for groups with different sample sizes. Check each layout in Counts and Relative frequency, then change the bin count. Verify the tallest bin has a little headroom, the separate panels use identical limits and bin edges, and zooming one panel moves the others. Switch back to the overlay and check the group sizes and heights against the panels. Switching layouts should never require rerunning measurements or matching.
 
 ## Windows and next steps
 

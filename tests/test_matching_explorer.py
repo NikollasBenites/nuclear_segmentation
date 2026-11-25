@@ -14,7 +14,7 @@ from nuclear_segmentation.desktop_window import DesktopWindow
 from nuclear_segmentation.filtering_workspace import calculate_filtering_prerequisites
 from nuclear_segmentation.matching_explorer import AssociationExplorer
 from nuclear_segmentation.matching_inspection import focus_voxel
-from nuclear_segmentation.matching_plots import MatchingPlotData, PLOTS
+from nuclear_segmentation.matching_plots import MatchingPlotData, PLOTS, draw_volume_histogram
 from test_desktop_normalization import _dataset
 from test_integrated_matching import run_job
 from test_matching_pair import _wait, choose_in_panel, measured_pair, qapp, window_pair
@@ -80,9 +80,9 @@ def test_decision_and_plot_denominators():
     np.testing.assert_allclose(data.volumes["MATCH"], [7.5, 15., 15.])
     for patch, values in zip(ax.patches, data.volumes.values(), strict=True):
         xy = patch.get_xy()
-        edges = data.volume_bins
+        edges = np.histogram_bin_edges(np.concatenate(list(data.volumes.values())), bins=30)
         np.testing.assert_allclose(xy[1:2*len(edges)-1:2, 0], edges[:-1])
-        np.testing.assert_allclose(xy[1:2*len(edges)-1:2, 1], np.histogram(values, edges)[0] / len(values))
+        np.testing.assert_allclose(xy[1:2*len(edges)-1:2, 1], np.histogram(values, edges)[0])
     ax.clear()
     data.draw(ax, PLOTS[2])
     match_line = ax.lines[0]
@@ -103,6 +103,33 @@ def test_decision_and_plot_denominators():
     assert ax.collections[-1].get_sizes()[0] > ax.collections[0].get_sizes()[0]
     np.testing.assert_allclose(ax.patches[0].get_xy()[:3], [[0, 0], [.5, .5], [1, 0]])
     assert ax.lines[0].get_xdata()[0] == .5 and ax.lines[1].get_ydata()[0] == .2
+
+
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("separate", [False, True])
+def test_volume_histogram_shared_scale(relative, separate):
+    # Different ranges, sample sizes and peaks expose per-panel auto-binning or scaling.
+    groups = {"A": [1, 2, 3, 4], "B": [3, 3, 4]}
+    figure = Figure()
+    ax = figure.subplots()
+    draw_volume_histogram(ax, groups, bins=4, relative=relative, separate=separate)
+    assert len(figure.axes) == (2 if separate else 1)
+    edges = np.linspace(1, 4, 5)
+    for panel in figure.axes:
+        np.testing.assert_allclose(panel.get_xlim(), [1, 4])
+        peak = 2 / 3 if relative else 2
+        np.testing.assert_allclose(panel.get_ylim(), [0, peak * 1.05])
+    patches = [patch for panel in figure.axes for patch in panel.patches]
+    for patch, values in zip(patches, groups.values(), strict=True):
+        points = patch.get_xy()[1:2*len(edges)-1:2]
+        np.testing.assert_allclose(points[:, 0], edges[:-1])
+        expected = np.histogram(values, edges)[0]
+        np.testing.assert_allclose(points[:, 1], expected / len(values) if relative else expected)
+    if separate:
+        ax.set_xlim(2, 4)
+        ax.set_ylim(0, 0.5)
+        assert figure.axes[1].get_xlim() == (2, 4)
+        assert figure.axes[1].get_ylim() == (0, 0.5)
 
 
 @pytest.mark.parametrize("n,c", [(0, 0), (0, 1), (2, 0), (2, 1)])

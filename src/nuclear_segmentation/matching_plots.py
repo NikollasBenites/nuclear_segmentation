@@ -17,6 +17,38 @@ DECISION_SPACE = "Classification decision space"
 PLOTS = (PROPORTIONS, VOLUME_HISTOGRAM, VOLUME_ECDF, LINK_COUNTS, OVERLAP_HISTOGRAM, DECISION_SPACE)
 
 
+def draw_volume_histogram(ax, groups, *, bins=30, relative=False, separate=False, colors=None):
+    """Render nonempty groups of measured volumes on common bin and axis scales."""
+    edges = np.histogram_bin_edges(np.concatenate(list(groups.values())), bins=bins)
+    axes = [ax]
+    if separate and len(groups) > 1:
+        columns = 1 if len(groups) == 2 else 2
+        rows = (len(groups) + columns - 1) // columns
+        grid = ax.get_subplotspec().subgridspec(rows, columns)
+        ax.set_subplotspec(grid[0])
+        for index in range(1, len(groups)):
+            axes.append(ax.figure.add_subplot(grid[index], sharex=ax, sharey=ax))
+
+    peak = 0
+    for index, (name, values) in enumerate(groups.items()):
+        panel = axes[index] if separate else ax
+        n = len(values)
+        heights, _, _ = panel.hist(
+            values, bins=edges, weights=np.full(n, 1 / n) if relative else None,
+            histtype="step", linewidth=2, label=f"{name} (n={n:,})",
+            color=colors[name] if colors else f"C{index}",
+        )
+        peak = max(peak, heights.max())
+    ax.set(xlim=(edges[0], edges[-1]), ylim=(0, peak * 1.05))
+    for panel in axes:
+        panel.set(xlabel="Nuclear volume (µm³)",
+                  ylabel="Within-group fraction per bin" if relative else "Nuclei per bin (count)")
+        if not relative:
+            panel.yaxis.set_major_locator(MaxNLocator(integer=True))
+        panel.legend(fontsize="small")
+        panel.grid(alpha=.2)
+
+
 class MatchingPlotData:
     def __init__(self, result):
         self.result = result
@@ -27,10 +59,6 @@ class MatchingPlotData:
         for row in self.result.nuclei:
             groups[row.auto_class].append(row.nuclear_volume_um3)
         return {name: np.sort(values) for name, values in groups.items() if values}
-
-    @cached_property
-    def volume_bins(self):
-        return np.histogram_bin_edges(np.concatenate(list(self.volumes.values())), bins=30)
 
     @cached_property
     def links(self):
@@ -48,7 +76,7 @@ class MatchingPlotData:
             groups[r.auto_class][r.best_nuclear_fraction, r.second_nuclear_fraction] += 1
         return groups
 
-    def draw(self, ax, kind):
+    def draw(self, ax, kind, **histogram_options):
         result = self.result
         total = len(result.nuclei)
         cyto = len(result.associations)
@@ -69,19 +97,16 @@ class MatchingPlotData:
                             textcoords="offset points", ha="center", color=ax.xaxis.label.get_color())
             ax.set_xticks(range(len(COLORS)), COLORS)
             ax.set(xlabel="Automatic class", ylabel="Fraction of all retained nuclei", ylim=(0, 1.16))
-        elif kind in (VOLUME_HISTOGRAM, VOLUME_ECDF):
+        elif kind == VOLUME_HISTOGRAM:
+            draw_volume_histogram(ax, self.volumes, colors=COLORS, **histogram_options)
+            return
+        elif kind == VOLUME_ECDF:
             for name, values in self.volumes.items():
                 n = len(values)
-                style = dict(color=COLORS[name], label=f"{name} (n={n:,})")
-                if kind == VOLUME_HISTOGRAM:
-                    ax.hist(values, self.volume_bins, weights=np.full(n, 1 / n),
-                            histtype="step", linewidth=2, **style)
-                else:
-                    unique, counts = np.unique(values, return_counts=True)
-                    ax.step(np.r_[unique[0], unique], np.r_[0, counts.cumsum() / n],
-                            where="post", marker=".", **style)
-            ax.set(xlabel="Nuclear volume (µm³)", ylabel=("Fraction within class per bin" if kind == VOLUME_HISTOGRAM
-                   else "Cumulative fraction within class"), ylim=(0, 1.05))
+                unique, counts = np.unique(values, return_counts=True)
+                ax.step(np.r_[unique[0], unique], np.r_[0, counts.cumsum() / n],
+                        where="post", marker=".", color=COLORS[name], label=f"{name} (n={n:,})")
+            ax.set(xlabel="Nuclear volume (µm³)", ylabel="Cumulative fraction within class", ylim=(0, 1.05))
         elif kind == LINK_COUNTS:
             for multiple, label, color in ((False, "Zero or one", "steelblue"), (True, "Multiple (≥2)", "darkorange")):
                 xs = sorted(k for k in self.links if (k >= 2) == multiple)

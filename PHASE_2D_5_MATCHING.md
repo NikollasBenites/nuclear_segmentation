@@ -176,11 +176,13 @@ The explorer constructs an immutable `AssociationSelection` from a published res
 | View | Population, units and interpretation |
 | --- | --- |
 | Classification proportions | Counts and fractions of **all retained nuclei**, including NO_MATCH. Zero retained nuclei give an empty-state message. |
-| Nuclear volume distributions | Nuclear volume in µm³, with common bin edges and within-class weights of 1 / class size. Each nonempty class sums to one over its bins. |
+| Nuclear volume distributions | Nuclear volume in µm³. Counts show the number of nuclei per bin. Relative frequency divides those counts by the class sample size. |
 | Nuclear volume ECDF | Cumulative fraction of each nonempty class at or below a volume in µm³. Tied volumes contribute their combined count to the step. |
 | Accepted nuclei per cytoplasmic object | Counts of **all retained cytoplasmic objects** at each observed link count, including zero. Objects with two or more accepted nuclei have a distinct color. |
 | Best and second-best overlap | Two histograms of fractions of the complete nucleus on common 0–1 bins. Each retained nucleus contributes once to each histogram. Vertical lines show the executed thresholds. |
 | Classification decision space | Best fraction on X, second-best on Y, colored by automatic class. The shaded triangle satisfies second ≤ best and best + second ≤ 1. Coincident nuclei share a marker whose area grows with log count, including NO_MATCH at the origin. The vertical and horizontal lines use the executed settings. |
+
+For both **Nuclear volume distributions** and **Reviewed nuclear volumes**, choose **Overlaid** or **Separate panels** in the same QC window. Both start with counts and 30 bins. Relative frequency gives each nonempty group a total bin height of one. Both layouts use the same bin edges and leave 5% headroom above the tallest displayed bin. Separate panels share both axes, including during zoom and pan. Changing these controls redraws the published measurements.
 
 Each view reports nuclear and cytoplasmic sample sizes. Empty groups contribute no histogram or ECDF. An empty cytoplasmic population gives an empty link-count plot while the nuclear plots retain every NO_MATCH nucleus. Automatic classifications alone do not establish biological cell identity.
 
@@ -291,7 +293,7 @@ Linux automated gate: 406 distinct tests and 13 subtests passed across the broad
 
 Native projects with executed matching or review history store the selected sessions, grid, retained counts and population signatures, both source revisions, measurement revisions at classification, thresholds, sparse intersections, automatic rows, accepted link counts and ordered manual decision/undo events. Older checkpoints open with an empty review context. The open worker verifies compatible automatic evidence against the restored complete retained arrays before publication. A dependency mismatch leaves the saved automatic result historical and requires a rerun. Live project identities are rebound during restoration. Full mask arrays use the existing session checkpoint representation.
 
-The Matching category in Quality Control compares automatic outcomes and explicit review outcomes across all retained nuclei. Completion includes Matched, Unmatched and Uncertain decisions. Changed counts compare both status and accepted target. Uncertain is a subset of reviewed nuclei. Stale decisions are excluded from reviewed links. Multiple-object counts use distinct retained cytoplasmic IDs with at least two links in each independent analysis. Volume histograms use within-group fractions and shared bins; ECDFs report within-group cumulative fractions. Group legends report sample counts.
+The Matching category in Quality Control compares automatic outcomes and explicit review outcomes across all retained nuclei. Completion includes Matched, Unmatched and Uncertain decisions. Changed counts compare both status and accepted target. Uncertain is a subset of reviewed nuclei. Stale decisions are excluded from reviewed links. Multiple-object counts use distinct retained cytoplasmic IDs with at least two links in each independent analysis. ECDFs report within-group cumulative fractions. Group legends report sample counts.
 
 The checkpoint worker also checks signatures of the saved effective source volumes. Files with incompatible current populations keep manual history for inspection. A failed or interrupted classification requires rerunning. Older writers can omit the new optional association block on resave.
 

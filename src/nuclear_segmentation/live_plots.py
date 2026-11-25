@@ -2,12 +2,12 @@
 import numpy as np
 import pandas as pd
 from qtpy.QtCore import QTimer
-from qtpy.QtWidgets import QWidget, QVBoxLayout, QComboBox, QLabel
+from qtpy.QtWidgets import QWidget, QVBoxLayout, QComboBox, QLabel, QHBoxLayout, QSpinBox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
 from .reviewed_qc import REVIEW_PLOTS, draw_review
-from .matching_plots import DECISION_SPACE, MatchingPlotData, PLOTS
+from .matching_plots import DECISION_SPACE, MatchingPlotData, PLOTS, VOLUME_HISTOGRAM
 
 
 class LivePlots(QWidget):
@@ -228,19 +228,20 @@ class LivePlots(QWidget):
             return
         background, foreground, grid = '#0f1923', '#dce7f1', '#607589'
         self.figure.set_facecolor(background)
-        self.axes.set_facecolor(background)
-        self.axes.tick_params(colors=foreground)
-        self.axes.xaxis.label.set_color(foreground)
-        self.axes.yaxis.label.set_color(foreground)
-        self.axes.title.set_color(foreground)
-        for spine in self.axes.spines.values():
-            spine.set_color(grid)
-        legend = self.axes.get_legend()
-        if legend is not None:
-            legend.get_frame().set_facecolor(background)
-            legend.get_frame().set_edgecolor(grid)
-            for text in legend.get_texts():
-                text.set_color(foreground)
+        for ax in self.figure.axes:
+            ax.set_facecolor(background)
+            ax.tick_params(colors=foreground)
+            ax.xaxis.label.set_color(foreground)
+            ax.yaxis.label.set_color(foreground)
+            ax.title.set_color(foreground)
+            for spine in ax.spines.values():
+                spine.set_color(grid)
+            legend = ax.get_legend()
+            if legend is not None:
+                legend.get_frame().set_facecolor(background)
+                legend.get_frame().set_edgecolor(grid)
+                for text in legend.get_texts():
+                    text.set_color(foreground)
 
 
 class ProjectLivePlots(LivePlots):
@@ -263,8 +264,29 @@ class ProjectLivePlots(LivePlots):
         project_state.association_review_changed.connect(self.schedule)
         self.layout().insertWidget(1, self.matching_kind)
         self.matching_kind.hide()
+        self.histogram_controls = QWidget()
+        controls = QHBoxLayout(self.histogram_controls)
+        controls.setContentsMargins(0, 0, 0, 0)
+        self.histogram_layout = QComboBox()
+        self.histogram_layout.addItems(["Overlaid", "Separate panels"])
+        self.histogram_layout.setAccessibleName("Histogram layout")
+        self.histogram_scale = QComboBox()
+        self.histogram_scale.addItems(["Counts", "Relative frequency"])
+        self.histogram_scale.setAccessibleName("Histogram scale")
+        self.histogram_bins = QSpinBox()
+        self.histogram_bins.setRange(1, 500)
+        self.histogram_bins.setValue(30)
+        self.histogram_bins.setPrefix("Bins ")
+        self.histogram_bins.setAccessibleName("Histogram bin count")
+        for control in (self.histogram_layout, self.histogram_scale, self.histogram_bins):
+            controls.addWidget(control)
+        self.layout().insertWidget(2, self.histogram_controls)
+        self.histogram_controls.hide()
+        self.histogram_layout.currentIndexChanged.connect(self.schedule)
+        self.histogram_scale.currentIndexChanged.connect(self.schedule)
+        self.histogram_bins.valueChanged.connect(self.schedule)
         self.category.currentTextChanged.connect(self._change_category)
-        self.matching_kind.currentIndexChanged.connect(self.schedule)
+        self.matching_kind.currentTextChanged.connect(self._update_histogram_controls)
         self._matching_signals = (
             project_state.matching_result_changed, project_state.matching_selection_changed,
             project_state.channels_changed, project_state.sessions_changed,
@@ -277,7 +299,18 @@ class ProjectLivePlots(LivePlots):
         project_state.scientific_roi_changed.connect(self.sync)
         self.sync()
 
+    def _update_histogram_controls(self):
+        self.histogram_controls.setVisible(self.category.currentText() == "Matching" and
+                                           self.matching_kind.currentText() in (VOLUME_HISTOGRAM, REVIEW_PLOTS[-2]))
+        self.schedule()
+
+    def _reset_matching_axes(self):
+        self.figure.clear()
+        self.axes = self.figure.add_subplot(111)
+        self.toolbar.update()
+
     def _change_category(self, name):
+        self._update_histogram_controls()
         matching = name == "Matching"
         self.kind.setVisible(not matching)
         self.matching_kind.setVisible(matching)
@@ -294,7 +327,7 @@ class ProjectLivePlots(LivePlots):
             self.last_retained_ids = []
             self._sync_matching(force=True)
         else:
-            self.figure.suptitle("")
+            self._reset_matching_axes()
             self.sync()
             self.populate_columns()
 
@@ -340,18 +373,20 @@ class ProjectLivePlots(LivePlots):
         self.timer.stop()
         self.dirty = False
         self.render_count += 1
-        self.axes.clear()
-        self.toolbar.update()
+        self._reset_matching_axes()
         self.status.setText(self._matching_status)
         if self._matching_data is None:
             return
         self._apply_canvas_theme()
         kind = self.matching_kind.currentText()
+        options = dict(bins=self.histogram_bins.value(),
+                       relative=self.histogram_scale.currentText() == "Relative frequency",
+                       separate=self.histogram_layout.currentText() == "Separate panels")
         if kind in REVIEW_PLOTS:
-            draw_review(self.axes, kind, self._matching_data.result, self.project_state.matching_pair.review)
+            draw_review(self.axes, kind, self._matching_data.result, self.project_state.matching_pair.review, **options)
             self.status.setText("Reviewed links include only current explicit Matched decisions.")
         else:
-            self._matching_data.draw(self.axes, kind)
+            self._matching_data.draw(self.axes, kind, **options)
         counts = self._matching_data.result
         self.figure.suptitle(
             ("Manual review and automatic evidence\n" if kind in REVIEW_PLOTS else "Automatic classifications before manual association review\n") +

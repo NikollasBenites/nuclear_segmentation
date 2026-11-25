@@ -82,3 +82,19 @@ def test_reviewed_qc_in_existing_window(project):
     _wait(app, lambda: not plots.dirty and "Review completion" in plots.axes.get_title())
     assert plots.axes.patches[0].get_height() == 1
     assert plots.axes.patches[3].get_height() == 1
+
+    from nuclear_segmentation.matching_plots import VOLUME_HISTOGRAM
+    for kind in (VOLUME_HISTOGRAM, REVIEW_PLOTS[-2]):
+        plots.matching_kind.setCurrentText(kind)
+        plots.histogram_scale.setCurrentText("Relative frequency")
+        plots.histogram_bins.setValue(8)
+        plots.histogram_layout.setCurrentText("Separate panels")
+        _wait(app, lambda: not plots.dirty)
+        assert plots.histogram_controls.isVisible()
+        separate_limits = [(ax.get_xlim(), ax.get_ylim()) for ax in plots.figure.axes]
+        assert len(separate_limits) > 1 and len(set(separate_limits)) == 1
+        plots.histogram_layout.setCurrentText("Overlaid")
+        _wait(app, lambda: not plots.dirty)
+        assert plots.figure.axes == [plots.axes]
+        assert (plots.axes.get_xlim(), plots.axes.get_ylim()) == separate_limits[0]
+        assert window.project_state.matching_pair.current_result is result

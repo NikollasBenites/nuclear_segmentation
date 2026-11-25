@@ -2,13 +2,14 @@
 from collections import Counter, defaultdict
 import numpy as np
 
+from .matching_plots import draw_volume_histogram
 from .association_review import reviewed_outcomes
 
 REVIEW_PLOTS = ("Automatic and reviewed outcomes", "Review completion and changes",
                 "Multiple associations before and after review", "Reviewed nuclear volumes", "Reviewed nuclear ECDF")
 
 
-def draw_review(ax, kind, result, review):
+def draw_review(ax, kind, result, review, **histogram_options):
     outcomes = list(reviewed_outcomes(result, review))
     n = len(outcomes)
     ax.set_title(f"{kind} (n={n} nuclei)")
@@ -33,15 +34,15 @@ def draw_review(ax, kind, result, review):
         groups = defaultdict(list)
         for row,status,_ in outcomes:
             groups[status].append(row.nuclear_volume_um3)
-        bins = np.histogram_bin_edges([r.nuclear_volume_um3 for r,_,_ in outcomes], bins=30)
+        if kind == REVIEW_PLOTS[-2]:
+            draw_volume_histogram(ax, groups, **histogram_options)
+            return
         for status, volumes in groups.items():
-            label = f"{status} (n={len(volumes)})"
-            if kind == REVIEW_PLOTS[-1]:
-                ax.step(np.sort(volumes),np.arange(1,len(volumes)+1)/len(volumes),where="post",label=label)
-            else:
-                ax.hist(volumes,bins=bins,histtype="step",label=label,weights=np.full(len(volumes),1/len(volumes)))
+            unique, counts = np.unique(volumes, return_counts=True)
+            ax.step(np.r_[unique[0], unique], np.r_[0, counts.cumsum() / len(volumes)],
+                    where="post", marker=".", label=f"{status} (n={len(volumes)})")
         ax.set_xlabel("Nuclear volume (µm³)")
-        ax.set_ylabel("Cumulative fraction" if kind == REVIEW_PLOTS[-1] else "Within-group fraction")
+        ax.set_ylabel("Cumulative fraction")
         ax.legend()
         return
     ax.bar(list(values), list(values.values()))
