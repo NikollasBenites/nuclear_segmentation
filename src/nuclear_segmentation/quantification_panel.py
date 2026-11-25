@@ -7,6 +7,7 @@ import numpy as np
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QFormLayout, QLabel, QVBoxLayout, QWidget
 
+from . import matched_quantification
 from .collapsible_section import CollapsibleSection
 from .core import (
     calculate_density_summary, density_z_planes,
@@ -182,6 +183,18 @@ class QuantificationPanel(QWidget):
         self.historical_density = self._label()
         root.addWidget(self.historical_density)
         self.historical_density.hide()
+        matched = CollapsibleSection("matched_quantification", "Matched nuclear quantification")
+        layout = QVBoxLayout()
+        self.matched_status = self._label()
+        layout.addWidget(self.matched_status)
+        matched.set_content_layout(layout)
+        root.addWidget(matched)
+        self.association_signals = (project_state.association_review_changed, project_state.matching_result_changed,
+                                    project_state.matching_selection_changed, project_state.active_session_changed,
+                                    project_state.inactive_session_validity_changed, project_state.quantification_result_changed)
+        for signal in self.association_signals:
+            signal.connect(self.refresh_matched)
+        self.refresh_matched()
         root.addStretch(1)
 
         project_state.segmentation_result_changed.connect(self.refresh)
@@ -200,6 +213,23 @@ class QuantificationPanel(QWidget):
             | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
         return label
+
+    def refresh_matched(self, *args):
+        try:
+            values = matched_quantification.summary(self.project_state)
+        except ValueError as error:
+            self.matched_status.setText(str(error))
+            return
+        lines = [f"{values['eligible_nuclei']} eligible nuclei · {values['effective_sampling_mm3']:.6g} mm³"]
+        for prefix, title, counts in (("automatic", "Automatic", values["automatic_counts"]),
+                                      ("reviewed", "Manual review", values["manual_counts"])):
+            density = values[prefix + "_matched_nuclei_per_mm3"]
+            fraction = values[prefix + "_matched_fraction"]
+            percent = "undefined (empty population)" if fraction is None else f"{fraction:.2%}"
+            lines.extend([title + " · " + ", ".join(f"{k} {v}" for k,v in counts.items()),
+                          f"Matched fraction {percent} · {density:.6g} matched nuclei/mm³",
+                          f"Multiply associated cytoplasmic objects {values[prefix + '_multiple_objects']}"])
+        self.matched_status.setText("\n".join(lines))
 
     def _section(self, root, key, title, fields):
         section = CollapsibleSection(key, title)
@@ -358,6 +388,8 @@ class QuantificationPanel(QWidget):
             self.exclusion_values[key].setText(f"{result[result_key]:,}")
 
     def dispose(self):
+        for signal in self.association_signals:
+            signal.disconnect(self.refresh_matched)
         state = self.project_state
         state.segmentation_result_changed.disconnect(self.refresh)
         state.filtering_result_changed.disconnect(self.refresh)

@@ -2,16 +2,10 @@
 from collections import Counter, defaultdict
 import numpy as np
 
+from .association_review import reviewed_outcomes
+
 REVIEW_PLOTS = ("Automatic and reviewed outcomes", "Review completion and changes",
                 "Multiple associations before and after review", "Reviewed nuclear volumes", "Reviewed nuclear ECDF")
-
-
-def reviewed_outcomes(result, review):
-    for row in result.nuclei:
-        status = review.status(result, row.nuclear_id)
-        event = review.records.get(review.key(row.nuclear_id))
-        target = event["cytoplasmic_id"] if status == "Matched" else None
-        yield row, status, target
 
 
 def draw_review(ax, kind, result, review):

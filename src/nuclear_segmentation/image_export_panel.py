@@ -131,6 +131,10 @@ class ImageExportPanel(QWidget):
             button.clicked.connect(lambda _, value=checked: self._check_scientific_options(value))
             bulk.addWidget(button, 0, column)
         outputs.addLayout(bulk)
+        self.matched = QCheckBox("Matched quantification")
+        self.matched.setToolTip("Include automatic and reviewed associations, linked measurements and matched nuclear densities.")
+        self.matched.toggled.connect(self.scientific_options_changed)
+        outputs.addWidget(self.matched)
         provenance = QLabel("Every export includes scientific provenance JSON.")
         provenance.setWordWrap(True)
         outputs.addWidget(provenance)
@@ -331,11 +335,12 @@ class ImageExportPanel(QWidget):
         self._update_selection_state()
 
     def selected_scientific_outputs(self):
-        return tuple(key for key, field in self.scientific_options.items() if field.isChecked())
+        return tuple(key for key, field in self.scientific_options.items() if field.isChecked()) + (("matched",) if self.matched.isChecked() else ())
 
     def _check_scientific_options(self, checked: bool) -> None:
         for field in self.scientific_options.values():
             field.setChecked(checked)
+        self.matched.setChecked(checked and self.matched.isEnabled())
 
     def set_scientific_busy(self, busy: bool) -> None:
         self.scientific_options_section.content.setEnabled(not busy)

@@ -19,6 +19,7 @@ from .config import validate_config
 from .core import calibrated_label_tiff, safe_filename, safe_key, software_versions
 from .filtering import calculate_perinuclear_filter_keep
 from .geometry_edit import effective_masks
+from . import matched_quantification
 from .image_export import export_images
 from .manual_review import ManualReview
 from .normalization import mask_digest
@@ -53,6 +54,8 @@ def _write_scientific_package(namespace):
     namespace["manual_review"] = review
     try:
         execute_stage(namespace, "export")
+        if "matched" in export["outputs"]:
+            matched_quantification.write_package(destination, export["matched_snapshot"])
     except Exception:
         if namespace.get("export_directory_created"):
             rmtree(destination)
@@ -108,6 +111,10 @@ class ImageExportController(QObject):
 
     def bind_filtering(self, filtering) -> None:
         self.filtering = filtering
+        self.association_signals = (self.project_state.matching_result_changed, self.project_state.matching_selection_changed,
+                                    self.project_state.association_review_changed, self.project_state.inactive_session_validity_changed)
+        for signal in self.association_signals:
+            signal.connect(self.refresh_scientific)
         self.panel.scientific_button.clicked.connect(self.choose_scientific_directory)
         self.panel.scientific_options_changed.connect(self.refresh_scientific)
         self.project_state.quantification_result_changed.connect(self.refresh_scientific)
@@ -122,6 +129,11 @@ class ImageExportController(QObject):
             return "Scientific filtering is unavailable."
         if self.busy:
             return "An export is running."
+        if self.panel.matched.isChecked():
+            try:
+                matched_quantification.current_inputs(state)
+            except ValueError as error:
+                return str(error)
         if not self.panel.selected_scientific_outputs():
             return "Select at least one scientific export output."
         if not state.segmentation_is_current:
@@ -150,6 +162,12 @@ class ImageExportController(QObject):
     def refresh_scientific(self, *args) -> None:
         if self.filtering is None:
             return
+        try:
+            matched_quantification.current_inputs(self.project_state)
+            available = True
+        except ValueError:
+            available = False
+        self.panel.matched.setEnabled(available or self.panel.matched.isChecked())
         reason = self._scientific_unavailable()
         self.panel.scientific_button.setEnabled(not reason)
         self.panel.scientific_button.setToolTip(reason)
@@ -161,6 +179,8 @@ class ImageExportController(QObject):
                 raise ValueError(reason)
             state = self.project_state
             current = state.quantification_result
+            pair = state.matching_pair
+            matched_input = (pair.current_result, len(pair.review.events), pair.capture()) if self.panel.matched.isChecked() else None
             source = state.original_dataset
             sample = current["executed_segmentation_config"].get("CUSTOM_SAMPLE_NAME")
             destination = _choose_export_destination(
@@ -170,6 +190,8 @@ class ImageExportController(QObject):
                 return False
             if not state.quantification_is_current or state.quantification_result is not current:
                 raise ValueError("Scientific results changed while choosing the folder. Review and retry.")
+            if matched_input is not None and matched_input != (pair.current_result, len(pair.review.events), pair.capture()):
+                raise ValueError("Association inputs changed while choosing the folder. Review and retry.")
             return self.export_scientific(destination)
         except (ValueError, TypeError, KeyError) as error:
             self._scientific_status(f"Scientific export unavailable: {error}")
@@ -292,6 +314,8 @@ class ImageExportController(QObject):
                 },
             },
         }
+        if self.panel.matched.isChecked():
+            desktop_export["matched_snapshot"] = matched_quantification.export_snapshot(state)
         return dict(
             config,
             RUN_MODE="segment",
@@ -471,7 +495,7 @@ class ImageExportController(QObject):
     def _succeeded(self, path) -> None:
         details = self._pending or {}
         if details.get("scientific"):
-            components = ", ".join(SCIENTIFIC_OUTPUTS[key] for key in details["outputs"])
+            components = ", ".join(SCIENTIFIC_OUTPUTS.get(key, "Matched quantification") for key in details["outputs"])
             self.panel.set_results(
                 f"Destination: {path}\nComponents: {components}, scientific provenance JSON",
                 scientific_folder=path,
@@ -528,6 +552,8 @@ class ImageExportController(QObject):
 
     def dispose(self) -> None:
         if self.filtering is not None:
+            for signal in self.association_signals:
+                signal.disconnect(self.refresh_scientific)
             self.panel.scientific_button.clicked.disconnect(self.choose_scientific_directory)
             self.panel.scientific_options_changed.disconnect(self.refresh_scientific)
             self.project_state.quantification_result_changed.disconnect(self.refresh_scientific)

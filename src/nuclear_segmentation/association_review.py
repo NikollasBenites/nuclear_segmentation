@@ -88,3 +88,11 @@ class AssociationReview:
                                  nuclear_id=key[2], timestamp=datetime.now(timezone.utc).isoformat()))
                 return
         raise ValueError("No decision to undo for this pair.")
+
+
+def reviewed_outcomes(result, review):
+    for row in result.nuclei:
+        status = review.status(result, row.nuclear_id)
+        event = review.records.get(review.key(row.nuclear_id))
+        target = event["cytoplasmic_id"] if status == "Matched" else None
+        yield row, status, target
