@@ -6,7 +6,7 @@ from weakref import ReferenceType, ref
 
 from qtpy.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt, Signal
 from qtpy.QtWidgets import (
-    QAbstractItemView, QCheckBox, QHBoxLayout, QLabel, QPushButton, QTableView,
+    QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QLabel, QPushButton, QTableView,
     QVBoxLayout, QWidget,
 )
 
@@ -172,9 +172,12 @@ class AssociationExplorer(QWidget):
         self.awaiting_choice = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.multiple = QCheckBox("Only multiple associations")
-        self.multiple.setChecked(True)
-        layout.addWidget(self.multiple)
+        self.minimum_fraction = 0.0
+        self.accepted = QComboBox()
+        self.accepted.setAccessibleName("Accepted nuclear associations per cytoplasmic object")
+        self.accepted.addItems(["All retained objects", "Zero accepted nuclei", "One accepted nucleus", "Several accepted nuclei"])
+        self.accepted.setCurrentIndex(3)
+        layout.addWidget(self.accepted)
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -205,7 +208,7 @@ class AssociationExplorer(QWidget):
         layout.addWidget(self.follow)
         self.selection_changed.connect(self._candidate_controls)
         self.focus = QPushButton("Focus Selected Object")
-        self.review = QPushButton("Review in Proofreading")
+        self.review = QPushButton("Nuclear-guided Watershed…")
         self.isolate = QPushButton("Isolate Associated Masks")
         self.isolate.setToolTip("Show the selected cytoplasmic object and its accepted nuclei.")
         self.include = QCheckBox("Include other overlapping nuclei")
@@ -213,7 +216,7 @@ class AssociationExplorer(QWidget):
         for control in (self.focus, self.review, self.isolate, self.include, self.restore):
             layout.addWidget(control)
 
-        self.multiple.toggled.connect(self._filter)
+        self.accepted.currentIndexChanged.connect(self._filter)
         self.objects.model().sorted_rows.connect(self._restore_row)
         self.objects.selectionModel().currentRowChanged.connect(self._object_changed)
         self.objects.clicked.connect(self._object_clicked)
@@ -238,8 +241,8 @@ class AssociationExplorer(QWidget):
 
     def _filter(self):
         rows = self.index.objects.values() if self.index else ()
-        minimum = 2 if self.multiple.isChecked() else 0
-        self.objects.model().replace(r for r in rows if r.accepted_count >= minimum)
+        count = self.accepted.currentIndex()
+        self.objects.model().replace(r for r in rows if count == 0 or min(r.accepted_count, 2) == count - 1)
         self._restore_row()
 
     def clear_inspection(self, unavailable):
@@ -258,9 +261,17 @@ class AssociationExplorer(QWidget):
             self.clear_inspection(True)
             return
         rows = self.objects.model().rows
+        if not rows and self.selection is not None:
+            self.clear_inspection(True)
+            return
         if rows:
             selected = self.selection.cytoplasmic_id if self.selection else None
-            pos = next((i for i, r in enumerate(rows) if r.label_id == selected), 0)
+            pos = next((i for i, r in enumerate(rows) if r.label_id == selected), None)
+            if pos is None and selected is not None:
+                self.clear_inspection(True)
+                return
+            if pos is None:
+                pos = 0
             with QSignalBlocker(self.objects.selectionModel()):
                 self.objects.selectRow(pos)
             self._show_object(pos)
@@ -268,7 +279,7 @@ class AssociationExplorer(QWidget):
             self.selection = None
             self.candidates.model().replace(())
             if self.index:
-                message = ("No multiple associations." if self.multiple.isChecked()
+                message = ("No multiple associations." if self.accepted.currentIndex() == 3
                            else "No automatically linked cytoplasmic objects.")
                 result = self.index.result
                 if not result.nuclei or not result.associations:
@@ -328,8 +339,23 @@ class AssociationExplorer(QWidget):
         if self.selection and self.selection.cytoplasmic_id == cyto:
             self.selection_changed.emit()
             return
-        self.candidates.model().replace(self.index.candidates(cyto))
+        self._replace_candidates(cyto)
         self._select("cytoplasmic", cyto)
+
+    def _replace_candidates(self, cyto):
+        self.candidates.model().replace(row for row in self.index.candidates(cyto)
+                                        if row.nuclear_fraction >= self.minimum_fraction)
+
+    def set_display_fraction(self, fraction):
+        self.minimum_fraction = fraction
+        selected = self.selection
+        if selected:
+            self._replace_candidates(selected.cytoplasmic_id)
+            if selected.focus_role == "nuclear":
+                if any(row.label_id == selected.focus_id for row in self.candidates.model().rows):
+                    self._restore_candidate()
+                else:
+                    self.focus_parent()
 
     def _candidate_changed(self, current, previous):
         if current.isValid():
@@ -345,5 +371,5 @@ class AssociationExplorer(QWidget):
             return
         self.selection = AssociationSelection(
             ref(result), result.statistics.population_identity, cyto, self.index.objects[cyto].associated_ids,
-            tuple(row.label_id for row in self.candidates.model().rows if not row.accepted_here), role, label)
+            tuple(row.label_id for row in self.index.candidates(cyto) if not row.accepted_here), role, label)
         self.selection_changed.emit()

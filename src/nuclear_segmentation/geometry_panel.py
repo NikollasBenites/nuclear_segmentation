@@ -731,7 +731,8 @@ class GeometryPanel(CollapsibleSection):
         layer.n_edit_dimensions = 2
         self._dimensions()
         self.locked = []
-        for control in (window.navigation, window.open_image_action,
+        for control in (window.navigation.stage_bar, window.navigation.subpages, window.review_mode,
+                        window.session_selector, window.open_image_action,
                         window.close_project_action, window.restore_layout_action, window.reset_layout_action,
                         *window.project_actions, window.import_legacy_action, review.show_raw_button,
                         review.show_all_button, review.show_selected_button):

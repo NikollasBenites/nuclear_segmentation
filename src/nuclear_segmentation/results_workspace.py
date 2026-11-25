@@ -109,6 +109,12 @@ class ResultsWorkspace(QTabWidget):
             view.setDocument(editor.document())
             page(key, title, view, stages)
 
+        for table in (matching.table, matching.explorer.objects, matching.explorer.candidates,
+                      matching.candidate_explorer.objects, matching.candidate_explorer.candidates):
+            model = table.model()
+            for column in range(model.columnCount()):
+                title = model.headerData(column, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole)
+                table.setColumnWidth(column, max(86, table.fontMetrics().horizontalAdvance(title) + 30))
         self.currentChanged.connect(self._remember)
         for signal in (state.changed, state.active_session_changed, state.filtering_result_changed,
                        state.quantification_result_changed, state.scientific_roi_changed):

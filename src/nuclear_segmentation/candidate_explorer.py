@@ -7,6 +7,7 @@ from qtpy.QtCore import QModelIndex, QItemSelectionModel, QSignalBlocker, Signal
 from qtpy.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QLabel, QPushButton,
                             QVBoxLayout, QWidget)
 
+from .association_review import STATES
 from .matching_explorer import ResultSelection, inspection_table
 
 
@@ -54,7 +55,17 @@ class CandidateExplorer(QWidget):
         self.focus_role = "nuclear"
         form = QVBoxLayout(self)
         form.setContentsMargins(0, 0, 0, 0)
+        self.minimum_fraction = 0.0
+        self.accepted = QComboBox()
+        self.accepted.setAccessibleName("Accepted cytoplasmic association")
+        self.accepted.addItems(["Any accepted count", "Zero accepted", "One accepted"])
+        self.review_filter = QComboBox()
+        self.review_filter.setAccessibleName("Manual review status")
+        self.review_filter.addItems(["All review states", *STATES, "Requires Review"])
+        form.addWidget(self.accepted)
+        form.addWidget(self.review_filter)
         self.classes = QComboBox()
+        self.classes.setAccessibleName("Automatic classification")
         self.classes.addItems(["All classes", "MATCH", "AMBIGUOUS", "NO_MATCH"])
         form.addWidget(self.classes)
         self.multiple = QCheckBox("Only multiple candidates")
@@ -81,10 +92,12 @@ class CandidateExplorer(QWidget):
         self.isolate = QCheckBox("Isolate nucleus and candidates")
         self.summary = QLabel("Run automatic matching to inspect candidate masks.")
         self.summary.setWordWrap(True)
-        self.review = QPushButton("Review Merge in Proofreading")
+        self.review = QPushButton("Guided Merge…")
         for widget in (self.follow, self.focus, self.isolate, self.summary, self.review):
             form.addWidget(widget)
         self.review.setEnabled(False)
+        self.accepted.currentIndexChanged.connect(self._filter)
+        self.review_filter.currentIndexChanged.connect(self._filter)
         self.multiple.toggled.connect(self._filter)
         self.classes.currentIndexChanged.connect(self._filter)
         self.objects.model().sorted_rows.connect(self._restore_nucleus)
@@ -122,6 +135,11 @@ class CandidateExplorer(QWidget):
         rows = []
         for r in self.result.nuclei if self.result else ():
             ids = self.by_nucleus[r.nuclear_id]
+            count = self.accepted.currentIndex()
+            if count and count - 1 != int(r.accepted_cytoplasmic_id is not None):
+                continue
+            if self.review_filter.currentIndex() and self.decisions.status(self.result, r.nuclear_id) != self.review_filter.currentText():
+                continue
             if (not self.multiple.isChecked() or len(ids) >= 2) and self.classes.currentText() in ("All classes", r.auto_class):
                 rows.append((r.nuclear_id, r.auto_class, len(ids), tuple(sorted(ids))))
         self.objects.model().replace(rows)
@@ -139,7 +157,12 @@ class CandidateExplorer(QWidget):
             self.clear_inspection(True)
             return
         rows = self.objects.model().rows
-        pos = next((i for i, r in enumerate(rows) if r[0] == self.nucleus), 0)
+        pos = next((i for i, r in enumerate(rows) if r[0] == self.nucleus), None)
+        if pos is None and self.nucleus is not None:
+            self.clear_inspection(True)
+            return
+        if pos is None:
+            pos = 0
         with QSignalBlocker(self.objects.selectionModel()):
             self.objects.selectRow(pos)
         self._object_changed(self.objects.currentIndex())
@@ -158,16 +181,30 @@ class CandidateExplorer(QWidget):
             self.changed.emit()
             return
         self.nucleus = nucleus
+        self._replace_candidates()
+        self._selection_changed()
+
+    def set_display_fraction(self, fraction):
+        self.minimum_fraction = fraction
+        if self.nucleus is not None:
+            selected = self.selection()
+            focus = self.focus_id if self.focus_role == "cytoplasmic" else None
+            self._replace_candidates()
+            visible = {row[0] for row in self.candidates.model().rows}
+            self.restore_candidates(selected.ids, focus if focus in visible else None)
+
+    def _replace_candidates(self):
         rows = []
         if self.nucleus is not None:
             stats = self.result.statistics
             for cyto, count in self.by_nucleus[self.nucleus].items():
+                if count / stats.nuclear_voxels[self.nucleus] < self.minimum_fraction:
+                    continue
                 linked = self.linked[cyto]
                 rows.append((cyto, count, count / stats.nuclear_voxels[self.nucleus],
                              stats.cytoplasmic_voxels[cyto] * stats.voxel_volume_um3,
                              tuple(n for n in linked if n != self.nucleus)))
         self.candidates.model().replace(rows)
-        self._selection_changed()
 
     def _save_candidate_selection(self):
         selection = self.selection()

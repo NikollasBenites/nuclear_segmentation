@@ -21,6 +21,7 @@ class WorkspaceSnapshot:
     navigation_visible: bool
     context_visible: bool
     workflow: str
+    manual_review: bool = False
     results_visible: bool = False
     results_height: int = 210
     results_tab: str = ""
@@ -81,6 +82,7 @@ class WorkspaceSettings:
                 self._key(slot, "context_visible"), True, type=bool
             ),
             workflow=workflow,
+            manual_review=self.settings.value(self._key(slot, "manual_review"), False, type=bool),
             results_visible=self.settings.value(self._key(slot, "results_visible"), False, type=bool),
             results_height=self.settings.value(self._key(slot, "results_height"), 210, type=int),
             results_tab=str(self.settings.value(self._key(slot, "results_tab"), "")),
@@ -100,6 +102,7 @@ class WorkspaceSettings:
             "navigation_visible": snapshot.navigation_visible,
             "context_visible": snapshot.context_visible,
             "workflow": snapshot.workflow,
+            "manual_review": snapshot.manual_review,
             "results_visible": snapshot.results_visible,
             "results_height": snapshot.results_height,
             "results_tab": snapshot.results_tab,

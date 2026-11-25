@@ -6,7 +6,7 @@ from weakref import ref
 import numpy as np
 from qtpy.QtCore import QAbstractTableModel, QModelIndex, QObject, QSignalBlocker, Qt, Signal
 from qtpy.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QLabel, QLineEdit, QProgressBar, QPushButton, QSpinBox,
     QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
@@ -129,13 +129,13 @@ class MatchingPanel(QWidget):
             visualization.addWidget(opacity)
         self.class_colors = QCheckBox("Color nuclei by automatic class")
         visualization.addWidget(self.class_colors)
-        visualization.addWidget(QLabel("Click to inspect"))
         self.pick_target = QComboBox()
         self.pick_target.setAccessibleName("Mask selection target")
         self.pick_target.addItems(["Nuclear", "Cytoplasmic"])
-        visualization.addWidget(self.pick_target)
         self.selection_status = self._note(root)
-        automatic = self._section(root, "automatic", "Automatic Matching")
+        self.manual_outcome = self._note(root)
+        self.manual_outcome.setAccessibleName("Manual review status and final target")
+        automatic = self._section(root, "automatic", "Scientific matching thresholds")
         self.total_minimum = self._fraction(automatic, "Minimum total overlap fraction")
         self.minimum = self._fraction(automatic, "Minimum best overlap fraction")
         self.maximum = self._fraction(automatic, "Maximum second-best overlap fraction")
@@ -159,13 +159,34 @@ class MatchingPanel(QWidget):
         results.addWidget(self.table)
         self.graphs = QPushButton("Show Matching Graphs")
         results.addWidget(self.graphs)
-        associations = self._section(root, "associations", "Multiple Associations")
+        associations = self._section(root, "associations", "Association Explorer")
         self.explorer = AssociationExplorer()
         self.explorer_mode = QComboBox()
         self.explorer_mode.setAccessibleName("Association explorer")
-        self.explorer_mode.addItems(["Multiple Associations", "Multiple Cytoplasmic Candidates"])
+        self.explorer_mode.addItems(["Cytoplasmic-first", "Nuclear-first"])
+        associations.addWidget(QLabel("Inspect objects by"))
         associations.addWidget(self.explorer_mode)
+        associations.addWidget(QLabel("Direct mask selection target"))
+        associations.addWidget(self.pick_target)
+        self.cross_correction = QPushButton()
+        self.cross_correction.hide()
+        self.edit_selected = QPushButton("Edit selected geometry…")
+        self.review_selected = QPushButton("Review association…")
+        associations.addWidget(self.edit_selected)
+        associations.addWidget(self.cross_correction)
+        associations.addWidget(self.review_selected)
         self.candidate_explorer = CandidateExplorer()
+        self.display_overlap = QDoubleSpinBox()
+        self.display_overlap.setRange(0, 100)
+        self.display_overlap.setSuffix(" %")
+        self.display_overlap.setAccessibleName("Minimum candidate overlap for display only")
+        self.display_overlap.setToolTip("Fraction of the complete nucleus. Filters candidate rows only.")
+        advanced = self._section(associations, "candidate_display", "Candidate display filter")
+        advanced.addWidget(QLabel("Minimum overlap shown (% of nucleus)"))
+        advanced.addWidget(self.display_overlap)
+
+        self.display_overlap.valueChanged.connect(lambda value: self.explorer.set_display_fraction(value / 100))
+        self.display_overlap.valueChanged.connect(lambda value: self.candidate_explorer.set_display_fraction(value / 100))
         pages = QStackedWidget()
         pages.addWidget(self.explorer)
         pages.addWidget(self.candidate_explorer)
@@ -174,6 +195,17 @@ class MatchingPanel(QWidget):
         self.defaults.clicked.connect(self.reset_thresholds)
         root.addStretch(1)
         self.reset_appearance()
+        self.sections = {s.key: s for s in self.findChildren(CollapsibleSection)}
+        self.sections["candidate_display"].set_expanded(False, emit=False)
+        self._inspecting = False
+
+    def present_result(self, current):
+        if current != self._inspecting:
+            self._inspecting = current
+            for key in ("nuclear", "cytoplasmic", "automatic", "compatibility"):
+                self.sections[key].set_expanded(not current)
+            self.sections["results"].set_expanded(False)
+            self.sections["associations"].set_expanded(current)
 
     @staticmethod
     def _fraction(layout, title):
@@ -265,7 +297,7 @@ class MatchingDisplay(QObject):
         panel.candidate_explorer.changed.connect(self.render)
         panel.candidate_explorer.focus_requested.connect(self._focus_candidate)
         panel.candidate_explorer.navigated.connect(self._candidate_navigated)
-        state.association_review_changed.connect(panel.candidate_explorer._selection_changed)
+        state.association_review_changed.connect(self._review_changed)
         self.execution = MatchingExecution(state, self)
         self.execution.changed.connect(self.refresh)
         self.execution.progress_changed.connect(self._progress)
@@ -288,6 +320,14 @@ class MatchingDisplay(QObject):
             panel.visibility[role].toggled.connect(lambda visible, role=role: self._set_visible(role, visible))
             panel.opacity[role].valueChanged.connect(lambda value, role=role: self._set_opacity(role, value))
 
+    def _review_changed(self):
+        ui = self.panel.candidate_explorer
+        if ui.review_filter.currentIndex():
+            ui._filter()
+        else:
+            ui._selection_changed()
+        self.render()
+
     def set_active(self, active):
         if self._active == active:
             return
@@ -303,6 +343,7 @@ class MatchingDisplay(QObject):
             self.panel.candidate_explorer.set_result(None, self._pair.review)
             self.panel.candidate_explorer.isolate.setChecked(False)
             self.panel.selection_status.clear()
+            self.panel.manual_outcome.clear()
             self.legend_changed.emit(None)
 
     def proofreading_target(self):
@@ -410,7 +451,10 @@ class MatchingDisplay(QObject):
             if nuclear and ui.classes.currentText() not in ("All classes", index.nuclei[label].auto_class):
                 ui.classes.setCurrentIndex(0)
             if not any(row[0] == label for row in ui.objects.model().rows):
-                ui.multiple.setChecked(False)
+                ui.accepted.setCurrentIndex(0)
+                if nuclear:
+                    ui.review_filter.setCurrentIndex(0)
+                    ui.multiple.setChecked(False)
             pos = next(i for i, row in enumerate(ui.objects.model().rows) if row[0] == label)
             ui.objects.selectRow(pos)
             if nuclear:
@@ -472,6 +516,7 @@ class MatchingDisplay(QObject):
         else:
             index = None
         message = ""
+        outcome = ""
         if focus:
             role, label = focus
             marks = relationships(index, role, label)
@@ -484,7 +529,12 @@ class MatchingDisplay(QObject):
                     isolated[pop].add(obj)
             if role == "nuclear":
                 row = index.nuclei[label]
+                review = self._pair.review
+                status = review.status(index.result, label)
+                record = review.records.get(review.key(label))
+                final = record["cytoplasmic_id"] if status == "Matched" else "—"
                 message = f"Nucleus {label} · {row.auto_class} · {row.classification_reason}"
+                outcome = f"Manual: {status} · Final target: {final}"
             else:
                 message = f"Cytoplasmic object {label} · {index.objects[label].accepted_count} accepted nuclei"
         if focus:
@@ -492,7 +542,19 @@ class MatchingDisplay(QObject):
             self._unavailable = ""
         message = message or self._unavailable
         self._isolated_ids = isolated
+        # Offer the opposite inspection direction when it has an applicable correction.
+        cross = self.panel.cross_correction
+        use_watershed = bool(focus and focus[0] == "cytoplasmic" and self.panel.explorer_mode.currentIndex() == 1)
+        use_merge = bool(focus and focus[0] == "nuclear" and self.panel.explorer_mode.currentIndex() == 0
+                         and len(index.by_nucleus[focus[1]]) >= 2)
+        cross.setVisible(use_watershed or use_merge)
+        if use_watershed or use_merge:
+            cross.setText(f"Nuclear-guided Watershed · {focus[1]}" if use_watershed else f"Inspect merge candidates · {focus[1]}")
+        self.panel.edit_selected.setEnabled(bool(focus and index))
+        self.panel.review_selected.setEnabled(bool(index))
         self.panel.selection_status.setText(message)
+        self.panel.manual_outcome.setText(outcome)
+        self.panel.manual_outcome.setVisible(bool(outcome))
         self.legend_changed.emit(message if index or message else None)
         table = self.panel.table
         with QSignalBlocker(table.selectionModel()):
@@ -580,7 +642,7 @@ class MatchingDisplay(QObject):
             self._unavailable = ""
             self._stop_showing()
             self.panel.explorer.set_result(None, "Run automatic matching to inspect associations.")
-            self.panel.explorer.multiple.setChecked(True)
+            self.panel.explorer.accepted.setCurrentIndex(3)
             self.panel.explorer.include.setChecked(False)
             self._pair = self.state.matching_pair
             self._requested = False
@@ -632,6 +694,7 @@ class MatchingDisplay(QObject):
                 (loc.preferences if loc else self._default_preferences).apply(self.panel)
                 self.panel.candidate_explorer.isolate.setChecked(False)
             self._show_results(pair, result)
+            self.panel.present_result(result is not None)
             explorer.set_result(result, self.panel.result_status.text())
             self.panel.candidate_explorer.set_result(result, self._pair.review)
             if changed and result:
@@ -794,7 +857,7 @@ class MatchingDisplay(QObject):
         self.set_active(False)
         self.panel.explorer.set_result(None, "Matching results unavailable.")
         self.panel.candidate_explorer.set_result(None, self._pair.review)
-        self.state.association_review_changed.disconnect(self.panel.candidate_explorer._selection_changed)
+        self.state.association_review_changed.disconnect(self._review_changed)
         for signal in self._state_signals:
             signal.disconnect(self.refresh)
         self.viewer.layers.events.removed.disconnect(self._removed)

@@ -69,7 +69,7 @@ class TableView:
 @dataclass(frozen=True)
 class ExplorerPreferences:
     mode: int
-    multiple_parents: bool
+    parent_count: int
     include: bool
     follow_parent: bool
     multiple_nuclei: bool
@@ -77,19 +77,26 @@ class ExplorerPreferences:
     follow_nucleus: bool
     pick_target: int
     tables: tuple
+    nucleus_count: int
+    review_state: int
+    overlap_percent: float
 
     @classmethod
     def capture(cls, panel):
         a, c = panel.explorer, panel.candidate_explorer
-        return cls(panel.explorer_mode.currentIndex(), a.multiple.isChecked(), a.include.isChecked(),
+        return cls(panel.explorer_mode.currentIndex(), a.accepted.currentIndex(), a.include.isChecked(),
                    a.follow.isChecked(), c.multiple.isChecked(), c.classes.currentText(), c.follow.isChecked(),
-                   panel.pick_target.currentIndex(), tuple(TableView.capture(t) for t in tables(panel)))
+                   panel.pick_target.currentIndex(), tuple(TableView.capture(t) for t in tables(panel)),
+                   c.accepted.currentIndex(), c.review_filter.currentIndex(), panel.display_overlap.value())
 
     def apply(self, panel):
         a, c = panel.explorer, panel.candidate_explorer
         panel.explorer_mode.setCurrentIndex(self.mode)
         panel.pick_target.setCurrentIndex(self.pick_target)
-        a.multiple.setChecked(self.multiple_parents)
+        a.accepted.setCurrentIndex(self.parent_count)
+        c.accepted.setCurrentIndex(self.nucleus_count)
+        c.review_filter.setCurrentIndex(self.review_state)
+        panel.display_overlap.setValue(self.overlap_percent)
         a.include.setChecked(self.include)
         a.follow.setChecked(self.follow_parent)
         c.multiple.setChecked(self.multiple_nuclei)

@@ -47,6 +47,7 @@ from .series_browser import ImageSeriesBrowser
 from . import association_checkpoint
 from .association_panel import AssociationPanel
 from .matching_panel import MatchingDisplay
+from .matching_navigation import SpatialView
 from .session_display import SessionMaskDisplay
 from .segmentation_execution import SegmentationController
 from .filtering_workspace import FilteringController
@@ -279,10 +280,16 @@ class DesktopWindow(QMainWindow):
         self.geometry_panel = GeometryPanel(self, review_panel)
         self.association_panel = AssociationPanel(self)
         review_panel.proofreading_page.layout().insertWidget(1, self.association_panel)
+        self.navigation.tools.insertWidget(2, self.association_panel.appearance_section)
+        self.association_panel.expanded_changed.connect(self._manual_section_changed)
         self.project_state.association_review_changed.connect(self._mark_project_dirty)
         self.project_state.matching_result_changed.connect(self._mark_project_dirty)
         self.context_panel.matching_page.candidate_explorer.review.clicked.connect(self.geometry_panel.handoff_merge)
         self.context_panel.matching_page.explorer.review.clicked.connect(self.geometry_panel.guided.handoff)
+        matching = self.context_panel.matching_page
+        matching.cross_correction.clicked.connect(self._inspect_correction)
+        matching.edit_selected.clicked.connect(lambda: self._choose_review_mode(1))
+        matching.review_selected.clicked.connect(lambda: self._choose_review_mode(2))
         self.mask_context_menu = MaskContextMenu(self)
         self.mask_selection.selection_changed.connect(self._mask_selection_changed)
         self.segmentation.conflict_operations += (self.geometry_panel,)
@@ -372,8 +379,8 @@ class DesktopWindow(QMainWindow):
         layout.addWidget(header)
         self.review_mode = QComboBox()
         self.review_mode.setAccessibleName("Review and proofreading mode")
-        self.review_mode.addItems(["Associations", "Geometry Editing"])
-        self.review_mode.activated.connect(lambda i: self.set_workflow("proofreading" if i else "matching"))
+        self.review_mode.addItems(["Associations", "Geometry Editing", "Manual Association Review"])
+        self.review_mode.activated.connect(self._choose_review_mode)
         layout.addWidget(self.review_mode)
         layout.addWidget(self.navigation.subpages)
         layout.addWidget(self.context_panel, 1)
@@ -404,7 +411,9 @@ class DesktopWindow(QMainWindow):
                                     if section.key == "visualization")
         self.pair_appearance.header.setText("Association display")
         self.pair_appearance.set_expanded(False)
-        tools.insertWidget(3, self.pair_appearance)
+        tools.insertWidget(1, self.navigation.legend)
+        tools.insertWidget(2, self.pair_appearance)
+        self.image_display_panel.section.set_expanded(False)
         tools.addWidget(self.selected_mask_panel)
         tools.addStretch(1)
         return container
@@ -1524,10 +1533,42 @@ class DesktopWindow(QMainWindow):
             self.mask_display.sync(restore_selection=True)
             self._release_comparisons()
 
-    def set_workflow(self, key: str, *, transfer_inspection=True) -> None:
+    def _inspect_correction(self):
+        target = self.matching_display.proofreading_target()
+        if target is None:
+            return
+        _, role, label, _ = target
+        self.matching_display.select_object(role, label)
+        if role == "cytoplasmic":
+            self.geometry_panel.guided.handoff()
+        else:
+            self.toggle_results_action.setChecked(True)
+            self.results.setCurrentWidget(self.results.pages["candidates"])
+
+    def _choose_review_mode(self, mode):
+        if self.geometry_panel.busy and mode != 1:
+            self.review_mode.setCurrentIndex(1)
+            self.statusBar().showMessage("Save or discard the geometry preview before changing mode.", 5000)
+            return
+        self.set_workflow("matching" if mode == 0 else "proofreading", manual=mode == 2)
+
+    def _manual_section_changed(self, _, expanded):
+        if self.navigation.current_workflow == "proofreading" and expanded and self.review_mode.currentIndex() != 2:
+            self._choose_review_mode(2)
+
+    def set_workflow(self, key: str, *, transfer_inspection=True, manual=False) -> None:
         if key == "matching" and self.geometry_panel.busy:
             return
-        target = self.matching_display.proofreading_target() if key == "proofreading" and transfer_inspection else None
+        review = self.association_panel
+        view = None
+        target = None
+        if key == "proofreading" and transfer_inspection:
+            view = SpatialView.capture(self.embedding.viewer)
+            if not manual:
+                target = self.matching_display.proofreading_target() or review.editing_target(review.focus_role)
+        if not manual:
+            review.set_expanded(False, emit=False)
+            review.restore()
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
         if key != "matching":
@@ -1545,8 +1586,18 @@ class DesktopWindow(QMainWindow):
             self.matching_display.location().view.restore(self.embedding.viewer)
         reviewing = key in {"matching", "proofreading"}
         self.review_mode.setVisible(reviewing)
-        self.review_mode.setCurrentIndex(int(key == "proofreading"))
+        self.review_mode.setCurrentIndex(2 if manual else int(key == "proofreading"))
+        editing = self.context_panel.mask_review_page.proofreading_page
+        for i in range(editing.layout().count()):
+            widget = editing.layout().itemAt(i).widget()
+            if widget is not None:
+                widget.setVisible(manual if widget is review else not manual)
+        if manual:
+            review.set_expanded(True)
+        if view is not None:
+            view.restore(self.embedding.viewer)
         self.pair_appearance.setVisible(key == "matching")
+        review.appearance_section.setVisible(manual)
         self.context_title.setText("Review & Proofreading" if reviewing else self.context_panel.workflow_title)
         if self.graph_window.isVisible() and key not in {"quality_control", "matching"}:
             self.graph_window.close()
@@ -1555,7 +1606,7 @@ class DesktopWindow(QMainWindow):
         if key == "quality_control" or (key == "matching" and first_visit):
             self.toggle_results_action.setChecked(True)
         self._refresh_progress()
-        label = self.context_panel.workflow_label
+        label = self.review_mode.currentText() if reviewing else self.context_panel.workflow_label
         if hasattr(self, "workflow_status"):
             self.workflow_status.setText(f"Workflow: {label}")
         if hasattr(self, "header_workflow"):
@@ -1624,6 +1675,7 @@ class DesktopWindow(QMainWindow):
             navigation_collapsed=self.navigation.collapsed,
             navigation_visible=self.toggle_navigation_action.isChecked(),
             context_visible=self.toggle_context_action.isChecked(),
+            manual_review=self.review_mode.currentIndex() == 2,
             results_visible=self.toggle_results_action.isChecked(),
             results_height=self.results_height if self.results.isHidden() else self.results.height(),
             results_tab=self.results.tabText(self.results.currentIndex()),
@@ -1651,7 +1703,7 @@ class DesktopWindow(QMainWindow):
         if len(snapshot.splitter_sizes) == 3 and sum(snapshot.splitter_sizes) > 0:
             self.splitter.setSizes(list(snapshot.splitter_sizes))
         self.navigation.restore_subpages(snapshot.workflow_subpages)
-        self.set_workflow(snapshot.workflow)
+        self.set_workflow(snapshot.workflow, transfer_inspection=False, manual=snapshot.manual_review and snapshot.workflow == "proofreading")
         self._restore_results(snapshot)
         self.context_panel.project_page.set_section_states(snapshot.project_sections)
         states = dict(snapshot.proofreading_sections)

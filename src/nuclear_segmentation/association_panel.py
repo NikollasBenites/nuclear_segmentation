@@ -57,19 +57,22 @@ class AssociationPanel(CollapsibleSection):
         self.follow = QCheckBox("Follow selected object")
         self.follow.setChecked(True)
         form.addWidget(self.follow)
+        self.appearance_section = CollapsibleSection("manual_display", "Manual review display", expanded=False)
+        appearance = QVBoxLayout()
+        self.appearance_section.set_content_layout(appearance)
         self.visibility, self.opacity = {}, {}
         for role in MATCHING_ROLES:
-            self.styles[role] = appearance_control(form, role)
+            self.styles[role] = appearance_control(appearance, role)
             self.styles[role].currentIndexChanged.connect(self._render)
             visible = self.visibility[role] = QCheckBox(f"Show {role} masks")
             visible.setChecked(True)
-            form.addWidget(visible)
+            appearance.addWidget(visible)
             opacity = self.opacity[role] = QSpinBox()
             opacity.setRange(0, 100)
             opacity.setValue(60)
             opacity.setPrefix(f"{role.title()} opacity ")
             opacity.setSuffix("%")
-            form.addWidget(opacity)
+            appearance.addWidget(opacity)
             visible.toggled.connect(self._appearance)
             opacity.valueChanged.connect(self._appearance)
         button("Focus nucleus", lambda: self.inspect(False, self.isolation.isChecked()))
@@ -82,9 +85,11 @@ class AssociationPanel(CollapsibleSection):
         self.comment = QLineEdit()
         self.comment.setPlaceholderText("Reviewer comment")
         form.addWidget(self.comment)
-        button("Confirm automatic match", lambda: self.save(True))
-        button("Record manual decision", lambda: self.save(False))
-        button("Undo last decision", self.undo)
+        self.confirm_button = button("Confirm automatic match", lambda: self.save(True))
+        self.record_button = button("Record manual decision", lambda: self.save(False))
+        self.undo_button = button("Undo last decision", self.undo)
+        self.decision.currentIndexChanged.connect(self._decision_actions)
+        self._decision_actions()
         self.classes.currentIndexChanged.connect(self._filter_changed)
         self.filter.currentIndexChanged.connect(self._filter_changed)
         self.nuclei.currentIndexChanged.connect(self._choose_nucleus)
@@ -150,7 +155,7 @@ class AssociationPanel(CollapsibleSection):
             index = self.nuclei.findText(selected)
             if unavailable or parent_only is not None:
                 self.nuclei.setCurrentIndex(-1)
-            elif index >= 0:
+            elif index >= 0 or selected:
                 self.nuclei.setCurrentIndex(index)
         pair = self.review.key(None)[:2]
         self.absent_count = sum(1 for key in self.review.records if key[:2] == pair
@@ -174,7 +179,18 @@ class AssociationPanel(CollapsibleSection):
             if self.display_result is not None:
                 self.window.navigation.set_legend("proofreading", message)
 
+    def _decision_actions(self):
+        current = self.result is not None and self.result is self.state.matching_pair.current_result
+        text = self.nuclei.currentText()
+        row = self.index.nuclei.get(int(text)) if current and text else None
+        target = self.targets.currentText()
+        valid_target = bool(current and target.isdecimal() and int(target) in self.result.associations)
+        self.confirm_button.setEnabled(row is not None and row.accepted_cytoplasmic_id is not None)
+        self.record_button.setEnabled(row is not None and (self.decision.currentText() != "Matched" or valid_target))
+        self.undo_button.setEnabled(any(key[:2] == self.review.key(None)[:2] for _, key, _ in self.review.stack))
+
     def _target_changed(self):
+        self._decision_actions()
         self.focus_role = "cytoplasmic"
         self._render(focus=self.focus_role if self.follow.isChecked() else None)
 
@@ -193,6 +209,7 @@ class AssociationPanel(CollapsibleSection):
                       if getattr(self, "absent_count", 0) else "")
             if not self.nuclei.currentText():
                 self.message.setText(("No nuclei in this view." + absent) if self.result else "Run automatic matching for a measured pair.")
+                self._decision_actions()
                 self._render()
                 return
             label = int(self.nuclei.currentText())
@@ -203,22 +220,27 @@ class AssociationPanel(CollapsibleSection):
             record = self.review.records.get(self.review.key(label))
             status = self.review.status(self.result, label)
             self.message.setText(f"Automatic {row.auto_class} ({row.classification_reason}) · "
-                                 f"best {row.best_cytoplasmic_id} · manual {status}{absent}")
+                                 f"automatic target {row.accepted_cytoplasmic_id or '—'} · manual {status} · "
+                                 f"final target {record['cytoplasmic_id'] if status == 'Matched' else '—'}{absent}")
             if record:
                 self.comment.setText(record["comment"])
                 if status != "Requires Review":
                     self.decision.setCurrentText(status)
                     if record["cytoplasmic_id"] is not None:
                         self.targets.setCurrentText(str(record["cytoplasmic_id"]))
+        self._decision_actions()
         self._render(focus="nuclear" if self.follow.isChecked() else None)
 
-    def editing_target(self):
+    def editing_target(self, role=None):
         """Resolve the reviewed IDs against the session that owns the new transaction."""
         if self.display_result is None or self.result is not self.state.matching_pair.current_result:
             return None
         pair = self.state.matching_pair
-        role = self.state.active_session.scientific_role
-        if role not in MATCHING_ROLES or pair.session_id(role) != self.state.active_session_id:
+        if role is None:
+            role = self.state.active_session.scientific_role
+            if pair.session_id(role) != self.state.active_session_id:
+                return None
+        if role not in MATCHING_ROLES:
             return None
         nucleus = int(self.nuclei.currentText()) if self.nuclei.currentText() else None
         text = self.targets.currentText()

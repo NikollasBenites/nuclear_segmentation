@@ -58,7 +58,7 @@ def test_sparse_tables_filter_sort_and_candidate_selection(qapp):
     cell = candidates.index(1, 5)
     assert cell.data() == "90.00%" and cell.data(Qt.ItemDataRole.UserRole) == .9
     assert ui.selection == selected and ui.candidates.currentIndex().row() == 3
-    ui.multiple.setChecked(False)
+    ui.accepted.setCurrentIndex(0)
     assert ui.selection == selected and len(model.rows) == 3
     ui.objects.sortByColumn(1, Qt.SortOrder.AscendingOrder)
     assert [row[0] for row in model.rows] == [CYTO + 2, CYTO + 1, CYTO]
@@ -344,7 +344,7 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
         display.show()
         n, c = display.layers["nuclear"], display.layers["cytoplasmic"]
         ui.isolate.click()
-        ui.multiple.setChecked(False)
+        ui.accepted.setCurrentIndex(0)
         ui.next.click()
         assert ui.selection.cytoplasmic_id == 23 and ui.selection.associated_ids == (13,)
         np.testing.assert_allclose(n.colormap.map(13), COLORS["MATCH"])
@@ -478,7 +478,7 @@ def test_zero_link_inspection(qapp):
     result = population()
     cyto = AssociationExplorer()
     cyto.set_result(result, "")
-    cyto.multiple.setChecked(False)
+    cyto.accepted.setCurrentIndex(0)
     cyto.objects.selectRow(2)
     assert cyto.selection.cytoplasmic_id == CYTO + 2 and cyto.selection.associated_ids == ()
     assert relationships(cyto.index, "cytoplasmic", CYTO + 2) == {("cytoplasmic", CYTO + 2): "selected"}
@@ -551,7 +551,8 @@ def test_picking_disjoint_populations(window_pair):
         click_mask(display, world)
         assert set(display.renderer.marks) == {(role, 7)}
         ui = panel.explorer if role == "cytoplasmic" else panel.candidate_explorer
-        assert ui.candidates.model().rowCount() == 0 and not ui.multiple.isChecked()
+        assert ui.candidates.model().rowCount() == 0
+        assert ui.accepted.currentIndex() == 0 if role == "cytoplasmic" else not ui.multiple.isChecked()
         assert ui.objects.currentIndex().siblingAtColumn(0).data() == "7"
         ui.isolate.click()
         if role == "cytoplasmic":
