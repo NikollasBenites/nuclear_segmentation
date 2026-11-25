@@ -210,7 +210,7 @@ def inspection_pair(window):
         state.select_session(session.session_id)
         ids = tuple(map(int, np.unique(labels)[1:]))
         state.set_segmentation_result(dict(state.segmentation_result, masks=labels,
-                                           mask_shape=labels.shape, object_count=len(ids)))
+                                           mask_shape=labels.shape, object_count=len(ids), maximum_label_id=max(ids)))
         measured = calculate_filtering_prerequisites(state, state.segmentation_result["scientific_config"])
         window.filtering._calculated(dict(measured, retained_ids=ids, retained_count=len(ids), filtered_masks=labels))
     return nuclear, cytoplasmic
@@ -248,6 +248,12 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
         panel.visibility["cytoplasmic"].setChecked(False)
         for dimensions in (2, 3, 2):
             assert window.viewer_toolbar.set_ndisplay(dimensions)
+            ui._object_clicked(ui.objects.currentIndex())
+            ui.focus.click()
+            parent_highlight = display.inspection.highlight
+            assert parent_highlight is not None and not parent_highlight.editable
+            assert parent_highlight.data.sum() == (c.data == 99).sum()
+            assert not c.visible and state.active_session_id == active
             ui.isolate.click()
             assert n.visible and c.visible and ui.restore.isEnabled()
             assert not n.editable and not c.editable
@@ -256,6 +262,12 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
             np.testing.assert_allclose(c.colormap.map(23), (0, 0, 0, 0))
             ui.candidates.selectRow(3)
             ui.focus.click()
+            highlight = display.inspection.highlight
+            assert highlight is not parent_highlight and parent_highlight not in viewer.layers
+            assert not highlight.editable and highlight.data.sum() == (n.data == 13).sum()
+            for pos in np.argwhere(highlight.data):
+                source = np.rint(n.world_to_data(highlight.data_to_world(pos))).astype(int)
+                assert n.data[tuple(source)] == 13
             assert ui.selection.focus_id == 13 and ui.include.isChecked()
             np.testing.assert_allclose(n.colormap.map(13), (1, 0, 1, 1))
             world = n.data_to_world((2, 0, 2))
@@ -263,6 +275,16 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
             if dimensions == 2:
                 assert viewer.dims.point[0] == pytest.approx(world[0])
             assert viewer.dims.ndisplay == dimensions and len(display.layers) == 2
+            QTest.qWait(100)
+            assert window.viewer_toolbar.set_ndisplay(3 if dimensions == 2 else 2)
+            assert highlight is display.inspection.highlight and not highlight.editable
+            assert window.viewer_toolbar.set_ndisplay(dimensions)
+            QTest.qWait(100)
+            highlighted = canvas.screenshot()
+            highlight.visible = False
+            QTest.qWait(100)
+            assert highlighted != canvas.screenshot()
+            highlight.visible = True
             QTest.qWait(100)
             with_candidates = canvas.screenshot()
             ui.include.setChecked(False)
@@ -278,6 +300,12 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
                 viewer.layers.selection.active = layer
                 assert not window.viewer_toolbar.activate_tool("paint")
                 assert window.mask_selection.selected_mask_id is None
+        ui.focus.click()
+        highlight = display.inspection.highlight
+        viewer.layers.remove(n)
+        assert highlight not in viewer.layers
+        display.show()
+        n, c = display.layers["nuclear"], display.layers["cytoplasmic"]
         ui.isolate.click()
         ui.multiple.setChecked(False)
         ui.next.click()
@@ -286,18 +314,27 @@ def test_explorer_on_embedded_canvas(qapp, tmp_path):
         np.testing.assert_allclose(c.colormap.map(99), (0, 0, 0, 0))
         ui.previous.click()
         ui.candidates.selectRow(3)
+        ui.focus.click()
+        highlight = display.inspection.highlight
         window.set_workflow("proofreading")
+        assert highlight not in viewer.layers
         assert not display.layers and not window.mask_display.suspended
         window.set_workflow("matching")
         assert ui.selection.focus_id == 13 and not ui.restore.isEnabled()
         ui.isolate.click()
+        ui.focus.click()
+        highlight = display.inspection.highlight
         panel.minimum.setText(".9")
+        assert highlight not in viewer.layers
         assert ui.selection is None and not ui.restore.isEnabled() and not display.inspection.appearance
         assert not selected.is_current(state.matching_pair) and not display.inspection.positions
         assert not display.layers["cytoplasmic"].visible
         panel.minimum.setText(".5")
         ui.isolate.click()
+        ui.focus.click()
+        highlight = display.inspection.highlight
         assert window._apply_imported_dataset(dataset)
+        assert highlight not in viewer.layers
         assert ui.selection is None and not display.layers and not display.inspection.appearance
     finally:
         window.close()

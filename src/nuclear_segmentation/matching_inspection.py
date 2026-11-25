@@ -3,7 +3,8 @@ import numpy as np
 from napari.utils.colormaps import DirectLabelColormap
 
 from .automatic_matching import COLORS
-from .mask_selection import selected_bounds
+from .label_geometry import measured_bounds, selected_bounds
+from .mask_selection import INTERNAL_HIGHLIGHT_KEY, bounded_highlight
 
 
 def _point_in_bounds(data, label, low, high):
@@ -19,22 +20,27 @@ def _point_in_bounds(data, label, low, high):
 
 def focus_voxel(data, label, properties):
     """Prefer measured bounds and verify the chosen optical section against geometry."""
-    columns = [f"{edge}_{axis}" for edge in ("min", "max") for axis in "zyx"]
-    if properties is not None and label in properties.index and all(c in properties for c in columns):
-        limits = properties.loc[label, columns].to_numpy(dtype=float)
-        low, high = limits[:3], limits[3:] + 1
-        if np.all((0 <= low) & (low < high) & (high <= data.shape)):
-            point = _point_in_bounds(data, label, low.astype(int), high.astype(int))
-            if point is not None:
-                return point
+    bounds = measured_bounds(properties, label, data.shape)
+    if bounds is not None:
+        point = _point_in_bounds(data, label, *bounds)
+        if point is not None:
+            return point
     bounds = selected_bounds(data, label)
     return _point_in_bounds(data, label, *bounds) if bounds is not None else None
+
+
+def center_on_voxel(viewer, layer, point):
+    world = layer.data_to_world(point)
+    for axis in viewer.dims.not_displayed:
+        viewer.dims.set_point(axis, world[axis])
+    viewer.camera.center = tuple(world[axis] for axis in viewer.dims.displayed)
 
 
 class MatchingInspection:
     def __init__(self, display):
         self.display = display
         self.ui = display.panel.explorer
+        self.highlight = self.focused_selection = None
         self.appearance = {}
         self._shown = None
         self.positions = {}
@@ -50,7 +56,14 @@ class MatchingInspection:
         self.population = None
         self.positions.clear()
 
+    def clear_highlight(self):
+        self.focused_selection = None
+        layer, self.highlight = self.highlight, None
+        if layer is not None and layer in self.display.viewer.layers:
+            self.display.viewer.layers.remove(layer)
+
     def restore(self):
+        self.clear_highlight()
         self._shown = None
         saved, self.appearance = self.appearance, {}
         for layer, (colormap, visible, opacity) in saved.items():
@@ -76,9 +89,13 @@ class MatchingInspection:
         self.update()
 
     def update(self):
+        selection = self.ui.selection
+        if self.highlight is not None and (selection != self.focused_selection or
+                (self.appearance and selection.focus_role == "nuclear"
+                 and selection.focus_id in selection.other_candidate_ids and not self.ui.include.isChecked())):
+            self.clear_highlight()
         if not self.appearance:
             return
-        selection = self.ui.selection
         if selection is None:
             self.restore()
             return
@@ -112,20 +129,32 @@ class MatchingInspection:
             self.positions.clear()
             self.population = selection.population_identity
         key = role, label
+        owner = layer.metadata["source_revision"]
+        properties = self.display.state.sessions[owner.session_id].filtering_result.get("properties")
         if key not in self.positions:
-            owner = layer.metadata["source_revision"]
-            session = self.display.state.sessions[owner.session_id]
-            self.positions[key] = focus_voxel(layer.data, label, session.filtering_result.get("properties"))
+            self.positions[key] = focus_voxel(layer.data, label, properties)
         point = self.positions[key]
         if point is None:
             return
-        world = layer.data_to_world(point)
         viewer = self.display.viewer
-        layer.visible = True
-        if layer.opacity == 0:
-            layer.opacity = .6
-        if viewer.dims.ndisplay == 2:
-            for axis in viewer.dims.not_displayed:
-                viewer.dims.set_point(axis, world[axis])
-        # Camera.center is in displayed-axis order (padded to three coordinates in 2D).
-        viewer.camera.center = tuple(world[axis] for axis in viewer.dims.displayed)
+        self.clear_highlight()
+        bounds = measured_bounds(properties, label, layer.data.shape)
+        if bounds is not None:
+            box = tuple(slice(a, b) for a, b in zip(*bounds))
+            stats = selection.source().statistics
+            counts = stats.nuclear_voxels if role == "nuclear" else stats.cytoplasmic_voxels
+            if np.count_nonzero(layer.data[box] == label) != counts[label]:
+                bounds = None
+        crop, affine = bounded_highlight(layer, label, bounds)
+        crop.setflags(write=False)
+        active = viewer.layers.selection.active
+        self.highlight = viewer.add_labels(
+            crop, affine=affine, units=layer.units, name=f"Matching focus · {role} {label}", opacity=.7,
+            colormap={None: "transparent", 0: "transparent", 1: "#67ffff"},
+            metadata={INTERNAL_HIGHLIGHT_KEY: True},
+        )
+        self.highlight.editable = False
+        self.focused_selection = selection
+        if active in viewer.layers:
+            viewer.layers.selection.active = active
+        center_on_voxel(viewer, layer, point)

@@ -8,6 +8,7 @@ from qtpy.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QLabel, QLineEdit
 
 from .collapsible_section import CollapsibleSection
 from .geometry_edit import GeometryEdit, effective_masks, undo_stack
+from .guided_panel import GuidedPanel
 from .preview_history import PreviewStrokes, ProofreadingShortcuts
 from .ui_icons import icon
 from .runtime import validate_roi_geometry
@@ -53,6 +54,8 @@ class GeometryPanel(CollapsibleSection):
         advanced.addWidget(self.history)
         advanced.addWidget(button("undo", "Undo Last Saved Edit"))
         layout.addWidget(self.advanced)
+        self.guided = GuidedPanel(self)
+        layout.addWidget(self.guided)
         self.transaction_controls = QWidget()
         layout.addWidget(self.transaction_controls)
         layout = QVBoxLayout(self.transaction_controls)
@@ -63,7 +66,7 @@ class GeometryPanel(CollapsibleSection):
         self.scope.addItem("Edit Filtered Masks", True)
         self.scope.addItem("Edit All Masks", False)
         controls.addRow(self.scope)
-        controls.addRow(button("commit", "Save Changes"), button("discard", "Discard Changes"))
+        controls.addRow(button("commit", "Save Geometry Changes"), button("discard", "Discard Changes"))
         self.buttons["commit"].setToolTip("Apply validated mask edits to this session. Save Project writes them to disk.")
         controls.addRow(button("toggle_pause", "Pause Editing"), button("stop", "Stop Editing"))
         layout.addLayout(controls)
@@ -244,7 +247,8 @@ class GeometryPanel(CollapsibleSection):
         for name in ("apply_operation", "cancel_operation"):
             self.buttons[name].setVisible(self.busy and self.edit.pending_source is not None)
             self.buttons[name].setEnabled(bool(available))
-        choosing = available and not self.paused and self.edit.operation == "paint/erase"
+        self.guided.refresh()
+        choosing = available and self.edit.guided_context is None and not self.paused and self.edit.operation == "paint/erase"
         selected = (choosing and self.selected_id is not None and self.layer.visible
                     and self.viewer.layers.selection.active is self.layer)
         for name in ("remove", "split", "add_merge"):
@@ -444,7 +448,10 @@ class GeometryPanel(CollapsibleSection):
     def apply_operation(self):
         self._require_finished_stroke()
         selected = self.edit.parameters.get("retained_id", self.edit.parameters.get("parent"))
+        if self.edit.guided_context is not None:
+            selected = self.edit.parameters["parent_id"] if self.edit.parameters["residual_voxels"] else None
         self.edit.apply_operation()
+        self.guided.remove_reference()
         self.strokes.sync_write_protection()
         self.strokes.clear()
         self.strokes.changed_voxels = self._pending_dirty + self.strokes.step_change(self.edit.steps[-1])
@@ -453,7 +460,9 @@ class GeometryPanel(CollapsibleSection):
     def cancel_operation(self):
         self._require_finished_stroke()
         selected = self.edit.parameters.get("parent", self.selected_id)
+        selected = self.edit.parameters.get("parent_id", selected)
         self.edit.cancel_operation()
+        self.guided.remove_reference()
         self.strokes.sync_write_protection()
         self.strokes.clear()
         self.strokes.changed_voxels = self._pending_dirty
@@ -492,7 +501,7 @@ class GeometryPanel(CollapsibleSection):
         if self.busy:
             owned = self._owns_preview()
             if owned:
-                self.strokes.set_editable(not self.paused and self.layer.visible and self.viewer.dims.ndisplay == 2
+                self.strokes.set_editable(self.edit.guided_context is None and not self.paused and self.layer.visible and self.viewer.dims.ndisplay == 2
                                          and self.brush_id is not None and self.edit.operation in ("split", "paint/erase"))
             else:
                 self.layer.editable = False
@@ -555,13 +564,14 @@ class GeometryPanel(CollapsibleSection):
         self.viewer.layers.selection.active = self.layer
         self.window.viewer_toolbar.activate_tool("review")
 
-    def start(self):
+    def start(self, *, minimum_capacity=0):
         window = self.window
         review = window.context_panel.mask_review_page
         if not window._project_idle() or review._filter_timer.isActive():
             raise ValueError("Wait for the active operation to finish.")
         selected = self._prior_selection()
-        edit = GeometryEdit(self.state, filtered=self.scope.currentData(), track_strokes=True)
+        edit = GeometryEdit(self.state, filtered=self.scope.currentData(), track_strokes=True,
+                            minimum_capacity=minimum_capacity)
         raw = window.segmentation.result_layer
         if raw is None:
             raise ValueError("Restore the segmentation layer before editing.")
@@ -615,6 +625,7 @@ class GeometryPanel(CollapsibleSection):
         self.refresh()
 
     def discard(self):
+        self.guided.remove_reference()
         self.strokes.release_write_protection()
         self.layer.events.brush_size.disconnect(self._sync_size)
         self.layer.events.paint.disconnect(self._painted)

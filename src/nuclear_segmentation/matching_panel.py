@@ -452,8 +452,10 @@ class MatchingDisplay(QObject):
     def _removed(self, event):
         layer = event.value
         role = layer.metadata.get(MATCHING_LAYER)
+        if layer is self.inspection.highlight:
+            self.inspection.clear_highlight()
         if self.layers.get(role) is layer:
-            self.inspection.restore()
+            self.inspection.reset()
             layer.events.visible.disconnect(self._appearance_changed)
             layer.events.opacity.disconnect(self._appearance_changed)
             del self.layers[role]

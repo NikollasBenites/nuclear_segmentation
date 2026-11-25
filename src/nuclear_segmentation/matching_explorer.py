@@ -167,11 +167,12 @@ class AssociationExplorer(QWidget):
             "Nucleus ID", "Automatic class", "Auto-linked cyto ID", "Intersection (voxels)",
             "Intersection (µm³)", "Fraction of nucleus", "Accepted here"))
         self.focus = QPushButton("Focus Selected Object")
+        self.review = QPushButton("Review in Proofreading")
         self.isolate = QPushButton("Isolate Associated Masks")
         self.isolate.setToolTip("Accepted nuclei appear green and the selected cytoplasmic object appears orange.")
         self.include = QCheckBox("Include other overlapping nuclei (magenta)")
         self.restore = QPushButton("Show All Masks")
-        for control in (self.focus, self.isolate, self.include, self.restore):
+        for control in (self.focus, self.review, self.isolate, self.include, self.restore):
             layout.addWidget(control)
 
         self.multiple.toggled.connect(self._filter)
@@ -238,7 +239,7 @@ class AssociationExplorer(QWidget):
     def _controls(self, pos):
         self.previous.setEnabled(pos > 0)
         self.next.setEnabled(0 <= pos < self.objects.model().rowCount() - 1)
-        for control in (self.focus, self.isolate, self.include):
+        for control in (self.focus, self.review, self.isolate, self.include):
             control.setEnabled(pos >= 0)
         self.restore.setEnabled(False)  # The display enables this during isolation.
 

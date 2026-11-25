@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from .guided_split import OPERATION, candidate_records, validate_live_seeds, validate_step
 from .manual_review import mask_signature
 
 
@@ -12,8 +13,23 @@ def effective_masks(result):
     return result["masks"] if edited is None else edited
 
 
+def editing_dtype(source_dtype, minimum_capacity=0):
+    dtype = np.promote_types(source_dtype, np.uint32)
+    if minimum_capacity > int(np.iinfo(dtype).max) and dtype.kind == "u":
+        dtype = np.dtype(np.uint64)
+    if minimum_capacity > int(np.iinfo(dtype).max):
+        raise ValueError(f"Insufficient unused label IDs in the {dtype} editing volume.")
+    return dtype
+
+
+def next_geometry_id(result):
+    previous = (label for record in result.get("edit_history", ()) for label in record["affected_ids"])
+    return 1 + max(int(effective_masks(result).max()), int(result["masks"].max()), max(previous, default=0))
+
+
 def retained_geometry(masks, ids):
     """Materialize a read-only display projection with plane-sized scratch space."""
+    ids = np.asarray(ids, dtype=masks.dtype)
     out = np.zeros_like(masks)
     for z, plane in enumerate(masks):
         np.copyto(out[z], plane, where=np.isin(plane, ids))
@@ -38,7 +54,9 @@ def reconcile_all_mask_edit(record, previous):
 
 def _update_retained(record, kept):
     params = record["parameters"]
-    if record["operation"] == "split" and params["parent"] in kept:
+    if record["operation"] == OPERATION and params["parent_id"] in kept:
+        kept.update(params["child_ids"])
+    elif record["operation"] == "split" and params["parent"] in kept:
         kept.add(params["new_id"])
     elif record["operation"] == "merge":
         members = set(params["ids"])
@@ -96,7 +114,11 @@ def replay_sequence(base, steps, previous, dtype):
                 or not excluded.isdisjoint(np.unique(base.flat[idx]))):
             raise ValueError("Filtered operation touches an excluded object.")
         existed = {i for i in touched if counts.get(i, 0)}
-        if op == "split":
+        if op == OPERATION:
+            if len(steps) != 1:
+                raise ValueError("A guided watershed requires a dedicated transaction.")
+            validate_step(working, step, counts)
+        elif op == "split":
             parent, child = params["parent"], params["new_id"]
             if parent <= 0 or child <= 0 or counts.get(child, 0) or not np.all(before == parent) or not np.all(after == child):
                 raise ValueError("The split must transfer only parent voxels to an unused child ID.")
@@ -146,15 +168,14 @@ def undo_stack(history):
 
 
 class GeometryEdit:
-    def __init__(self, state, *, filtered=False, track_strokes=False):
+    def __init__(self, state, *, filtered=False, track_strokes=False, minimum_capacity=0):
         if not state.segmentation_is_current:
             raise ValueError("Current segmentation is required for editing.")
         self.state = state
         self.owner = state.session_revision()
         result = state.segmentation_result
         self.base = effective_masks(result)
-        previous_ids = (label for record in result.get("edit_history", ()) for label in record["affected_ids"])
-        self.next_id = 1 + max(int(self.base.max()), int(result["masks"].max()), max(previous_ids, default=0))
+        self.next_id = next_geometry_id(result)
         self.filter_record = state.filtering_result if state.filtering_is_current else None
         self.retained_ids = state.proofreading_ids
         if filtered and self.retained_ids is None:
@@ -163,13 +184,15 @@ class GeometryEdit:
         self.steps = []
         self.redo_steps = []
         self.undo_floor = 0
+        self.guided_context = None
+        self.guided_proposal = None
         self.pending_source = None
         self.tracks_strokes = track_strokes
         self._excluded_ids = None
         if filtered:
             self._prepare_filtered_scope()
         source = self.filter_record["filtered_masks"] if filtered and self.filter_record is not None else self.base
-        self.preview = np.array(source, dtype=np.promote_types(self.base.dtype, np.uint32),
+        self.preview = np.array(source, dtype=editing_dtype(self.base.dtype, minimum_capacity),
                                 order="C", copy=True)
         if filtered and self.filter_record is None:
             self._restore_or_hide(self.preview, True)
@@ -213,7 +236,7 @@ class GeometryEdit:
             ids.update(labels)
             if kept is not None:
                 hidden = labels.difference(retained, {0})
-                expected = np.where(np.isin(plane, tuple(hidden)), 0, plane) if hidden else plane
+                expected = np.where(np.isin(plane, np.asarray(tuple(hidden), dtype=plane.dtype)), 0, plane) if hidden else plane
                 if not np.array_equal(kept[z], expected):
                     raise ValueError(error)
         if 0 in retained or not retained.issubset(ids):
@@ -241,7 +264,7 @@ class GeometryEdit:
             yield from self.filter_record["filtered_masks"]
         else:
             for plane in self.base:
-                yield np.where(np.isin(plane, self.retained_ids), plane, 0)
+                yield np.where(np.isin(plane, np.asarray(self.retained_ids, dtype=plane.dtype)), plane, 0)
 
     def allows_label(self, label):
         return not self.filtered or label not in self._excluded_ids
@@ -250,7 +273,7 @@ class GeometryEdit:
         if not self.filter_current:
             raise ValueError("Filtering changed. Discard the preview and start again.")
         visible = self._visible_planes()
-        excluded = self.excluded_ids
+        excluded = np.asarray(self.excluded_ids, dtype=self.preview.dtype)
         for base, kept, preview in zip(self.base, visible, self.preview, strict=True):
             hidden = base != kept
             expected = kept if self.filtered else base
@@ -263,6 +286,8 @@ class GeometryEdit:
     def set_filtered(self, filtered):
         if filtered == self.filtered:
             return
+        if self.guided_context is not None:
+            raise ValueError("Finish the dedicated watershed transaction before editing other geometry.")
         if self.paused or self.operation != "paint/erase":
             raise ValueError("Resume ordinary brush editing before changing scope.")
         if not self.filter_current:
@@ -302,6 +327,8 @@ class GeometryEdit:
         return delta if delta["indexes"].size else None
 
     def _begin(self):
+        if self.guided_context is not None:
+            raise ValueError("Finish the dedicated watershed transaction before editing other geometry.")
         if self.paused or self.operation != "paint/erase":
             raise ValueError("Apply or cancel the pending operation and resume editing first.")
         if self.filtered:
@@ -348,9 +375,42 @@ class GeometryEdit:
         self.operation, self.parameters = "split", dict(parent=parent, new_id=new)
         return new
 
+    def begin_guided(self, selection, proposal):
+        self.require_guided_context(selection)
+        if self.steps or self.redo_steps or not self.is_pristine() or self.guided_context is not None:
+            raise ValueError("Start a fresh geometry transaction for a guided watershed.")
+        if not self.filtered or self.filter_record is None:
+            raise ValueError("A guided watershed requires measured, retained masks.")
+        p = proposal.parameters
+        expected_children = list(range(self.next_id, self.next_id + len(p["seed_ids"])))
+        if p["parent_id"] != selection.cytoplasmic_id or p["child_ids"] != expected_children:
+            raise ValueError("The parent or available child IDs changed. Generate a new proposal.")
+        if expected_children[-1] > int(np.iinfo(self.preview.dtype).max):
+            raise ValueError("Start a preview with sufficient integer label capacity.")
+        self.pending_source = self.filter_record["filtered_masks"]
+        self.guided_context = selection
+        self.guided_proposal = proposal
+        self.operation = OPERATION
+        self.parameters = dict(p, project_id=str(self.owner.project_id),
+                               target_input_revision=self.owner.input_revision,
+                               reference_input_revision=selection.nuclear_revision.input_revision,
+                               reference_session=selection.nuclear_revision.session_id,
+                               target_session=self.owner.session_id,
+                               reference_revision=selection.nuclear_revision.geometry_revision,
+                               target_revision=self.owner.geometry_revision)
+        local = self.preview[proposal.box]
+        parent = local == p["parent_id"]
+        local[parent] = proposal.labels[parent]
+
+    def require_guided_context(self, selection):
+        if (not selection.is_current(self.state.matching_pair) or self.owner != selection.cytoplasmic_revision
+                or self.owner != self.state.session_revision() or not self.selection_current):
+            raise ValueError("Watershed inputs changed. Discard the preview and review a current Matching result.")
+
     def cancel_operation(self):
         if self.pending_source is None:
             raise ValueError("There is no pending operation.")
+        self.guided_context = self.guided_proposal = None
         np.copyto(self.preview, self.pending_source)
         self._finish_operation()
 
@@ -363,7 +423,19 @@ class GeometryEdit:
         if source is None:
             raise ValueError("There is no pending operation.")
         step = delta_between(source, self.preview, self.operation, self.parameters, self.scope)
-        if self.operation == "split":
+        if self.operation == OPERATION:
+            self.require_guided_context(self.guided_context)
+            proposal = self.guided_proposal
+            pair = self.state.matching_pair.capture()
+            candidates = candidate_records(self.guided_context.source(), self.guided_context.cytoplasmic_id)
+            validate_live_seeds(proposal, pair.cytoplasmic.labels, pair.nuclear.labels, candidates,
+                                pair.grid.spacing_zyx_um)
+            local = self.preview[proposal.box]
+            support = proposal.labels != 0
+            if (not np.all(step["before"] == self.parameters["parent_id"])
+                    or not np.array_equal(local[support], proposal.labels[support])):
+                raise ValueError("The read-only watershed preview was modified. Cancel and regenerate it.")
+        elif self.operation == "split":
             parent, child = self.parameters["parent"], self.parameters["new_id"]
             if not step["indexes"].size:
                 raise ValueError("Paint a child region inside the selected parent first.")
@@ -381,6 +453,7 @@ class GeometryEdit:
                     or np.isin(self.preview, sources).any()):
                 raise ValueError("Merge must relabel every source voxel with the selected target ID.")
         self.add_step(step)
+        self.guided_proposal = None
         self._finish_operation()
 
     def replay(self, redo, native=None):
@@ -409,6 +482,10 @@ class GeometryEdit:
             self._validate_scope()
         if self.pending_source is not None:
             raise ValueError(f"Apply or cancel the pending {self.operation} before saving.")
+        if self.guided_context is not None:
+            self.require_guided_context(self.guided_context)
+            if len(self.steps) != 1 or self.steps[0]["operation"] != OPERATION:
+                raise ValueError("Redo the watershed or discard this transaction.")
         steps = self.steps.copy()
         operation, parameters = self.operation, self.parameters
         reviewed = None
@@ -544,8 +621,17 @@ def validate_history(result, session):
                for key in ("indexes", "before", "after")):
             raise ValueError("Invalid voxel data in edit history.")
     undo_stack(history)
+    if any(record["operation"] == OPERATION for record in history):
+        highest = int(result["masks"].max())
+        for record in history:
+            if record["operation"] == OPERATION:
+                children = record["parameters"].get("child_ids")
+                if (not isinstance(children, list) or not children
+                        or any(type(i) is not int or i <= highest for i in children)):
+                    raise ValueError("Watershed child IDs conflict with the original masks or edit history.")
+            highest = max(highest, max(record["affected_ids"], default=0))
     for record in reversed(history):
-        if record["operation"] not in {"merge", "split", "remove", "paint/erase", "undo", "transaction"}:
+        if record["operation"] not in {OPERATION, "merge", "split", "remove", "paint/erase", "undo", "transaction"}:
             raise ValueError("Unknown geometry operation.")
         if datetime.fromisoformat(record["timestamp"]).tzinfo is None:
             raise ValueError("Geometry timestamps require a time zone.")
@@ -569,9 +655,17 @@ def validate_history(result, session):
                 or any(type(label) is not int or label <= 0 for label in previous)
                 or previous != sorted(set(previous)) or not set(previous).issubset(np.unique(masks))):
             raise ValueError("Invalid pre-edit retained IDs in geometry history.")
-        if record["operation"] == "transaction":
-            steps = record.get("steps")
-            if not isinstance(steps, list) or len(steps) < 2:
+        if record["operation"] in ("transaction", OPERATION):
+            if record["operation"] == OPERATION:
+                p = record["parameters"]
+                if (record.get("editing_scope") != "filtered" or previous is None or p.get("parent_id") not in previous
+                        or p.get("target_session") != record["session_id"] or p.get("target_revision") != revision - 1
+                        or not isinstance(p.get("reference_session"), str)
+                        or p["reference_session"] == record["session_id"]
+                        or type(p.get("reference_revision")) is not int or p["reference_revision"] < 0):
+                    raise ValueError("Invalid watershed source or target revision.")
+            steps = record.get("steps", [record])
+            if not isinstance(steps, list) or len(steps) < (2 if record["operation"] == "transaction" else 1):
                 raise ValueError("Missing ordered geometry operations.")
             try:
                 verified, expected, affected = replay_sequence(masks, steps, previous, masks.dtype)
@@ -588,7 +682,7 @@ def validate_history(result, session):
         elif previous is not None and record["operation"] != "undo":
             if record["editing_scope"] == "filtered":
                 expected = sorted(set(previous).difference(record["removed_ids"]) | set(record["new_ids"]))
-                if not np.isin(record["before"], [0, *previous]).all():
+                if not np.isin(record["before"], np.asarray([0, *previous], dtype=masks.dtype)).all():
                     raise ValueError("Filtered history modifies an excluded object.")
             else:
                 expected = reconcile_all_mask_edit(record, previous)

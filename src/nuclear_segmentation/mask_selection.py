@@ -4,30 +4,38 @@ from __future__ import annotations
 import numpy as np
 from qtpy.QtCore import QObject, Signal
 
+from .label_geometry import selected_bounds
 from .matching_pair import MATCHING_LAYER
 
 
 INTERNAL_HIGHLIGHT_KEY = "nucytoseg_selection_highlight"
 
 
-def selected_bounds(data, selected: int):
-    """Half-open bounds of a label, using at most one plane of coordinates."""
-    if data.ndim == 2:
-        coordinates = np.argwhere(data == selected)
-        if coordinates.size == 0:
-            return None
-        return coordinates.min(axis=0), coordinates.max(axis=0) + 1
-    minimum = np.full(data.ndim, np.iinfo(np.int64).max, dtype=int)
-    maximum = np.full(data.ndim, -1, dtype=int)
-    for index in range(data.shape[0]):
-        coordinates = np.argwhere(data[index] == selected)
-        if coordinates.size == 0:
-            continue
-        local_min = np.concatenate(([index], coordinates.min(axis=0)))
-        local_max = np.concatenate(([index + 1], coordinates.max(axis=0) + 1))
-        minimum = np.minimum(minimum, local_min)
-        maximum = np.maximum(maximum, local_max)
-    return None if maximum[0] < 0 else (minimum, maximum)
+def bounded_highlight(layer, selected, bounds=None):
+    """Return a padded binary crop and its local-to-world transform."""
+    data = layer.data[0] if layer.multiscale else layer.data
+    if bounds is None:
+        bounds = selected_bounds(data, selected)
+    if bounds is None:
+        return
+    minimum, maximum = bounds
+    slices = tuple(slice(int(low), int(high)) for low, high in zip(minimum, maximum))
+    crop = np.pad((np.asarray(data[slices]) == selected).astype(np.uint8), 1)
+    start = minimum.astype(float) - 1
+    origin = np.asarray(layer.data_to_world(start), dtype=float)
+    ndim = data.ndim
+    identity = np.eye(ndim)
+    linear = np.column_stack(
+        [
+            np.asarray(layer.data_to_world(start + identity[axis]), dtype=float)
+            - origin
+            for axis in range(ndim)
+        ]
+    )
+    affine = np.eye(ndim + 1)
+    affine[:ndim, :ndim] = linear
+    affine[:ndim, -1] = origin
+    return crop, affine
 
 
 class MaskSelectionController(QObject):
@@ -221,27 +229,10 @@ class MaskSelectionController(QObject):
 
     def _update_highlight(self, layer, selected: int) -> None:
         self._remove_highlight()
-        data = layer.data[0] if layer.multiscale else layer.data
-        bounds = selected_bounds(data, selected)
-        if bounds is None:
+        geometry = bounded_highlight(layer, selected)
+        if geometry is None:
             return
-        minimum, maximum = bounds
-        slices = tuple(slice(int(low), int(high)) for low, high in zip(minimum, maximum))
-        crop = np.pad((np.asarray(data[slices]) == selected).astype(np.uint8), 1)
-        start = minimum.astype(float) - 1
-        origin = np.asarray(layer.data_to_world(start), dtype=float)
-        ndim = data.ndim
-        identity = np.eye(ndim)
-        linear = np.column_stack(
-            [
-                np.asarray(layer.data_to_world(start + identity[axis]), dtype=float)
-                - origin
-                for axis in range(ndim)
-            ]
-        )
-        affine = np.eye(ndim + 1)
-        affine[:ndim, :ndim] = linear
-        affine[:ndim, -1] = origin
+        crop, affine = geometry
         active = self.viewer.layers.selection.active
         self._updating_overlay = True
         try:

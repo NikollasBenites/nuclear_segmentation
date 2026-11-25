@@ -271,6 +271,7 @@ class DesktopWindow(QMainWindow):
         self.embedding.viewer.dims.events.current_step.connect(self._update_z_status)
         self._create_actions()
         self.geometry_panel = GeometryPanel(self, review_panel)
+        self.context_panel.matching_page.explorer.review.clicked.connect(self.geometry_panel.guided.handoff)
         self.mask_context_menu = MaskContextMenu(self)
         self.mask_selection.selection_changed.connect(self._mask_selection_changed)
         self.segmentation.conflict_operations += (self.geometry_panel,)
@@ -609,6 +610,9 @@ class DesktopWindow(QMainWindow):
         label.setToolTip(str(path or ""))
 
     def _project_idle(self):
+        if self.geometry_panel.guided.worker is not None:
+            self.statusBar().showMessage("Wait for the watershed calculation to finish.", 5000)
+            return False
         if self.geometry_panel.busy:
             self.statusBar().showMessage("Save or discard the active mask preview first.", 5000)
             return False
@@ -1429,6 +1433,8 @@ class DesktopWindow(QMainWindow):
             return
         self.navigation.set_workflow(key)
         key = self.navigation.current_workflow
+        if key != "proofreading":
+            self.geometry_panel.guided.clear_context()
         self.matching_display.set_active(key == "matching")
         self.context_panel.set_workflow(key, self.navigation.current_subpage)
         self.context_title.setText(self.context_panel.workflow_title)
@@ -1642,7 +1648,8 @@ class DesktopWindow(QMainWindow):
             controls.setFixedHeight(min(72 + extra // 2, controls.widget().sizeHint().height()))
 
     def closeEvent(self, event) -> None:
-        if self.matching_display.execution.busy or self.geometry_panel.busy or self._project_job is not None:
+        if (self.matching_display.execution.busy or self.geometry_panel.busy
+                or self.geometry_panel.guided.worker is not None or self._project_job is not None):
             self.statusBar().showMessage("Finish the active operation before closing.", 5000)
             event.ignore()
             return

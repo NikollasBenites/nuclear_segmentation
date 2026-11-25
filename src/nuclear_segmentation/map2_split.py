@@ -3,7 +3,7 @@ import copy
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
-from scipy import ndimage as ndi
+from .watershed import partition
 from .manual_review import mask_signature
 
 
@@ -84,22 +84,12 @@ class SplitMixin:
         box=tuple(slice(int(v.min()),int(v.max())+1) for v in locations)
         local=target[box];nuclei=self.dapi[box]
         children={d:last+i+1 for i,d in enumerate(partners)}
-        seeds=np.zeros(local.shape,np.uint32)
-        for d,child in children.items():
-            overlap=local & (nuclei==d)
-            if not overlap.any():raise ValueError(f'DAPI {d} does not overlap this MAP2. Correct the association before splitting.')
-            seeds[overlap]=child
-        components,n=ndi.label(local)
-        unseeded_components=[]
-        for c in range(1,n+1):
-            if not ((components==c)&(seeds>0)).any():
-                unseeded_components.append(c)
-        from skimage.segmentation import watershed
-        distance=ndi.distance_transform_edt(local,sampling=self.spacing)
-        proposal=watershed(-distance,markers=seeds,mask=local)
-        # A one-seed component remains whole under that seed's child ID.
-        # Seedless components keep the parent ID; no material is discarded.
-        residual=np.isin(components,unseeded_components) & local
+        seeds=np.zeros(local.shape,np.int32)
+        for marker,d in enumerate(partners,1):
+            seeds[local & (nuclei==d)]=marker
+        regions,residual_components=partition(local,seeds,self.spacing)
+        residual=local & (regions==0)
+        proposal=np.asarray([0,*children.values()],dtype=np.uint32)[regions]
         proposal[residual]=parent
         data=np.zeros(self.map2.shape,np.uint32);data[box]=proposal
         return dict(parent=parent,children=children,data=data,
@@ -107,7 +97,7 @@ class SplitMixin:
                     source_signature=mask_signature(self.map2),
                     partners=partners,seed_min_fraction=float(seed_min_fraction),overlaps=overlaps,
                     residual_voxels=int(residual.sum()),
-                    residual_components=len(unseeded_components),
+                    residual_components=int(residual_components),
                     records_snapshot=copy.deepcopy(self.records))
 
     def accept_split(self, preview, edited_data):

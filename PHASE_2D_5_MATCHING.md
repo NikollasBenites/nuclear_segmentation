@@ -167,7 +167,7 @@ The explorer uses the two embedded, read-only matching layers. Ordinary mask sel
 
 ### Proofreading handoff for Phase 2D.5.4
 
-The explorer constructs an immutable `AssociationSelection` from a published result. It carries a weak reference to that result, the pair population identity, both session revisions (including project, session and geometry IDs), the cytoplasmic ID, accepted nuclear IDs, other candidate IDs and the focused role and label. At a future explicit watershed request, Proofreading can capture the selection and call `selection.is_current(state.matching_pair)` before opening its preview. It should resolve the two source geometries from the captured owners and revalidate them before committing any future edit. The candidate table supplies measured intersections. Seed eligibility, splitting, manual association decisions and transactions belong to their respective future phases.
+The explorer constructs an immutable `AssociationSelection` from a published result. It carries a weak reference to that result, the pair population identity, both session revisions (including project, session and geometry IDs), the cytoplasmic ID, accepted nuclear IDs, other candidate IDs and the focused role and label. Phase 2D.5.4 uses this context for the explicit **Review in Proofreading** action described below.
 
 ### Matching graphs
 
@@ -222,4 +222,59 @@ The canvas test checks rendered differences with and without overlapping candida
 5. Open **Show Matching Graphs**. Inspect the six plots, including common volume bins, ECDF ties, zero-link objects, the NO_MATCH origin and executed thresholds. Start a threshold rerun, switch to Quality Control and confirm automatic refresh. Rename a selected session and modify an unrelated session. Check that current graphs persist.
 6. Invalidate source measurements with Matching hidden. Check the QC recovery message and restoration after compatible recalculation. Close the graph window, rerun, reopen and check the new settings. Test zero nuclei, zero cytoplasmic objects, both empty, a single class and a valid pair without multiple associations.
 
-Native macOS validation of Phase 2D.5.3 is pending.
+The developer validated all nine Phase 2D.5.3 checks on native macOS at `7a6be0a78dd24c7bbc1eec9b3bb5b85d16c126b8`. The Multiple Association Explorer, candidate inspection, sorting and navigation, calibrated focus, isolation and restoration, inspection lifecycle, automatic QC graphs, graph refresh and recovery, and empty populations and project reset all passed.
+
+## Phase 2D.5.4 · Focus highlight and nuclear-guided watershed
+
+### Inspect and hand off a parent
+
+**Focus Selected Object** highlights the selected cytoplasmic parent or nuclear candidate in cyan. A padded binary crop follows the source layer's data-to-world transform, including the acquisition crop offset and physical ZYX spacing. It provides the same read-only emphasis on a 2D section and on a rotated 3D view. The classification colormap, ordinary masks, their opacity and the active scientific session retain their settings. Only one Matching highlight exists. Changing the focused object, restoring all masks, removing an input layer, leaving Matching, replacing the project or losing the current result withdraws it. Turning off other candidates during isolation also withdraws a highlight on one of those candidates.
+
+**Review in Proofreading** selects the inspected parent even when the candidate table has focus. It verifies the immutable association selection against the published result, current project, acquisition grid, source session revisions and retained populations. The existing session switch selects the cytoplasmic target. Proofreading opens at an occupied voxel of the parent with the retained mask selected. Geometry editing starts only when the user requests an edit or a watershed preview. A busy project, pending filter change, active editor or obsolete selection blocks the handoff.
+
+### Read the candidate evidence
+
+The contextual **Nuclear-guided Watershed** section identifies both sessions and the parent. Each candidate has a positive intersection with that parent. Its row shows the nuclear ID, automatic classification, intersection and complete nuclear voxel counts, their ratio and seed eligibility. The ratio includes the entire retained nuclear object on the working grid. This also includes candidates classified as ambiguous or automatically linked to another parent.
+
+The minimum seed overlap fraction starts at **0.50**. Every candidate with fraction ≥ the entered value qualifies. The threshold must be finite and greater than zero and at most one. A preview needs two or more qualifying nuclei. Changing this field affects the proposed partition only. The automatic classifier retains its own thresholds.
+
+### Partition and conservation
+
+The generic core in `watershed.py` accepts a 3D Boolean target support, integer markers and physical spacing. Both the integrated proposal and the legacy adapter use it. Inside the complete parent's tight bounding box, each qualifying intersection supplies a compact positive marker. The elevation is the negative Euclidean distance transform of the parent support, sampled with calibrated Z, Y and X spacing in µm. Watershed uses face connectivity and the parent as its mask. The output maps compact regions to exact integer child IDs allocated above the current, original and historical target labels, including excluded IDs.
+
+A connected component with a single seed belongs to its child. Each seed voxel stays in its corresponding child. Seedless components keep the parent ID and require further inspection. The preview reports their component count, voxel count and volume. With no residual the parent ID disappears. Parent volume equals the sum of child volumes plus residual volume. Each volume is its integer voxel count multiplied by Z × Y × X spacing in µm³. Raw Cellpose geometry, the reference segmentation and voxels outside the parent retain their original values.
+
+### Preview, Apply and Save
+
+**Preview Watershed** captures the retained pair and calculates the proposal in a Qt worker. Publication rechecks the handoff and discards an obsolete completion. The embedded editing viewer shows proposed children and a separately switchable nuclear reference containing the qualifying seed voxels with their scientific IDs. The panel lists the nucleus-to-child mapping. Use 2D or 3D and toggle **Show nuclear seed voxels** to examine the boundaries underneath.
+
+The guided preview uses a dedicated filtered transaction with read-only geometry. **Cancel Operation** restores the pre-operation working masks. **Apply Operation** checks the live reference and target, accepts one sparse step and enables preview Undo and Redo. **Discard Changes** exits without a committed revision. **Save Geometry Changes** checks the source context again, replays the accepted change and commits one target-session revision. Other structural operations and brush edits require a separate transaction. The existing manual split, merge and brush paths remain available for ordinary proofreading.
+
+The commit invalidates the target's measurements and downstream quantification through the existing geometry dependency rules. It withdraws the affected Matching result, overlap cache, explorer, classification colors and QC data. The existing automatic recalculation option can schedule target measurements after saving. Once both measured populations are compatible, return to Matching and run the classifier again. The seed-to-child mapping records how the geometry was made. Association decisions continue to come from the automatic classifier.
+
+### History, checkpoint and memory contract
+
+A single `nuclear_guided_watershed` record contains the sparse changed indexes, before/after labels, retained population changes, signatures of the complete source and resulting target geometry, timestamp and revision. Its parameters identify the generating project, source and target sessions and revisions, parent, candidates and complete-object fractions, threshold, ordered seed and child IDs, spacing, method, bounds, voxel counts and volumes. The manual refinement flag is false. Native checkpoints retain the existing representation for all earlier operations. Older applications reject histories containing the new operation type.
+
+At Apply, the live pair verifies full-object denominators and actual seed locations. The record encodes each seed intersection as runs of local C-order voxel indexes. Replay can verify those recorded locations belong to their recorded children, only parent voxels move to unused IDs, component membership and volume accounting hold, and the sparse delta reproduces the target signature and retained IDs. Historical candidate statistics describe the source at acceptance. Reopening a checkpoint does not recompute historical measurements from today's nuclear session. Committed Undo uses the existing reverse delta. A mixed transaction containing a guided step is invalid.
+
+The EDT, markers, component labels, seed overlay and proposed child array use the parent box. Measured bounds are checked against the parent count, with a plane-by-plane fallback. Focus uses a padded object crop. The existing geometry editor still needs its working preview and commit/replay volume. The filtered source supplies the cancel snapshot. Checkpoint history grows with changed voxels and seed runs. A parent spanning most of an acquisition can still require nearly full-grid working memory. Unsigned editing labels can widen to uint64 when the child allocation exceeds uint32. Exhausted supported integer ranges produce a capacity error.
+
+### Linux regression results for Phase 2D.5.4
+
+**224 distinct tests passed** with PyQt6 6.11.0, napari 0.10.0, scikit-image 0.26.0 and an Xorg OpenGL display. The combined run passed 220 tests across guided splitting, Matching, geometry editing, protected brushes, mask review, the desktop shell, session validity, legacy watershed and native projects. The four live-plot tests passed in a separate process. An earlier combined run missed one live-plot debounce deadline. Its assertions passed on the isolated rerun.
+
+The real-canvas checks compare rendered images with the focus or seed layer visible and hidden, including a dimensionality switch with focus active. Synthetic tests cover calibrated EDT against an independent watershed calculation, exact-threshold candidates, seedless components, stale worker publication and transaction rejection, and sparse IDs above 2³² and 2⁶³. A native project save/reopen test changes the reference geometry after the guided commit and verifies target replay and committed Undo.
+
+### Focused native macOS validation for Phase 2D.5.4
+
+1. On a calibrated crop, focus the parent and then two nuclear candidates with classification colors on. Check the occupied section, XY offset, cyan highlight, ordinary opacity and active session. Switch 2D → 3D → 2D while focused. Repeat during isolation.
+2. Change row, remove an input overlay, leave Matching, invalidate the result and replace the project in separate trials. Check that each obsolete highlight disappears. Restore the pair and focus again.
+3. Starting with the nuclear session active and a candidate selected, choose **Review in Proofreading**. Check the cytoplasmic session, parent ID, camera focus and idle editor. Try a stale or busy handoff and read the recovery message.
+4. Inspect a parent with accepted and other overlapping candidates. Compare complete nuclear counts and the exact threshold boundary. Raise the seed threshold until fewer than two qualify. Check that the automatic settings and result stay current.
+5. Preview an anisotropic parent with multiple seeds, a disconnected one-seed component and a seedless component. Toggle the nuclear reference in 2D and 3D. Check seed positions, child IDs and residual counts and volumes against the reference mask.
+6. Try to paint the preview. Cancel, regenerate, Apply, Undo, Redo and Discard. Compare the working and committed masks at each step. Repeat and save with automatic recalculation off, then on.
+7. On commit, verify the original Cellpose masks, nuclear session, unrelated sessions and excluded objects. Inspect the target's provisional population and the withdrawn Matching results. Recalculate and rerun Matching.
+8. Save Project, quit and reopen after a guided commit. Check child and residual volumes, ordered history, seed mapping and Undo of the saved geometry. Repeat after an independent nuclear geometry change. Open an older native checkpoint.
+
+Native macOS sign-off for Phase 2D.5.4 is pending. Controlled painting of watershed children, manual seed selection, general user-seeded workflows, manual association decisions, association persistence, matched density and final matching exports remain deferred.

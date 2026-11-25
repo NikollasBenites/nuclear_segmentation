@@ -359,7 +359,7 @@ class SegmentationController(QObject):
             data = retained_geometry(masks, ids)
             data.setflags(write=True)
             before = record["before"]
-            data.flat[record["indexes"]] = np.where(np.isin(before, ids), before, 0)
+            data.flat[record["indexes"]] = np.where(np.isin(before, np.asarray(ids, dtype=masks.dtype)), before, 0)
             data.setflags(write=False)
             title = "Filtered — Before Editing (Historical)"
             metadata = {"nucytoseg_before_editing": True, "source_geometry_revision": record["source_revision"]}
